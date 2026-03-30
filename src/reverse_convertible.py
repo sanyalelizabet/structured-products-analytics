@@ -3,20 +3,8 @@ import numpy as np
 
 
 class ReverseConvertible:
-    """
-    Payoff analytics for single-name and multi-name reverse convertibles
-    under a user-defined scenario of final underlying moves.
 
-    Parameters
-    ----------
-    row : pandas.Series
-        Product data row from the portfolio DataFrame.
-    final_levels : list[float]
-        Scenario shocks in percent for each underlying, applied to current spot.
-        Example: [-10, 5, 0] means -10%, +5%, 0%.
-    """
-
-    def __init__(self, row, final_levels):
+    def __init__(self, row, final_levels=None):
         self.row = row
         
         # Basic inputs
@@ -33,6 +21,9 @@ class ReverseConvertible:
         self.initial_levels = row["initial_levels"]
         self.strike_levels = row["strike"]
         self.current_spots = row["current_spots"]
+        
+        if final_levels is None:
+            final_levels = [0.0] * len(self.current_spots)
 
         if len(final_levels) != len(self.current_spots):
             raise ValueError("Scenario length must match number of underlyings.")
