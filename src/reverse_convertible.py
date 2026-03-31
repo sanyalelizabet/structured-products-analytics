@@ -69,7 +69,7 @@ class ReverseConvertible:
     def barrier_breaches_final(self):
         """
         European barrier observation at final fixing.
-        Barrier level = strike * barrier_pct
+        Barrier level = strike
         """
         return [
             final <= strike

@@ -1,7 +1,3 @@
-import pandas as pd
-import numpy as np
-from reverse_convertible import ReverseConvertible
-
 class ScenarioEngine:
 
     def __init__(self, portfolio, beta_map, scenarios):
@@ -72,3 +68,23 @@ class ScenarioEngine:
             "product_df": product_df,
             "portfolio_summary": portfolio_summary
         }
+    
+    def run_all(self):
+    product_results = []
+    portfolio_results = []
+
+    for shock in self.scenarios:
+        res = self.run(shock)
+
+        df = res["product_df"]
+        summary = res["portfolio_summary"]
+
+        df["market_shock"] = shock
+        product_results.append(df)
+
+        portfolio_results.append(summary)
+
+    return {
+        "product_scenarios": pd.concat(product_results, ignore_index=True),
+        "portfolio_scenarios": pd.concat(portfolio_results, ignore_index=True)
+    }
