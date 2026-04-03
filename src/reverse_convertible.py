@@ -149,12 +149,17 @@ class ReverseConvertible:
             idx = np.argmin(self.performances())
             return self.underlyings[idx]
         return self.underlyings[0]
-    
     def summary(self):
+        maturity = datetime.strptime(self.row["maturity_date"], "%Y-%m-%d")
+        today = datetime.today()
+        days_to_expiry = (maturity - today).days
+
         return {
             "product_type": self.product_type,
             "is_multi": self.is_multi(),
-            "performance": self.performance()-1,
+            "maturity_date": self.row["maturity_date"],
+            "days_to_expiry": days_to_expiry,
+            "performance": self.performance() - 1,
             "barrier_breached": self.barrier_breached(),
             "worst_underlying": self.worst_underlying(),
             "payoff_per_unit": self.payoff_per_unit(),
@@ -166,3 +171,4 @@ class ReverseConvertible:
             "distance_to_barrier": self.distance_to_barrier(),
             "break_even": self.break_even()
         }
+    

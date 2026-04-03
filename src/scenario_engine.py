@@ -69,7 +69,7 @@ class ScenarioEngine:
             "portfolio_summary": portfolio_summary
         }
     
-    def run_all(self):
+def run_all(self):
     product_results = []
     portfolio_results = []
 
