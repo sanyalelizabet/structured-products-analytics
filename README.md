@@ -1,4 +1,4 @@
-# 📊 Structured Products Analytics
+# Structured Products Analytics
 
 This repository contains a growing set of tools and models for analyzing structured products, with a focus on reverse convertibles and multi-asset structures.
 
@@ -6,11 +6,10 @@ The project is designed to build a modular analytics framework combining product
 
 ---
 
-## 📸 Example Dashboard
+## Dashboard
 
 ![Dashboard](figures/dashboard.png)
 
-A  Streamlit-based interface is included to demonstrate how product analytics can be visualized and explored.
 
 ---
 
@@ -27,7 +26,7 @@ A  Streamlit-based interface is included to demonstrate how product analytics ca
 
 ---
 
-## 🧠 Approach
+## Approach
 
 Products are modeled through a dedicated class structure, enabling:
 
