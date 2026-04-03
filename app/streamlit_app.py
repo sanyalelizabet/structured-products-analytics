@@ -8,10 +8,22 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from src.reverse_convertible import ReverseConvertible
+from src.portfolio_analytics import PortfolioAnalytics
 
 st.set_page_config(page_title="Structured Products Dashboard", layout="wide")
 st.title("Structured Products Analytics")
 
+if "view" not in st.session_state:
+    st.session_state.view = "product"
+col1, col2 = st.columns(2)
+
+with col1:
+    if st.button("Product View"):
+        st.session_state.view = "product"
+
+with col2:
+    if st.button("Portfolio View"):
+        st.session_state.view = "portfolio"
 # =========================
 # Portfolio Input
 # =========================
@@ -118,77 +130,129 @@ overview_cols = [
     "maturity_date"
 ]
 
-st.subheader("Portfolio Overview")
-st.dataframe(portfolio[overview_cols], use_container_width=True)
+if st.session_state.view == "product":
+    st.subheader("Portfolio Overview")
+    st.dataframe(portfolio[overview_cols], use_container_width=True)
 
 # =========================
 # Product Selection
 # =========================
 
-selected_product = st.selectbox(
-    "Select product",
-    portfolio["product_id"].tolist()
-)
+    selected_product = st.selectbox(
+        "Select product",
+        portfolio["product_id"].tolist()
+    )
 
-row = df[df["product_id"] == selected_product].iloc[0]
+    row = df[df["product_id"] == selected_product].iloc[0]
 
 
-df_display = df[
-    [
-        "product_id",
-        "maturity_date",
-        "days_to_expiry",
-        "product_type",
-        "total_payoff",
-        "total_cost",
-        "break_even",
-        "return_pa",
-        "return_pct",
-        "distance_to_barrier"
+    df_display = df[
+        [
+            "product_id",
+            "maturity_date",
+            "days_to_expiry",
+            "product_type",
+            "total_payoff",
+            "total_cost",
+            "break_even",
+            "return_pa",
+            "return_pct",
+            "distance_to_barrier"
+        ]
     ]
-]
 
-df_display = df_display.rename(columns={
-    "product_id": "Product ID",
-    "maturity_date": "Maturity Date",
-    "days_to_expiry": "Days to Expiry",
-    "product_type": "Product Type",
-    "total_payoff": "Total Payoff",
-    "total_cost": "Total Cost",
-    "break_even": "Break-even",
-    "return_pa": "Return p.a. (%)",
-    "return_pct": "Return (%)",
-    "distance_to_barrier": "Distance to Barrier (%)"
-})
-row_selected = df_display[df_display["Product ID"] == selected_product].iloc[0]
-
+    df_display = df_display.rename(columns={
+        "product_id": "Product ID",
+        "maturity_date": "Maturity Date",
+        "days_to_expiry": "Days to Expiry",
+        "product_type": "Product Type",
+        "total_payoff": "Total Payoff",
+        "total_cost": "Total Cost",
+        "break_even": "Break-even",
+        "return_pa": "Return p.a. (%)",
+        "return_pct": "Return (%)",
+        "distance_to_barrier": "Distance to Barrier (%)"
+    })
+    row_selected = df_display[df_display["Product ID"] == selected_product].iloc[0]
 
 
-st.subheader("Key Metrics")
 
-col1, col2, col3 = st.columns(3)
-col1.metric("P&L", f"{row['pnl']:.2f}")
-col2.metric("Total Payoff", f"{row['total_payoff']:.2f}")
-col3.metric("Days to Expiry", f"{int(row['days_to_expiry'])}")
+    st.subheader("Key Metrics")
 
-col4, col5, col6 = st.columns(3)
-col4.metric("Return p.a. (%)", f"{row['return_pa']:.2f}")
-col5.metric("Distance to Barrier (%)", f"{row['distance_to_barrier']:.2f}")
-col6.metric("Worst Underlying", row["worst_underlying"])
+    col1, col2, col3 = st.columns(3)
+    col1.metric("P&L", f"{row['pnl']:.2f}")
+    col2.metric("Total Payoff", f"{row['total_payoff']:.2f}")
+    col3.metric("Days to Expiry", f"{int(row['days_to_expiry'])}")
+
+    col4, col5, col6 = st.columns(3)
+    col4.metric("Return p.a. (%)", f"{row['return_pa']:.2f}")
+    col5.metric("Distance to Barrier (%)", f"{row['distance_to_barrier']:.2f}")
+    col6.metric("Worst Underlying", row["worst_underlying"])
 
 # =========================
 # Detailed Table
 # =========================
 
-st.subheader("Product Detail")
+    st.subheader("Product Detail")
 
-detail = pd.DataFrame({
-    "Metric": row_selected.index,
-    "Value": row_selected.values
-})
+    detail = pd.DataFrame({
+        "Metric": row_selected.index,
+        "Value": row_selected.values
+    })
 
-detail["Value"] = detail["Value"].apply(
-    lambda x: round(float(x), 2) if isinstance(x, (int, float, np.floating)) else x
-)
+    detail["Value"] = detail["Value"].apply(
+        lambda x: round(float(x), 2) if isinstance(x, (int, float, np.floating)) else x
+    )
 
-st.table(detail)
+    st.table(detail)
+elif st.session_state.view == "portfolio":
+
+    st.subheader("Portfolio Analytics")
+
+    analytics = PortfolioAnalytics(portfolio)
+    analytics.build_product_analytics()
+
+    st.write("### Portfolio Overview")
+    portfolio_overview = analytics.total_portfolio_table().copy()
+    portfolio_overview = portfolio_overview.round(2)
+
+    st.dataframe(portfolio_overview, width=1400)
+
+    st.write("### Product Analytics")
+
+    product_table = analytics.product_df[
+        [
+            "product_id",
+            "maturity_date",
+            "product_type",
+            "underlyings",
+            "notional",
+            "total_payoff",
+            "total_cost",
+            "break_even",
+            "return_pa",
+            "return_pct",
+            "distance_to_barrier"
+        ]
+    ].copy()
+
+    product_table = product_table.round(2)
+
+    
+    st.dataframe(product_table, width=1400)
+
+    st.write("### Underlying Exposure")
+
+    underlying_table = analytics.underlying_lookthrough().copy()
+    underlying_table = underlying_table.round(2)
+
+    
+    st.dataframe(underlying_table, width=1400)
+
+    st.write("### Maturity Profile")
+
+    maturity_table = analytics.maturity_profile().copy()
+    maturity_table = maturity_table.round(2)
+
+    
+    st.dataframe(maturity_table, width=1400)
