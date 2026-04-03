@@ -5,6 +5,9 @@ This repository contains a growing set of tools and models for analyzing structu
 The project is designed to build a modular analytics framework combining product-level valuation, portfolio insights, and scenario-based risk analysis.
 
 ---
+## Live App
+
+[Open the dashboard](https://strukis.streamlit.app/)
 
 ## Dashboard
 
