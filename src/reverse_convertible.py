@@ -99,14 +99,14 @@ class ReverseConvertible:
         T_total = self.total_product_time()
         return self.notional * self.coupon * T_total
     
-    def payoff_per_unit(self):
+    def payoff(self):
         return self.redemption() + self.coupon_payment()
     
     def total_payoff(self):
-        return self.payoff_per_unit() * self.position_units
+        return self.payoff()
     
     def total_cost(self):
-        return self.position_units * self.notional * self.cost_price
+        return self.notional * self.cost_price
     
     def pnl(self):
         return self.total_payoff() - self.total_cost()
@@ -162,7 +162,7 @@ class ReverseConvertible:
             "performance": self.performance() - 1,
             "barrier_breached": self.barrier_breached(),
             "worst_underlying": self.worst_underlying(),
-            "payoff_per_unit": self.payoff_per_unit(),
+            "payoff_per_unit": self.payoff()/self.position_units,
             "total_payoff": self.total_payoff(),
             "total_cost": self.total_cost(),
             "pnl": self.pnl(),
