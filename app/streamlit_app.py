@@ -213,10 +213,15 @@ elif st.session_state.view == "portfolio":
     analytics.build_product_analytics()
 
     st.write("### Portfolio Overview")
-    portfolio_overview = analytics.total_portfolio_table().copy()
-    portfolio_overview = portfolio_overview.round(2)
+    portfolio_overview = analytics.total_portfolio_metrics()
 
-    st.dataframe(portfolio_overview, width=1400)
+
+    col1, col2, col3, col4 = st.columns(4)  
+
+    col1.metric("Total PnL", f"{portfolio_overview['total_pnl']:.2f}")
+    col2.metric("Return (%)", f"{portfolio_overview['portfolio_return_pct']*100:.2f}")
+    col3.metric("Total Notional", f"{portfolio_overview['total_notional']:.2f}")
+    col4.metric("# Products", portfolio_overview["total_products"])
 
     st.write("### Product Analytics")
 

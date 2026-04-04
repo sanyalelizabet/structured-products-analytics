@@ -6,8 +6,9 @@ from src.reverse_convertible import ReverseConvertible
 
 class PortfolioAnalytics:
 
-    def __init__(self, portfolio: pd.DataFrame):
+    def __init__(self, portfolio: pd.DataFrame, reference_currency: str = "CHF"):
         self.portfolio = portfolio
+        self.reference_currency = reference_currency
         self.product_df = None
 
     # =========================
