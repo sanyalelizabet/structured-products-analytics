@@ -9,13 +9,14 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from src.reverse_convertible import ReverseConvertible
 from src.portfolio_analytics import PortfolioAnalytics
+from src.scenario_engine import ScenarioEngine
 
 st.set_page_config(page_title="Structured Products Dashboard", layout="wide")
 st.title("Structured Products Analytics")
 
 if "view" not in st.session_state:
     st.session_state.view = "product"
-col1, col2 = st.columns(2)
+col1, col2, col3 = st.columns(3)
 
 with col1:
     if st.button("Product View"):
@@ -24,6 +25,10 @@ with col1:
 with col2:
     if st.button("Portfolio View"):
         st.session_state.view = "portfolio"
+        
+with col3:
+    if st.button("Stress Testing"):
+        st.session_state.view = "stress"
 # =========================
 # Portfolio Input
 # =========================
@@ -112,6 +117,24 @@ p4 = {
     "initial_fixing_date": "2025-10-02",
     "maturity_date": "2026-10-09",
     "barrier_breached": False
+}
+
+beta_map = {
+    "CH0432492467": 1.0,   # ALCON
+    "CH0012221716": 1.1,   # ABB
+    "CH0012214059": 0.9,   # HOLCIM
+    "CH0012005267": 0.8,   # NOVARTIS
+    "CH0012032048": 0.7,   # ROCHE
+    "CH0013841017": 1.2,   # LONZA
+    "CH0038863350": 0.6,   # NESTLE
+    "US0090661010": 1.4    # Airbnb
+}
+
+scenarios = {
+    "Down 5%": -5,
+    "Down 10%": -10,
+    "Crash (-20%)": -20,
+    "Up 10%": 10
 }
 
 portfolio = pd.DataFrame([p1, p2, p3, p4])
@@ -371,4 +394,189 @@ elif st.session_state.view == "portfolio":
             "total_payoff": st.column_config.NumberColumn("Total Payoff", format="%.2f"),
             "total_pnl": st.column_config.NumberColumn("Total PnL", format="%.2f"),
         }
+    )
+    
+elif st.session_state.view == "stress":
+   
+    st.subheader("Stress Testing")
+
+    # =========================
+    # User input
+    # =========================
+    shock = st.slider(
+        "Market Shock (%)",
+        min_value=-50,
+        max_value=50,
+        value=-10,
+        width=200
+    )
+
+    st.write(f"Selected market shock: {shock}%")
+
+    # =========================
+    # Run Scenario Engine
+    # =========================
+    engine = ScenarioEngine(
+        portfolio=portfolio,
+        beta_map=beta_map
+    )
+
+    res = engine.run(shock)
+
+    product_df = res["product_df"]
+    pf_df = res["pf_scenario_per_ccy"]
+    cash_df = res["cash_positions"]
+    delivered_df = res["delivered_stocks"]
+
+    # =========================
+    # Format (important)
+    # =========================
+    product_df = product_df.copy()
+    pf_df = pf_df.copy()
+    cash_df = cash_df.copy()
+
+    product_df["return_pct"] = product_df["return_pct"] * 100
+    pf_df["portfolio_return_pct"] = pf_df["portfolio_return_pct"] * 100
+    
+    product_df = product_df.round(2)
+    pf_df = pf_df.round(2)
+    cash_df = cash_df.round(2)
+    
+    if len(delivered_df) > 0:
+        delivered_df = delivered_df.copy()
+        delivered_df["return_pct"] = delivered_df["return_pct"] * 100
+        delivered_df = delivered_df.round(2)
+
+    
+
+
+    # =========================
+    # Portfolio Stress Summary
+    # =========================
+    st.write("### Portfolio Stress Summary")
+    st.dataframe(
+    pf_df[
+        [
+            "currency",
+            "n_products",
+            "underlyings",
+            "total_cost",
+            "total_payoff",
+            "total_pnl",
+            "portfolio_return_pct"
+        ]
+    ].rename(columns={
+        "currency": "Currency",
+        "n_products": "Number of Products",
+        "underlyings": "Underlyings",
+        "total_cost": "Total Cost",
+        "total_payoff": "Total Payoff",
+        "total_pnl": "Total PnL",
+        "portfolio_return_pct": "Portfolio Return (%)"
+    }),
+    width=1200,
+    hide_index=True
+    )
+    
+    # =========================
+    # Product-Level Results
+    # =========================
+    st.write("### Product-Level Stress Results")
+    
+    st.dataframe(
+        product_df[
+            [
+                "product_id",
+                "currency",
+                "worst_underlying",
+                "settlement_type",
+                "total_payoff",
+                "pnl",
+                "return_pct"
+            ]
+        ].rename(columns={
+            "product_id": "Product ID",
+            "currency": "Currency",
+            "worst_underlying": "Worst Underlying",
+            "settlement_type": "Settlement Type",
+            "total_payoff": "Total Payoff",
+            "pnl": "PnL",
+            "return_pct": "Return (%)"
+        }),
+        width=1200,
+        hide_index=True
+    )
+    
+    # =========================
+    # Delivered Stocks
+    # =========================
+    st.write("### Delivered Stocks (Physical Settlement)")
+    
+    if len(delivered_df) > 0:
+        st.dataframe(
+            delivered_df.rename(columns={
+                "delivered_underlying": "Delivered Underlying",
+                "total_shares": "Total Shares",
+                "strike": "Strike",
+                "price": "Scenario Price",
+                "currency": "Currency",
+                "market_value": "Market Value",
+                "total_fractional_cash": "Fractional Cash",
+                "total_value_incl_cash": "Total Value incl. Cash",
+                "cost": "Cost",
+                "pnl": "PnL",
+                "return_pct": "Return (%)"
+            }),
+            width=1200,
+            hide_index=True
+        )
+    else:
+        st.info("No physical delivery in this scenario.")
+    
+    # =========================
+    # Cash Positions
+    # =========================
+    st.write("### Cash Positions")
+    
+    st.dataframe(
+        cash_df.rename(columns={
+            "currency": "Currency",
+            "total_cash": "Total Cash Redemption"
+        }),
+        width=1200,
+        hide_index=True
+    )
+    # =========================
+    # Scenario Matrix
+    # =========================
+    st.write("### Scenario Matrix")
+    
+    engine_matrix = ScenarioEngine(
+        portfolio=portfolio,
+        beta_map=beta_map,
+        scenarios=scenarios
+    )
+    
+    res_matrix = engine_matrix.stress_test()
+    
+    pf_all = res_matrix["portfolio_scenarios"].copy()
+    
+    # format
+    pf_all["portfolio_return_pct"] = pf_all["portfolio_return_pct"] * 100
+    pf_all = pf_all.round(2)
+    
+    # Pivot → matrix
+    matrix = pf_all.pivot(
+        index="scenario_name",
+        columns="currency",
+        values="total_payoff"
+    )
+    
+   
+    
+    matrix = matrix.round(2)
+    
+    st.dataframe(
+        matrix,
+        width=800
     )

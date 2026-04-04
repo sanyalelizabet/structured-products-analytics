@@ -26,30 +26,36 @@ class ScenarioEngine:
     
         rc = ReverseConvertible(row, final_levels=shocks)
         s = rc.summary()
-        
-        # =========================
-        # Physical delivery assumption
-        # =========================
+    
         idx = row["underlyings"].index(s["worst_underlying"])
     
         strike = row["strike"][idx]
         notional = row["notional"]
     
-        total_shares = (notional / strike)
-        delivered_shares = int(total_shares)
+        total_shares = (notional / strike) 
+        price = row["current_spots"][idx] * (1 + shocks[idx] / 100)
     
-        fractional_shares = total_shares - delivered_shares
+        is_physical = (price < strike)
     
-        final_price = row["current_spots"][idx] * (1 + shocks[idx] / 100)
-        fractional_cash = fractional_shares * final_price
-    
-        delivered_underlying = s["worst_underlying"]
-        cash_redemption = fractional_cash
+        if is_physical:
+            delivered_shares = int(total_shares)
+            fractional_shares = total_shares - delivered_shares
+            fractional_cash = fractional_shares * price
+            delivered_underlying = s["worst_underlying"]
+            cash_redemption = fractional_cash
+            settlement_type = "physical"
+        else:
+            delivered_shares = 0
+            fractional_shares = 0
+            fractional_cash = 0
+            delivered_underlying = None
+            cash_redemption = s["total_payoff"]
+            settlement_type = "cash"
     
         return {
             "product_id": row["product_id"],
             "product_type": row["product_type"],
-            "currency": row["currency"],  
+            "currency": row["currency"],
             "position_units": row["position_units"],
             "notional": row["notional"],
             "total_cost": s["total_cost"],
@@ -63,16 +69,16 @@ class ScenarioEngine:
             "return_pct": s["return_pct"],
             "barrier_breached": s["barrier_breached"],
             "worst_underlying": s["worst_underlying"],
-            "settlement_type": "physical",
+            "settlement_type": settlement_type,
             "delivered_underlying": delivered_underlying,
             "delivered_shares": delivered_shares,
             "strike": strike,
-            "price": final_price,
+            "price": price,
             "fractional_shares": fractional_shares,
             "fractional_cash": fractional_cash,
             "cash_redemption": cash_redemption
         }
-    
+        
     def run(self, market_shock):
             """
             Runs one market scenario across the portfolio.
@@ -104,8 +110,13 @@ class ScenarioEngine:
             # =========================
             # Delivered stocks (weighted)
             # =========================
+            
+            delivered_df = product_df[
+                product_df["delivered_underlying"].notna()
+                ].copy()
+            
             delivered_stocks = (
-                product_df.groupby(["currency", "delivered_underlying"], as_index=False)
+                delivered_df.groupby(["currency", "delivered_underlying"], as_index=False)
                 .agg(
                     total_shares=("delivered_shares", "sum"),
                     total_fractional_cash=("fractional_cash", "sum"),
@@ -212,7 +223,7 @@ class ScenarioEngine:
     
     def stress_test(self):
         if self.scenarios is None:
-            raise ValueError("No scenarios provided.")
+            self.scenarios = {"base": 0}
         product_results = []
         portfolio_results = []
         cash_results = []
