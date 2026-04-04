@@ -93,7 +93,28 @@ p3 = {
     "barrier_breached": False
 }
 
-portfolio = pd.DataFrame([p1, p2, p3])
+
+p4 = {
+    "product_id": "CH1483484015",
+    "product_type": "BRC",
+    "type_style": "European",
+    "underlyings": ["Airbnb Inc."],
+    "underlying_isins": ["US0090661010"],
+    "currency": "USD",
+    "position_units": 1,
+    "notional": 5000,
+    "cost_price": 0.98,
+    "initial_levels": [120.46],
+    "current_spots": [120.46],  
+    "strike": [120.46],
+    "barrier_pct": 0.65,
+    "coupon": 0.100556,
+    "initial_fixing_date": "2025-10-02",
+    "maturity_date": "2026-10-09",
+    "barrier_breached": False
+}
+
+portfolio = pd.DataFrame([p1, p2, p3, p4])
 
 # =========================
 # Build Analytics
