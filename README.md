@@ -4,6 +4,9 @@ This repository contains a growing set of tools and models for analyzing structu
 
 The project is designed to build a modular analytics framework combining product-level valuation, portfolio insights, and scenario-based risk analysis.
 
+## Dashboard
+
+The project includes an interactive dashboard designed to explore structured products at both product and portfolio level.
 ---
 ## Live App
 
@@ -16,36 +19,46 @@ The project is designed to build a modular analytics framework combining product
 
 ---
 
-## Current Functionality
 
-- Representation of structured products (BRC, MBRC) in a consistent data format  
-- Product-level analytics:
-  - payoff and redemption logic  
-  - P&L and return metrics  
-  - time to maturity  
-  - worst-of underlying identification  
-- Basic portfolio aggregation  
-- Interactive dashboard for exploration  
+### Current Functionality
 
----
-
-## Approach
-
-Products are modeled through a dedicated class structure, enabling:
-
-- separation of product logic from presentation  
-- scalability from single-product to portfolio-level analysis  
-- extension towards scenario and risk modeling  
-
+- Standardized representation of structured products (BRC, MBRC) in a unified data model  
+- **Product-level analytics**, including:
+  - Payoff and redemption logic (including barrier conditions)
+  - Profit & Loss and return metrics
+  - Time to maturity and annualized return
+  - Worst-of underlying identification for multi-asset structures  
+- **Portfolio-level aggregation**:
+  - Total payoff, cost, and P&L
+  - Aggregated return metrics  
+- Interactive interface for analysis and scenario exploration  
 
 ---
 
-## 📂 Project Structure
+### Approach
 
-│
-├── app/
-├── src/
-├── notebooks/
-├── figures/
-│   └── dashboard.png
-├── README.md
+The system is built around a modular class-based architecture:
+
+- **Product abstraction layer**  
+  Each product is modeled independently (e.g. `ReverseConvertible`), encapsulating payoff logic and analytics  
+
+- **Separation of concerns**  
+  Clear distinction between:
+  - product logic (pricing, payoff, scenarios)  
+  - analytics layer (aggregation, metrics)  
+  - presentation layer (dashboard)  
+
+- **Scalability**  
+  The framework naturally extends:
+  - from single-product analysis → portfolio-level views  
+  - from static analytics → scenario and stress testing  
+
+---
+
+### Design Philosophy
+
+The goal is to replicate a **sell-side structuring / trading perspective**, where:
+
+- products are treated as **objects with defined payoff rules**  
+- portfolio behavior emerges from **aggregation of individual payoffs**  
+- analytics remain **transparent and traceable**, not black-box  
