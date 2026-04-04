@@ -208,56 +208,146 @@ if st.session_state.view == "product":
 elif st.session_state.view == "portfolio":
 
     st.subheader("Portfolio Analytics")
+    st.caption(
+    "Returns assume current market levels remain unchanged until maturity."
+    )
 
-    analytics = PortfolioAnalytics(portfolio)
+    analytics = PortfolioAnalytics(portfolio, reference_currency="CHF")
     analytics.build_product_analytics()
 
     st.write("### Portfolio Overview")
     portfolio_overview = analytics.total_portfolio_metrics()
+    ref_ccy = portfolio_overview["reference_currency"]
 
 
-    col1, col2, col3, col4 = st.columns(4)  
-
-    col1.metric("Total PnL", f"{portfolio_overview['total_pnl']:.2f}")
+    col1, col2, col3, col4 = st.columns(4)
+    
+    pnl = portfolio_overview["total_pnl"]
+    notional = portfolio_overview["total_notional"]
+    
+    col1.metric("Total PnL", f"{ref_ccy} {pnl:,.2f}")
     col2.metric("Return (%)", f"{portfolio_overview['portfolio_return_pct']*100:.2f}")
-    col3.metric("Total Notional", f"{portfolio_overview['total_notional']:.2f}")
+    col3.metric("Total Notional", f"{ref_ccy} {notional:,.2f}")
     col4.metric("# Products", portfolio_overview["total_products"])
 
+    
     st.write("### Product Analytics")
 
-    product_table = analytics.product_df[
+    ref_ccy = analytics.reference_currency
+    
+    product_table = analytics.product_df.copy()
+    
+    product_table["cost_ref"] = product_table.apply(
+        lambda row: analytics.convert_to_reference(row["total_cost"], row["currency"]),
+        axis=1
+    )
+    
+    product_table["payoff_ref"] = product_table.apply(
+        lambda row: analytics.convert_to_reference(row["total_payoff"], row["currency"]),
+        axis=1
+    )
+    
+    product_table["pnl_ref"] = product_table.apply(
+        lambda row: analytics.convert_to_reference(row["pnl"], row["currency"]),
+        axis=1
+    )
+    
+    product_table = product_table[
         [
             "product_id",
+            "currency",
+            "notional",
             "maturity_date",
             "product_type",
             "underlyings",
-            "notional",
-            "total_payoff",
-            "total_cost",
-            "break_even",
-            "return_pa",
+            "cost_ref",
+            "payoff_ref",
+            "pnl_ref",
             "return_pct",
             "distance_to_barrier"
         ]
     ].copy()
-
-    product_table = product_table.round(2)
-
     
-    st.dataframe(product_table, width=1400)
-
+    product_table = product_table.round(2)
+    
+    st.dataframe(
+        product_table,
+        width=1400,
+        hide_index=True,
+        column_config={
+            "product_id": "Product ID",
+            "currency": "Original CCY",
+            "notional": st.column_config.NumberColumn("Notional", format="%.2f"),
+            "maturity_date": "Maturity Date",
+            "product_type": "Product Type",
+            "underlyings": "Underlyings",
+            "cost_ref": st.column_config.NumberColumn(f"Cost ({ref_ccy})", format="%.2f"),
+            "payoff_ref": st.column_config.NumberColumn(f"Payoff ({ref_ccy})", format="%.2f"),
+            "pnl_ref": st.column_config.NumberColumn(f"PnL ({ref_ccy})", format="%.2f"),
+            "return_pct": st.column_config.NumberColumn("Return (%)", format="%.2f"),
+            "distance_to_barrier": st.column_config.NumberColumn("Distance to Barrier (%)", format="%.2f"),
+        }
+    )
+    
     st.write("### Underlying Exposure")
+
 
     underlying_table = analytics.underlying_lookthrough().copy()
     underlying_table = underlying_table.round(2)
-
     
-    st.dataframe(underlying_table, width=1400)
-
+    st.dataframe(
+        underlying_table,
+        width=1400,
+        hide_index=True,
+        column_config={
+            "underlying": "Underlying",
+            "isin": "ISIN",
+            "price_ccy": "Price CCY",
+    
+            "n_products": "Number of Products",
+    
+            "allocated_cost_ref": st.column_config.NumberColumn(
+                f"Allocated Cost ({analytics.reference_currency})",
+                format="%.2f"
+            ),
+    
+            "avg_current_spot": st.column_config.NumberColumn(
+                "Current Price",
+                format="%.2f"
+            ),
+    
+            "min_distance_to_barrier": st.column_config.NumberColumn(
+                "Min Distance to Barrier (%)",
+                format="%.2f"
+            ),
+    
+            "avg_distance_to_barrier": st.column_config.NumberColumn(
+                "Avg Distance to Barrier (%)",
+                format="%.2f"
+            ),
+    
+            "worst_of_count": "Worst-Of Count",
+    
+            "weight": st.column_config.NumberColumn(
+                "Portfolio Weight",
+                format="%.2f"
+            ),
+        }
+    )
     st.write("### Maturity Profile")
 
     maturity_table = analytics.maturity_profile().copy()
     maturity_table = maturity_table.round(2)
-
     
-    st.dataframe(maturity_table, width=1400)
+    st.dataframe(
+        maturity_table,
+        width=800,
+        hide_index=True,
+        column_config={
+            "maturity_bucket": "Maturity Bucket",
+            "n_products": "Number of Products",
+            "total_cost": st.column_config.NumberColumn("Total Cost", format="%.2f"),
+            "total_payoff": st.column_config.NumberColumn("Total Payoff", format="%.2f"),
+            "total_pnl": st.column_config.NumberColumn("Total PnL", format="%.2f"),
+        }
+    )

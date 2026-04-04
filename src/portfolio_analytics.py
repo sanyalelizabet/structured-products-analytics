@@ -1,5 +1,6 @@
 import pandas as pd
 import numpy as np
+import requests
 from datetime import datetime
 from src.reverse_convertible import ReverseConvertible
 
@@ -10,6 +11,7 @@ class PortfolioAnalytics:
         self.portfolio = portfolio
         self.reference_currency = reference_currency
         self.product_df = None
+        self.fx_rates = self._get_fx_rates()
 
     # =========================
     # 1. PRODUCT LEVEL
@@ -49,6 +51,31 @@ class PortfolioAnalytics:
 
         self.product_df = pd.DataFrame(rows)
         return self.product_df
+    def _get_fx_rates(self):
+        url = f"https://api.frankfurter.app/latest?from={self.reference_currency}"
+        response = requests.get(url)
+        data = response.json()
+    
+        rates = data["rates"]
+    
+        fx_dict = {}
+
+        for ccy, rate in rates.items():
+            # invert to get ccy → reference_currency
+            fx_dict[(ccy, self.reference_currency)] = 1 / rate
+    
+        return fx_dict
+    
+    def convert_to_reference(self, value, from_currency):
+        if from_currency == self.reference_currency:
+            return value
+    
+        rate = self.fx_rates.get((from_currency, self.reference_currency))
+    
+        if rate is None:
+            raise ValueError(f"Missing FX rate: {from_currency}")
+    
+        return value * rate
 
     # =========================
     # 2. PORTFOLIO SUMMARY
@@ -82,59 +109,121 @@ class PortfolioAnalytics:
     # 3. UNDERLYING LOOKTHROUGH
     # =========================
     def underlying_lookthrough(self) -> pd.DataFrame:
-
         """
-        Provides underlying-level exposure view across all products.
+    Underlying-level exposure view.
 
-        Each underlying inherits the full product exposure.
-        This reflects payoff dependency (worst-of structure),
-        not diversification-adjusted allocation.
-        """
-            
+    - Prices are shown in their natural currency
+    - Allocated values are converted into reference currency
+    - Shows both worst-case and average barrier distance
+    """
+
         rows = []
-
+    
         for _, row in self.portfolio.iterrows():
             rc = ReverseConvertible(row)
-
+    
             product_cost = rc.total_cost()
-            current_perfs = rc.current_performances()
-            final_perfs = rc.performances()
+            product_ccy = row["currency"]
             barrier_distances = rc.current_barrier_distances()
-
+    
             for i, underlying in enumerate(row["underlyings"]):
                 rows.append({
                     "product_id": row["product_id"],
                     "underlying": underlying,
                     "isin": row["underlying_isins"][i],
-                    "allocated_cost": product_cost,
-                    "current_performance": current_perfs[i] - 1,
-                    "scenario_performance": final_perfs[i] - 1,
+    
+                    # exposure converted to reference currency
+                    "allocated_cost_ref": self.convert_to_reference(
+                        product_cost, product_ccy
+                    ),
+    
+                    # market data (native currency)
+                    "current_spot": row["current_spots"][i],
+                    "price_ccy": product_ccy,
+    
+                    # risk
                     "distance_to_barrier": barrier_distances[i],
                     "is_worst_underlying": underlying == rc.worst_underlying()
-                })
-
+                })  
+    
         df = pd.DataFrame(rows)
-
+    
         summary = (
-            df.groupby(["underlying", "isin"], as_index=False)
+            df.groupby(["underlying", "isin", "price_ccy"], as_index=False)
             .agg(
                 n_products=("product_id", "nunique"),
-                allocated_cost=("allocated_cost", "sum"),
-                avg_current_performance=("current_performance", "mean"),
-                avg_scenario_performance=("scenario_performance", "mean"),
+                allocated_cost_ref=("allocated_cost_ref", "sum"),
+                avg_current_spot=("current_spot", "mean"),
+    
+                
                 min_distance_to_barrier=("distance_to_barrier", "min"),
+                avg_distance_to_barrier=("distance_to_barrier", "mean"),
+    
                 worst_of_count=("is_worst_underlying", "sum")
             )
-            .sort_values("allocated_cost", ascending=False)
+            .sort_values("allocated_cost_ref", ascending=False)
             .reset_index(drop=True)
         )
-
-        total_alloc = summary["allocated_cost"].sum()
+    
+        total_alloc = summary["allocated_cost_ref"].sum()
+    
         summary["weight"] = (
-            summary["allocated_cost"] / total_alloc if total_alloc != 0 else np.nan
+            summary["allocated_cost_ref"] / total_alloc
+            if total_alloc != 0 else np.nan
         )
-
+    
         return summary
+    
+    def total_portfolio_metrics(self) -> dict:
+        product_analytics = self._require_product_df()
+    
+        total_notional = 0
+        total_cost = 0
+        total_payoff = 0
+        total_pnl = 0
+    
+        for _, row in product_analytics.iterrows():
+            currency = row["currency"]
+    
+            total_notional += self.convert_to_reference(
+                row["notional"],
+                currency
+            )
+            total_cost += self.convert_to_reference(
+                row["total_cost"],
+                currency
+            )
+            total_payoff += self.convert_to_reference(
+                row["total_payoff"],
+                currency
+            )
+            total_pnl += self.convert_to_reference(
+                row["pnl"],
+                currency
+            )
+    
+        portfolio_return = total_pnl / total_cost if total_cost != 0 else np.nan
+    
+        weighted_return_pa = np.average(
+            product_analytics["return_pa"],
+            weights=product_analytics["total_cost"]
+        ) if total_cost != 0 else np.nan
+    
+        return {
+            "reference_currency": self.reference_currency,
+            "total_products": len(product_analytics),
+            "total_notional": total_notional,
+            "total_cost": total_cost,
+            "total_payoff": total_payoff,
+            "total_pnl": total_pnl,
+            "portfolio_return_pct": portfolio_return,
+            "portfolio_return_pa": weighted_return_pa
+        }
+    
+    def total_portfolio_table(self) -> pd.DataFrame:
+        return pd.DataFrame([self.total_portfolio_metrics()])
+    
+    
 
     # =========================
     # 4. BARRIER WATCHLIST
@@ -230,32 +319,4 @@ class PortfolioAnalytics:
             raise ValueError("Run build_product_analytics() first.")
         return self.product_df
     
-    def total_portfolio_metrics(self) -> dict:
-        df = self._require_product_df()
-
-        total_notional = (df["notional"] * df["position_units"]).sum()
-        total_cost = df["total_cost"].sum()
-        total_payoff = df["total_payoff"].sum()
-        total_pnl = df["pnl"].sum()
-
-        # portfolio return
-        portfolio_return = total_pnl / total_cost if total_cost != 0 else np.nan
-
-        # weighted return p.a.
-        weighted_return_pa = np.average(
-            df["return_pa"],
-            weights=df["total_cost"]
-        ) if total_cost != 0 else np.nan
-
-        return {
-            "total_products": len(df),
-            "total_notional": total_notional,
-            "total_cost": total_cost,
-            "total_payoff": total_payoff,
-            "total_pnl": total_pnl,
-            "portfolio_return_pct": portfolio_return,
-            "portfolio_return_pa": weighted_return_pa
-        }
     
-    def total_portfolio_table(self) -> pd.DataFrame:
-        return pd.DataFrame([self.total_portfolio_metrics()])
