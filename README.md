@@ -12,8 +12,6 @@ The project includes an interactive dashboard designed to explore structured pro
 
 [Open the dashboard](https://strukis.streamlit.app/)
 
-## Dashboard
-
 ![Dashboard](figures/dashboard.png)
 
 
