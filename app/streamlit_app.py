@@ -14,21 +14,9 @@ from src.scenario_engine import ScenarioEngine
 st.set_page_config(page_title="Structured Products Dashboard", layout="wide")
 st.title("Structured Products Analytics")
 
-if "view" not in st.session_state:
-    st.session_state.view = "product"
-col1, col2, col3 = st.columns(3)
+view = st.sidebar.radio("View", ["Product", "Portfolio", "Stress Testing"])
 
-with col1:
-    if st.button("Product View"):
-        st.session_state.view = "product"
 
-with col2:
-    if st.button("Portfolio View"):
-        st.session_state.view = "portfolio"
-        
-with col3:
-    if st.button("Stress Testing"):
-        st.session_state.view = "stress"
 # =========================
 # Portfolio Input
 # =========================
@@ -174,7 +162,7 @@ overview_cols = [
     "maturity_date"
 ]
 
-if st.session_state.view == "product":
+if view == "Product":
     st.subheader("Portfolio Overview")
     st.dataframe(portfolio[overview_cols], use_container_width=True)
 
@@ -249,7 +237,7 @@ if st.session_state.view == "product":
     )
 
     st.table(detail)
-elif st.session_state.view == "portfolio":
+elif view == "Portfolio":
 
     st.subheader("Portfolio Analytics")
     st.caption(
@@ -396,7 +384,7 @@ elif st.session_state.view == "portfolio":
         }
     )
     
-elif st.session_state.view == "stress":
+elif view == "Stress Testing":
    
     st.subheader("Stress Testing")
 
