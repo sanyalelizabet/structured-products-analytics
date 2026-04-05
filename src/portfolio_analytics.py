@@ -7,9 +7,10 @@ from src.reverse_convertible import ReverseConvertible
 
 class PortfolioAnalytics:
 
-    def __init__(self, portfolio: pd.DataFrame, reference_currency: str = "CHF"):
+    def __init__(self, portfolio: pd.DataFrame, reference_currency: str = "CHF", price_db=None):
         self.portfolio = portfolio
         self.reference_currency = reference_currency
+        self.price_db = price_db
         self.product_df = None
         self.fx_rates = self._get_fx_rates()
 
@@ -82,29 +83,54 @@ class PortfolioAnalytics:
     # =========================
     def portfolio_summary(self) -> pd.DataFrame:
         df = self._require_product_df()
-
-        total_cost = df["total_cost"].sum()
-        total_pnl = df["pnl"].sum()
-
+        
+        # Merge currency from original portfolio — product_df doesn't carry it
+        # Check if currency column exists, if not merge from portfolio
+        if "currency" not in df.columns:
+            df = df.merge(
+                self.portfolio[["product_id", "currency"]], 
+                on="product_id", 
+                how="left"
+            )
+    
+        # Convert all monetary values to reference currency before aggregating
+        total_cost = sum(
+            self.convert_to_reference(row["total_cost"], row["currency"])
+            for _, row in df.iterrows()
+        )
+        total_payoff = sum(
+            self.convert_to_reference(row["total_payoff"], row["currency"])
+            for _, row in df.iterrows()
+        )
+        total_pnl = sum(
+            self.convert_to_reference(row["pnl"], row["currency"])
+            for _, row in df.iterrows()
+        )
+    
+        # Weighted return uses reference-converted costs as weights
+        ref_costs = [
+            self.convert_to_reference(row["total_cost"], row["currency"])
+            for _, row in df.iterrows()
+        ]
+    
         return pd.DataFrame([{
+            "reference_currency": self.reference_currency,
             "n_products": len(df),
             "n_brc": (df["product_type"] == "BRC").sum(),
             "n_mbrc": (df["product_type"] == "MBRC").sum(),
             "total_cost": total_cost,
-            "total_payoff": df["total_payoff"].sum(),
+            "total_payoff": total_payoff,
             "total_pnl": total_pnl,
             "portfolio_return_pct": total_pnl / total_cost if total_cost != 0 else np.nan,
-            "avg_return_pct": df["return_pct"].mean(),
             "weighted_return_pct": np.average(
                 df["return_pct"],
-                weights=df["total_cost"]
+                weights=ref_costs
             ) if total_cost != 0 else np.nan,
-            "worst_product_pnl": df["pnl"].min(),
+            "worst_product_pnl": df["pnl"].min(),  # still native ccy — see note
             "best_product_pnl": df["pnl"].max(),
             "barrier_breached_count": df["barrier_breached"].sum(),
             "near_barrier_count": (df["distance_to_barrier"] <= 0.05).sum()
         }])
-
     # =========================
     # 3. UNDERLYING LOOKTHROUGH
     # =========================

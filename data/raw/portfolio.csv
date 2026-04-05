@@ -1,4 +1,0 @@
-product_id,product_type,type_style,underlyings,underlying_isins,currency,position_units,notional,cost_price,initial_levels,current_spots,strike,barrier_pct,coupon,initial_fixing_date,maturity_date,barrier_breached
-CH1483491150,BRC,European,['ALCON'],['CH0432492467'],CHF,10,1000,1.0,[59.72],[58.76],[59.72],0.7,0.04,2025-11-10,2026-11-17,False
-CH1449111066,MBRC,European,"['ABB', 'HOLCIM', 'NOVARTIS', 'ROCHE']","['CH0012221716', 'CH0012214059', 'CH0012005267', 'CH0012032048']",CHF,5,1000,0.98,"[35.0, 70.0, 90.0, 250.0]","[34.0, 68.0, 92.0, 245.0]","[35.0, 70.0, 90.0, 250.0]",0.7,0.0675,2025-12-30,2026-12-28,True
-CH1461018793,MBRC,European,"['ABB', 'LONZA', 'NESTLE']","['CH0012221716', 'CH0013841017', 'CH0038863350']",CHF,1,10000,1.0,"[53.94, 555.2, 72.49]","[53.94, 555.2, 72.49]","[53.94, 555.2, 72.49]",0.7,0.0866,2025-08-19,2026-08-19,False

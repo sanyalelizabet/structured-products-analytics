@@ -4,8 +4,9 @@ import numpy as np
 
 class ReverseConvertible:
 
-    def __init__(self, row, final_levels=None):
+    def __init__(self, row, final_levels=None, price_db=None):
         self.row = row
+        self.price_db = price_db
         
         # Basic inputs
         self.notional = row["notional"]
@@ -33,13 +34,57 @@ class ReverseConvertible:
             spot * (1 + level / 100)
             for spot, level in zip(self.current_spots, final_levels)
         ]
+    
+    # =========================
+    # PREVIOUS SPOTS FROM DB
+    # =========================
+    def _get_previous_spots(self):
+        """
+        Look up the second most recent price per ISIN from price_db.
+        Falls back to current_spots if DB not available or insufficient history.
+        """
+        if self.price_db is None:
+            return self.current_spots
+
+        prev_spots = []
+
+        for isin, current_spot in zip(self.row["underlying_isins"], self.current_spots):
+            prices = (
+                self.price_db[self.price_db["isin"] == isin]
+                .sort_values("date")
+                .reset_index(drop=True)
+            )
+
+            if len(prices) >= 2:
+                prev_spots.append(float(prices.iloc[-2]["price"]))
+            else:
+                prev_spots.append(current_spot)  # no history — no delta
+
+        return prev_spots
+
+    def _build_previous_rc(self):
+        """
+        Build a ReverseConvertible using yesterday's spots as current_spots.
+        Reuses all existing methods — performances, barrier, payoff etc.
+        price_db passed as None to avoid recursion.
+        """
+        prev_spots = self._get_previous_spots()
+
+        if prev_spots == self.current_spots:
+            return None  # no history, no delta
+
+        prev_row = self.row.copy()
+        prev_row["current_spots"] = prev_spots
+
+        return ReverseConvertible(prev_row, price_db=None)
+    
         
     def is_multi(self):
         return len(self.initial_levels) > 1
     
     def performances(self):
         """
-        Final performance vs strike.
+        Final performance vs strike. for each underlying in a given MRC
         Better for payoff/redemption logic.
         """
         return [
@@ -93,7 +138,7 @@ class ReverseConvertible:
     def total_product_time(self):
         start = datetime.strptime(self.row["initial_fixing_date"], "%Y-%m-%d")
         maturity = datetime.strptime(self.row["maturity_date"], "%Y-%m-%d")
-        return (maturity - start).days / 365
+        return (maturity - start).days / 360
 
     def coupon_payment(self):
         T_total = self.total_product_time()
@@ -154,6 +199,12 @@ class ReverseConvertible:
         today = datetime.today()
         days_to_expiry = (maturity - today).days
 
+        # Yesterday's RC — reuses every method identically
+        prev_rc = self._build_previous_rc()
+
+        pnl_delta = (self.pnl() - prev_rc.pnl()) if prev_rc else None
+        distance_delta = (self.distance_to_barrier() - prev_rc.distance_to_barrier()) if prev_rc else None
+
         return {
             "product_type": self.product_type,
             "is_multi": self.is_multi(),
@@ -162,13 +213,17 @@ class ReverseConvertible:
             "performance": self.performance() - 1,
             "barrier_breached": self.barrier_breached(),
             "worst_underlying": self.worst_underlying(),
-            "payoff_per_unit": self.payoff()/self.position_units,
+            "payoff_per_unit": self.payoff() / self.position_units,
             "total_payoff": self.total_payoff(),
             "total_cost": self.total_cost(),
             "pnl": self.pnl(),
             "return_pct": self.return_pct(),
             "return_pa": self.return_pa(),
             "distance_to_barrier": self.distance_to_barrier(),
-            "break_even": self.break_even()
+            "break_even": self.break_even(),
+
+            # Deltas — None if no history
+            "pnl_delta": pnl_delta,
+            "distance_delta": distance_delta,
         }
     

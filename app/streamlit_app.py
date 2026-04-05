@@ -4,16 +4,28 @@ import numpy as np
 import sys
 from pathlib import Path
 
-# make src importable
-sys.path.append(str(Path(__file__).resolve().parents[1]))
-
 from src.reverse_convertible import ReverseConvertible
 from src.portfolio_analytics import PortfolioAnalytics
 from src.scenario_engine import ScenarioEngine
+from src.eod_client import EODClient
+from src.market_data_engine import MarketDataEngine
+
+
+# make src importable
+sys.path.append(str(Path(__file__).resolve().parents[1]))
+logo_path = Path(__file__).resolve().parent / "assets" / "logo.png"
+
+
+api_key = st.secrets["EOD_API_KEY"]
+client = EODClient(api_key)
+market_engine = MarketDataEngine(client)
+db = market_engine.load_db()
+
+
 
 st.set_page_config(page_title="Structured Products Dashboard", layout="wide")
 st.title("Structured Products Analytics")
-
+st.sidebar.image(str(logo_path), width=160)
 view = st.sidebar.radio("View", ["Product", "Portfolio", "Stress Testing"])
 
 
@@ -27,6 +39,7 @@ p1 = {
     "type_style": "European",
     "underlyings": ["ALCON"],
     "underlying_isins": ["CH0432492467"],
+    "tickers": ["ALC.SW"], 
     "currency": "CHF",
     "position_units": 1,
     "notional": 1000,
@@ -52,6 +65,7 @@ p2 = {
         "CH0012005267",
         "CH0012032048"
     ],
+    "tickers": ["ABBN.SW", "HOLN.SW", "NOVN.SW", "ROG.SW"],
     "currency": "CHF",
     "position_units": 1,
     "notional": 1000,
@@ -72,6 +86,7 @@ p3 = {
     "type_style": "European",
     "underlyings": ["ABB", "LONZA", "NESTLE"],
     "underlying_isins": ["CH0012221716", "CH0013841017", "CH0038863350"],
+    "tickers": ["ABBN.SW", "LONN.SW", "NESN.SW"],
     "currency": "CHF",
     "position_units": 10,
     "notional": 10000,
@@ -93,6 +108,7 @@ p4 = {
     "type_style": "European",
     "underlyings": ["Airbnb Inc."],
     "underlying_isins": ["US0090661010"],
+    "tickers": ["ABNB"],
     "currency": "USD",
     "position_units": 1,
     "notional": 5000,
@@ -119,6 +135,7 @@ beta_map = {
 }
 
 scenarios = {
+    "Current": 0,
     "Down 5%": -5,
     "Down 10%": -10,
     "Crash (-20%)": -20,
@@ -127,6 +144,14 @@ scenarios = {
 
 portfolio = pd.DataFrame([p1, p2, p3, p4])
 
+
+try:
+    market_engine.fetch_latest_prices(portfolio)
+    portfolio = market_engine.update_spots(portfolio)
+except Exception as e:
+    st.warning(f"Could not refresh market prices. Using portfolio default spots. {e}")
+    
+
 # =========================
 # Build Analytics
 # =========================
@@ -134,7 +159,7 @@ portfolio = pd.DataFrame([p1, p2, p3, p4])
 results = []
 
 for _, row in portfolio.iterrows():
-    rc = ReverseConvertible(row)
+    rc = ReverseConvertible(row, price_db=db)
     res = rc.summary()
     res["product_id"] = row["product_id"]
     results.append(res)
@@ -164,7 +189,12 @@ overview_cols = [
 
 if view == "Product":
     st.subheader("Portfolio Overview")
-    st.dataframe(portfolio[overview_cols], use_container_width=True)
+    st.caption(
+    "Projected at maturity assuming current spot prices remain unchanged. "
+        "Coupons accrued over full product life."
+    )
+        
+    st.dataframe(portfolio[overview_cols], width="stretch")
 
 # =========================
 # Product Selection
@@ -209,17 +239,46 @@ if view == "Product":
 
 
 
+    
+
     st.subheader("Key Metrics")
-
+    
     col1, col2, col3 = st.columns(3)
-    col1.metric("P&L", f"{row['pnl']:.2f}")
-    col2.metric("Total Payoff", f"{row['total_payoff']:.2f}")
-    col3.metric("Days to Expiry", f"{int(row['days_to_expiry'])}")
-
+    
+    col1.metric(
+        "Projected P&L (flat spot)",
+        f"{row['pnl']:,.2f}",
+        delta=f"{row['pnl_delta']:+,.2f} vs yesterday" if row["pnl_delta"] is not None else None
+    )
+    
+    col2.metric(
+        "Total Payoff",
+        f"{row['total_payoff']:,.2f}"
+    )
+    
+    col3.metric(
+        "Days to Expiry",
+        f"{int(row['days_to_expiry'])}"
+    )
+    
     col4, col5, col6 = st.columns(3)
-    col4.metric("Return p.a. (%)", f"{row['return_pa']:.2f}")
-    col5.metric("Distance to Barrier (%)", f"{row['distance_to_barrier']:.2f}")
-    col6.metric("Worst Underlying", row["worst_underlying"])
+    
+    col4.metric(
+        "Return p.a. (%)",
+        f"{row['return_pa']:.2f}"
+    )
+    
+    col5.metric(
+        "Distance to Barrier (%)",
+        f"{row['distance_to_barrier']:.2f}%",
+        delta=f"{row['distance_delta']*100:+.2f}pp vs yesterday" if row["distance_delta"] is not None else None,
+        delta_color="normal"  # positive = further from barrier = green = good
+    )
+    
+    col6.metric(
+        "Worst Underlying",
+        row["worst_underlying"]
+    )
 
 # =========================
 # Detailed Table
@@ -228,23 +287,24 @@ if view == "Product":
     st.subheader("Product Detail")
 
     detail = pd.DataFrame({
-        "Metric": row_selected.index,
-        "Value": row_selected.values
+    "Metric": row_selected.index,
+    "Value": row_selected.values
     })
 
     detail["Value"] = detail["Value"].apply(
-        lambda x: round(float(x), 2) if isinstance(x, (int, float, np.floating)) else x
+        lambda x: f"{x:.2f}" if isinstance(x, (int, float, np.floating)) else str(x)
     )
 
-    st.table(detail)
+    st.dataframe(detail, width="content", hide_index=True)
 elif view == "Portfolio":
 
     st.subheader("Portfolio Analytics")
     st.caption(
-    "Returns assume current market levels remain unchanged until maturity."
+    "Projected at maturity assuming current spot prices remain unchanged. "
+        "Coupons accrued over full product life."
     )
 
-    analytics = PortfolioAnalytics(portfolio, reference_currency="CHF")
+    analytics = PortfolioAnalytics(portfolio, reference_currency="CHF", price_db=db)
     analytics.build_product_analytics()
 
     st.write("### Portfolio Overview")
@@ -387,6 +447,10 @@ elif view == "Portfolio":
 elif view == "Stress Testing":
    
     st.subheader("Stress Testing")
+    st.caption(
+        "Instantaneous shock applied to current spot prices. "
+        
+    )
 
     # =========================
     # User input
