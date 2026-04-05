@@ -4,59 +4,71 @@ This repository contains a growing set of tools and models for analyzing structu
 
 The project is designed to build a modular analytics framework combining product-level valuation, portfolio insights, and scenario-based risk analysis.
 
+---
+
 ## Dashboard
 
 The project includes an interactive dashboard designed to explore structured products at both product and portfolio level.
+
 ---
+
 ## Live App
 
 [Open the dashboard](https://struxq.streamlit.app/)
 
 ![Dashboard](figures/dashboard.png)
 
-
 ---
 
+## Current Functionality
 
-### Current Functionality
+### Product Modeling
 
 - Standardized representation of structured products (BRC, MBRC) in a unified data model  
-- **Product-level analytics**, including:
-  - Payoff and redemption logic (including barrier conditions)
-  - Profit & Loss and return metrics
-  - Time to maturity and annualized return
-  - Worst-of underlying identification for multi-asset structures  
-- **Portfolio-level aggregation**:
-  - Total payoff, cost, and P&L
-  - Aggregated return metrics  
-- Interactive interface for analysis and scenario exploration  
+- Object-oriented payoff modeling via dedicated product classes  
+
+### Product-Level Analytics
+
+- Payoff and redemption logic (including barrier conditions)  
+- Profit & Loss and return metrics  
+- Time to maturity and annualized return  
+- Worst-of underlying identification for multi-asset structures  
+
+### Portfolio-Level Analytics
+
+- Aggregation of total payoff, cost, and P&L  
+- Portfolio return metrics across currencies  
+- Underlying look-through and exposure analysis  
+- Maturity profiling and concentration views  
+
+### Scenario & Stress Testing
+
+The framework supports two complementary approaches:
+
+**1. Instantaneous Shock Model**
+- Direct shock applied to current spot levels  
+- Fast sensitivity analysis  
+
+S_final = S_current * (1 + beta * shock)
+
+**2. Path-Based Scenario Model**
+- Time-consistent evolution of underlying prices  
+- Supports delayed shocks and recovery dynamics  
+
+S_final = S0 * exp(mu_pre * T1) * (1 + beta * shock)^n * exp(mu_post * T2)
+
+
+Additional features:
+- Physical vs cash settlement modeling  
+- Delivered stock aggregation with weighted pricing  
+- Cash redemption tracking  
+- Scenario matrix across multiple market environments  
+
+## Next Steps
+
+- Monte Carlo scenario integration  
+- Volatility and correlation modeling  
+- Greeks and risk decomposition  
+- Market data integration (live pricing)  
 
 ---
-
-### Approach
-
-The system is built around a modular class-based architecture:
-
-- **Product abstraction layer**  
-  Each product is modeled independently (e.g. `ReverseConvertible`), encapsulating payoff logic and analytics  
-
-- **Separation of concerns**  
-  Clear distinction between:
-  - product logic (pricing, payoff, scenarios)  
-  - analytics layer (aggregation, metrics)  
-  - presentation layer (dashboard)  
-
-- **Scalability**  
-  The framework naturally extends:
-  - from single-product analysis → portfolio-level views  
-  - from static analytics → scenario and stress testing  
-
----
-
-### Design Philosophy
-
-The goal is to replicate a **sell-side structuring / trading perspective**, where:
-
-- products are treated as **objects with defined payoff rules**  
-- portfolio behavior emerges from **aggregation of individual payoffs**  
-- analytics remain **transparent and traceable**, not black-box  

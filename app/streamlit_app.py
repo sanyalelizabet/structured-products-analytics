@@ -444,49 +444,176 @@ elif view == "Portfolio":
         }
     )
     
-elif view == "Stress Testing":
+elif view == "Stress Testing":    
+    
    
-    st.subheader("Stress Testing")
+    st.subheader("Stress Testing (Path-Based)")
     st.caption(
-        "Instantaneous shock applied to current spot prices. "
-        
+        "Scenario defined as a time path: drift → shocks → drift to maturity."
+        )
+
+
+    # =========================
+    # Scenario Builder
+    # =========================
+    
+   # =========================
+    # Presets
+    # =========================
+    scenario_presets = {
+        "Custom": None,
+        "Current": {
+            "market_shock": 0,
+            "n_shocks": 1,
+            "shock_in_days": 0,
+            "shock_spacing_days": 0,
+            "pre_shock_drift_pa": 0.0,
+            "post_shock_drift_pa": 0.0,
+        },
+        "Down 5%": {
+            "market_shock": -5,
+            "n_shocks": 1,
+            "shock_in_days": 0,
+            "shock_spacing_days": 0,
+            "pre_shock_drift_pa": 0.0,
+            "post_shock_drift_pa": 0.0,
+        },
+        "Down 10%": {
+            "market_shock": -10,
+            "n_shocks": 1,
+            "shock_in_days": 0,
+            "shock_spacing_days": 0,
+            "pre_shock_drift_pa": 0.0,
+            "post_shock_drift_pa": 0.0,
+        },
+        "Crash (-20%)": {
+            "market_shock": -20,
+            "n_shocks": 1,
+            "shock_in_days": 0,
+            "shock_spacing_days": 0,
+            "pre_shock_drift_pa": 0.0,
+            "post_shock_drift_pa": 0.0,
+        },
+        "Recovery (+10% + ERP)": {
+            "market_shock": -20,
+            "n_shocks": 1,
+            "shock_in_days": 0,
+            "shock_spacing_days": 0,
+            "pre_shock_drift_pa": 0.0,
+            "post_shock_drift_pa": 0.05,
+        },
+    }
+
+    selected_preset = st.selectbox(
+        "Scenario Preset",
+        list(scenario_presets.keys())
     )
 
-    # =========================
-    # User input
-    # =========================
-    shock = st.slider(
-        "Market Shock (%)",
-        min_value=-50,
-        max_value=50,
-        value=-10,
-        width=200
-    )
-
-    st.write(f"Selected market shock: {shock}%")
+    preset = scenario_presets[selected_preset]
 
     # =========================
-    # Run Scenario Engine
+    # Default values (from preset or fallback)
+    # =========================
+    default = preset if preset is not None else {
+        "market_shock": -10,
+        "n_shocks": 1,
+        "shock_in_days": 0,
+        "shock_spacing_days": 0,
+        "pre_shock_drift_pa": 0.0,
+        "post_shock_drift_pa": 0.0,
+    }
+
+    # =========================
+    # Manual Controls
+    # =========================
+    col1, col2 = st.columns(2)
+
+    with col1:
+        market_shock = st.slider(
+            "Market Shock per Event (%)",
+            min_value=-50,
+            max_value=50,
+            value=int(default["market_shock"])
+        )
+
+        n_shocks = st.number_input(
+            "Number of Shock Events",
+            min_value=1,
+            max_value=10,
+            value=int(default["n_shocks"])
+        )
+
+        shock_in_days = st.number_input(
+            "Days to First Shock",
+            min_value=0,
+            max_value=365,
+            value=int(default["shock_in_days"])
+        )
+
+    with col2:
+        shock_spacing_days = st.number_input(
+            "Days Between Shocks",
+            min_value=0,
+            max_value=365,
+            value=int(default["shock_spacing_days"])
+        )
+
+        pre_shock_drift = st.slider(
+            "Pre-Shock Drift (p.a.)",
+            min_value=-0.2,
+            max_value=0.2,
+            value=float(default["pre_shock_drift_pa"])
+        )
+
+        post_shock_drift = st.slider(
+            "Post-Shock Drift (p.a.)",
+            min_value=-0.2,
+            max_value=0.2,
+            value=float(default["post_shock_drift_pa"])
+        )
+
+    # =========================
+    # Show key driver (your request)
+    # =========================
+    st.write(f"Selected market shock: {market_shock}%")
+
+    # =========================
+    # Build scenario
+    # =========================
+    scenario = {
+        "market_shock": market_shock,
+        "n_shocks": int(n_shocks),
+        "shock_in_days": int(shock_in_days),
+        "shock_spacing_days": int(shock_spacing_days),
+        "pre_shock_drift_pa": float(pre_shock_drift),
+        "post_shock_drift_pa": float(post_shock_drift),
+    }
+
+    # =========================
+    # Run engine
     # =========================
     engine = ScenarioEngine(
         portfolio=portfolio,
         beta_map=beta_map
     )
 
-    res = engine.run(shock)
-
+    res = engine.run_path_scenario(scenario)
+    
+    # =========================
+    # Extract results
+    # =========================
     product_df = res["product_df"]
     pf_df = res["pf_scenario_per_ccy"]
     cash_df = res["cash_positions"]
     delivered_df = res["delivered_stocks"]
-
+    
     # =========================
-    # Format (important)
+    # Format
     # =========================
     product_df = product_df.copy()
     pf_df = pf_df.copy()
     cash_df = cash_df.copy()
-
+    
     product_df["return_pct"] = product_df["return_pct"] * 100
     pf_df["portfolio_return_pct"] = pf_df["portfolio_return_pct"] * 100
     
@@ -498,36 +625,34 @@ elif view == "Stress Testing":
         delivered_df = delivered_df.copy()
         delivered_df["return_pct"] = delivered_df["return_pct"] * 100
         delivered_df = delivered_df.round(2)
-
     
-
-
     # =========================
     # Portfolio Stress Summary
     # =========================
     st.write("### Portfolio Stress Summary")
+    
     st.dataframe(
-    pf_df[
-        [
-            "currency",
-            "n_products",
-            "underlyings",
-            "total_cost",
-            "total_payoff",
-            "total_pnl",
-            "portfolio_return_pct"
-        ]
-    ].rename(columns={
-        "currency": "Currency",
-        "n_products": "Number of Products",
-        "underlyings": "Underlyings",
-        "total_cost": "Total Cost",
-        "total_payoff": "Total Payoff",
-        "total_pnl": "Total PnL",
-        "portfolio_return_pct": "Portfolio Return (%)"
-    }),
-    width=1200,
-    hide_index=True
+        pf_df[
+            [
+                "currency",
+                "n_products",
+                "underlyings",
+                "total_cost",
+                "total_payoff",
+                "total_pnl",
+                "portfolio_return_pct"
+            ]
+        ].rename(columns={
+            "currency": "Currency",
+            "n_products": "Number of Products",
+            "underlyings": "Underlyings",
+            "total_cost": "Total Cost",
+            "total_payoff": "Total Payoff",
+            "total_pnl": "Total PnL",
+            "portfolio_return_pct": "Portfolio Return (%)"
+        }),
+        width=1200,
+        hide_index=True
     )
     
     # =========================
@@ -568,14 +693,12 @@ elif view == "Stress Testing":
         st.dataframe(
             delivered_df.rename(columns={
                 "delivered_underlying": "Delivered Underlying",
-                "total_shares": "Total Shares",
+                "delivered_shares": "Delivered Shares",
                 "strike": "Strike",
-                "price": "Scenario Price",
+                "price": "Final Spot",
                 "currency": "Currency",
-                "market_value": "Market Value",
-                "total_fractional_cash": "Fractional Cash",
-                "total_value_incl_cash": "Total Value incl. Cash",
-                "cost": "Cost",
+                "fractional_cash": "Fractional Cash",
+                "cash_redemption": "Cash Redemption",
                 "pnl": "PnL",
                 "return_pct": "Return (%)"
             }),
@@ -598,37 +721,5 @@ elif view == "Stress Testing":
         width=1200,
         hide_index=True
     )
-    # =========================
-    # Scenario Matrix
-    # =========================
-    st.write("### Scenario Matrix")
+        
     
-    engine_matrix = ScenarioEngine(
-        portfolio=portfolio,
-        beta_map=beta_map,
-        scenarios=scenarios
-    )
-    
-    res_matrix = engine_matrix.stress_test()
-    
-    pf_all = res_matrix["portfolio_scenarios"].copy()
-    
-    # format
-    pf_all["portfolio_return_pct"] = pf_all["portfolio_return_pct"] * 100
-    pf_all = pf_all.round(2)
-    
-    # Pivot → matrix
-    matrix = pf_all.pivot(
-        index="scenario_name",
-        columns="currency",
-        values="total_payoff"
-    )
-    
-   
-    
-    matrix = matrix.round(2)
-    
-    st.dataframe(
-        matrix,
-        width=800
-    )
