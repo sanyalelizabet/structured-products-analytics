@@ -4,19 +4,17 @@ import numpy as np
 import sys
 from pathlib import Path
 
+
+
+
+# make src importable
+sys.path.append(str(Path(__file__).resolve().parents[1]))
+logo_path = Path(__file__).resolve().parent / "assets" / "logo.png"
 from src.reverse_convertible import ReverseConvertible
 from src.portfolio_analytics import PortfolioAnalytics
 from src.scenario_engine import ScenarioEngine
 from src.eod_client import EODClient
 from src.market_data_engine import MarketDataEngine
-
-
-# make src importable
-ROOT = Path(__file__).resolve().parent.parent
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-logo_path = Path(__file__).resolve().parent / "assets" / "logo.png"
-
 
 api_key = st.secrets["EOD_API_KEY"]
 client = EODClient(api_key)
