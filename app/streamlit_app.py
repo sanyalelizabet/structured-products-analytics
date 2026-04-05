@@ -12,7 +12,9 @@ from src.market_data_engine import MarketDataEngine
 
 
 # make src importable
-sys.path.append(str(Path(__file__).resolve().parents[1]))
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 logo_path = Path(__file__).resolve().parent / "assets" / "logo.png"
 
 

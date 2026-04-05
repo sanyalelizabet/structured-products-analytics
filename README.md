@@ -10,7 +10,7 @@ The project includes an interactive dashboard designed to explore structured pro
 ---
 ## Live App
 
-[Open the dashboard](https://strukis.streamlit.app/)
+[Open the dashboard](https://struxq.streamlit.app/)
 
 ![Dashboard](figures/dashboard.png)
 
