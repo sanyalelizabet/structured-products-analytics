@@ -49,26 +49,35 @@ The framework supports two complementary approaches:
 - Direct shock applied to current spot levels  
 - Fast sensitivity analysis  
 
-S_final = S_current * (1 + beta * shock)
+S_final = S_current * (1  beta * shock)
 
 **2. Path-Based Scenario Model**
 - Time-consistent evolution of underlying prices  
-- Supports delayed shocks and recovery dynamics  
-
-S_final = S0 * exp(mu_pre * T1) * (1 + beta * shock)^n * exp(mu_post * T2)
-
-
+- Supports delayed shocks and recovery dynamics  **2. Path-Based Scenario Model**
+- Day-by-day GBM simulation from today to product maturity
+- Shock events snapped to the nearest business day
+- Per-underlying beta scaling and annualised volatility (GBM noise)
+- Three drift phases: pre-shock, between shocks, post-shock
+- Single source of truth: terminal path price drives both payoff and chart
+ 
 Additional features:
-- Physical vs cash settlement modeling  
-- Delivered stock aggregation with weighted pricing  
-- Cash redemption tracking  
-- Scenario matrix across multiple market environments  
+- Physical vs cash settlement modeling
+- Delivered stock aggregation with weighted pricing
+- Cash redemption tracking
+- Scenario matrix across multiple market environments
+ 
+### Market Data
+ 
+- Live price fetch via EOD Historical Data API
+- Local CSV cache — API called only when previous trading day is missing
+- FX conversion to reference currency via Frankfurter API
+- Valuation date displayed in Product and Portfolio views
+ 
 
+ 
 ## Next Steps
-
-- Monte Carlo scenario integration  
-- Volatility and correlation modeling  
-- Greeks and risk decomposition  
-- Market data integration (live pricing)  
-
+ 
+- Monte Carlo payoff distribution
+- Greeks and risk decomposition
+- Correlation-aware worst-of modelling
 ---
