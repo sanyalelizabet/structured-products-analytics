@@ -322,8 +322,11 @@ class ScenarioEngine:
         paths       : dict[isin → pd.DataFrame(date, price)]
         """
         today    = pd.Timestamp.today().normalize()
+        portfolio_maturity = pd.to_datetime(self.portfolio["maturity_date"]).max()
         maturity = pd.Timestamp(row["maturity_date"])
+        
         T_remaining = (maturity - today).days / 360
+        T_total   = (portfolio_maturity - today).days / 360
 
         # Scenario parameters
         market_shock       = scenario.get("market_shock", 0)
@@ -334,13 +337,13 @@ class ScenarioEngine:
         post_shock_drift   = scenario.get("post_shock_drift_pa", 0.0)
 
         # Business-day grid from today to maturity (inclusive)
-        date_range = pd.bdate_range(start=today, end=maturity)
+        date_range = pd.bdate_range(start=today, end=portfolio_maturity)
 
         # Shock offsets (calendar days from today), filtered to product life
         shock_day_offsets = sorted(
             shock_in_days + i * shock_spacing_days
             for i in range(n_shocks)
-            if (shock_in_days + i * shock_spacing_days) / 360 <= T_remaining
+            if (shock_in_days + i * shock_spacing_days) / 360 <= T_total
         )
 
         # Snap each shock offset to the nearest business day in the grid
@@ -352,9 +355,9 @@ class ScenarioEngine:
                 shock_dates.add(date_range[nearest_idx])
 
         # Phase boundary (years from today) — same for all underlyings
-        T_first_shock = shock_day_offsets[0] / 365 if shock_day_offsets else T_remaining
-        T_last_shock  = shock_day_offsets[-1] / 365 if shock_day_offsets else 0.0
-        T_post_shock  = max(T_remaining - T_last_shock, 0.0)
+        T_first_shock = shock_day_offsets[0] / 360 if shock_day_offsets else T_total
+        T_last_shock  = shock_day_offsets[-1] / 360 if shock_day_offsets else 0.0
+        T_post_shock  = max(T_total - T_last_shock, 0.0)
 
         shocks      = []
         final_spots = []
@@ -372,6 +375,7 @@ class ScenarioEngine:
             current_price = float(spot)
             price_path    = []
             prev_date     = today
+            product_final_price = None
 
             for t_idx, bday in enumerate(date_range):
                 # ACT/360 day fraction (0 for the first observation)
@@ -396,6 +400,9 @@ class ScenarioEngine:
                 
                 if bday in shock_dates:
                     current_price *= (1 + market_shock / 100)
+                    
+                if bday >= maturity and product_final_price is None:
+                    product_final_price = current_price
 
                 price_path.append(current_price)
                 prev_date = bday
@@ -404,7 +411,8 @@ class ScenarioEngine:
             pct_change = (final_spot / spot - 1) * 100
 
             shocks.append(pct_change)
-            final_spots.append(round(final_spot, 4))
+            final_spots.append(round(product_final_price, 4))
+            
             paths[isin] = pd.DataFrame({"date": date_range, "price": price_path})
 
         path_summary = {
@@ -492,7 +500,9 @@ class ScenarioEngine:
             "cash_redemption"     : cash_redemption,
     
             # Full path audit
-            "path_summary"        : path_summary
+            "path_summary"        : path_summary,
+            "paths"               : paths
+
         } 
     def run_path_scenario(self, scenario):
         """
@@ -501,9 +511,14 @@ class ScenarioEngine:
         """
     
         results = []
+        all_paths = {}
     
         for _, row in self.portfolio.iterrows():
             res = self.run_product_path_scenario(row, scenario)
+            for isin, path_df in res.pop("paths", {}).items():
+                if isin not in all_paths:
+                    all_paths[isin] = path_df
+                
             results.append(res)
     
         product_df = pd.DataFrame(results)
@@ -597,5 +612,6 @@ class ScenarioEngine:
             "product_df": product_df,
             "pf_scenario_per_ccy": pf_scenario_per_ccy,
             "cash_positions": cash_positions,
-            "delivered_stocks": delivered_stocks
+            "delivered_stocks": delivered_stocks,
+            "paths"             : all_paths
         }                             

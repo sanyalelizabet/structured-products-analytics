@@ -540,32 +540,32 @@ elif view == "Stress Testing":
             "n_shocks": 1,
             "shock_in_days": 0,
             "shock_spacing_days": 0,
-            "pre_shock_drift_pa": 0.0,
-            "post_shock_drift_pa": 0.0,
+            "pre_shock_drift_pa": 5.0,
+            "post_shock_drift_pa": 5.0,
         },
         "Down 10%": {
             "market_shock": -10,
             "n_shocks": 1,
             "shock_in_days": 0,
             "shock_spacing_days": 0,
-            "pre_shock_drift_pa": 0.0,
-            "post_shock_drift_pa": 0.0,
+            "pre_shock_drift_pa": 5.0,
+            "post_shock_drift_pa":5.0,
         },
         "Crash (-20%)": {
             "market_shock": -20,
             "n_shocks": 1,
             "shock_in_days": 0,
             "shock_spacing_days": 0,
-            "pre_shock_drift_pa": 0.0,
-            "post_shock_drift_pa": 0.0,
+            "pre_shock_drift_pa": 5.0,
+            "post_shock_drift_pa": 5.0,
         },
         "Recovery (+10% + ERP)": {
             "market_shock": -20,
             "n_shocks": 1,
             "shock_in_days": 0,
             "shock_spacing_days": 0,
-            "pre_shock_drift_pa": 0.0,
-            "post_shock_drift_pa": 0.05,
+            "pre_shock_drift_pa": 5.0,
+            "post_shock_drift_pa": 5.0,
         },
     }
 
@@ -582,7 +582,7 @@ elif view == "Stress Testing":
     default = preset if preset is not None else {
         "market_shock": -10,
         "n_shocks": 1,
-        "shock_in_days": 0,
+        "shock_in_days": 15,
         "shock_spacing_days": 0,
         "pre_shock_drift_pa": 0.0,
         "post_shock_drift_pa": 0.0,
@@ -596,22 +596,22 @@ elif view == "Stress Testing":
     with col1:
         market_shock = st.slider(
             "Market Shock per Event (%)",
-            min_value=-50,
-            max_value=50,
+            min_value=-25,
+            max_value=0,
             value=int(default["market_shock"])
         )
 
         n_shocks = st.number_input(
             "Number of Shock Events",
             min_value=1,
-            max_value=10,
+            max_value=3,
             value=int(default["n_shocks"])
         )
 
         shock_in_days = st.number_input(
             "Days to First Shock",
-            min_value=0,
-            max_value=365,
+            min_value=15,
+            max_value=300,
             value=int(default["shock_in_days"])
         )
 
@@ -624,18 +624,18 @@ elif view == "Stress Testing":
         )
 
         pre_shock_drift = st.slider(
-            "Pre-Shock Drift (p.a.)",
-            min_value=-0.2,
-            max_value=0.2,
-            value=float(default["pre_shock_drift_pa"])
-        )
+            "Pre-Shock Drift (% p.a.)",
+            min_value=-20.0,
+            max_value=20.0,
+            value=float(default["pre_shock_drift_pa"]*100)
+        ) / 100
 
         post_shock_drift = st.slider(
-            "Post-Shock Drift (p.a.)",
-            min_value=-0.2,
-            max_value=0.2,
-            value=float(default["post_shock_drift_pa"])
-        )
+            "Post-Shock Drift (% p.a.)",
+            min_value=-20.0,
+            max_value=20.0,
+            value=float(default["post_shock_drift_pa"]* 100)
+        ) / 100
 
 
     st.write(f"Selected market shock: {market_shock}%")
@@ -662,6 +662,24 @@ elif view == "Stress Testing":
     )
 
     res = engine.run_path_scenario(scenario)
+    paths = res["paths"]
+    
+    path_rows = []
+
+    for isin, df_path in paths.items():
+        temp = df_path.copy()
+        temp["isin"] = isin
+        path_rows.append(temp)
+    
+    path_plot_df = pd.concat(path_rows, ignore_index=True)
+    
+    isin_to_name = {}
+
+    for _, row in portfolio.iterrows():
+        for isin, name in zip(row["underlying_isins"], row["underlyings"]):
+            isin_to_name[isin] = name
+    
+    path_plot_df["name"] = path_plot_df["isin"].map(isin_to_name)
     
     # =========================
     # Extract results
@@ -718,72 +736,107 @@ elif view == "Stress Testing":
         width=1200,
         hide_index=True
     )
+    st.write("### Stress Testing Results")
+
+    left_col, right_col = st.columns([2, 3])
     
-    # =========================
-    # Product-Level Results
-    # =========================
-    st.write("### Product-Level Stress Results")
+    with left_col:
     
-    st.dataframe(
-        product_df[
-            [
-                "product_id",
-                "currency",
-                "worst_underlying",
-                "settlement_type",
-                "total_payoff",
-                "pnl",
-                "return_pct"
-            ]
-        ].rename(columns={
-            "product_id": "Product ID",
-            "currency": "Currency",
-            "worst_underlying": "Worst Underlying",
-            "settlement_type": "Settlement Type",
-            "total_payoff": "Total Payoff",
-            "pnl": "PnL",
-            "return_pct": "Return (%)"
-        }),
-        width=1200,
-        hide_index=True
-    )
-    
-    # =========================
-    # Delivered Stocks
-    # =========================
-    st.write("### Delivered Stocks (Physical Settlement)")
-    
-    if len(delivered_df) > 0:
+        # =========================
+        # Product-Level Results
+        # =========================
+        st.write("### Product-Level Stress Results")
+        
         st.dataframe(
-            delivered_df.rename(columns={
-                "delivered_underlying": "Delivered Underlying",
-                "delivered_shares": "Delivered Shares",
-                "strike": "Strike",
-                "price": "Final Spot",
+            product_df[
+                [
+                    "product_id",
+                    "currency",
+                    "worst_underlying",
+                    "settlement_type",
+                    "total_payoff",
+                    "pnl",
+                    "return_pct"
+                ]
+            ].rename(columns={
+                "product_id": "Product ID",
                 "currency": "Currency",
-                "fractional_cash": "Fractional Cash",
-                "cash_redemption": "Cash Redemption",
+                "worst_underlying": "Worst Underlying",
+                "settlement_type": "Settlement Type",
+                "total_payoff": "Total Payoff",
                 "pnl": "PnL",
                 "return_pct": "Return (%)"
             }),
             width=1200,
             hide_index=True
         )
-    else:
-        st.info("No physical delivery in this scenario.")
+        st.write("### Delivered Stocks (Physical Settlement)")
+        
+        if len(delivered_df) > 0:
+            st.dataframe(
+                delivered_df.rename(columns={
+                    "delivered_underlying": "Delivered Underlying",
+                    "delivered_shares": "Delivered Shares",
+                    "strike": "Strike",
+                    "price": "Final Spot",
+                    "currency": "Currency",
+                    "fractional_cash": "Fractional Cash",
+                    "cash_redemption": "Cash Redemption",
+                    "pnl": "PnL",
+                    "return_pct": "Return (%)"
+                }),
+                width=1200,
+                hide_index=True
+            )
+        else:
+            st.info("No physical delivery in this scenario.")
+        
+        # =========================
+        # Cash Positions
+        # =========================
+        st.write("### Cash Positions")
+        
+        st.dataframe(
+            cash_df.rename(columns={
+                "currency": "Currency",
+                "total_cash": "Total Cash Redemption"
+            }),
+            width=1200,
+            hide_index=True
+        )
+                
+                
+        
+        
+        
     
+        
+    with right_col:
+        st.write("### Underlying Scenario Paths")
+        
+        fig_paths = px.line(
+            path_plot_df,
+            x="date",
+            y="price",
+            color="name",
+            line_group="isin",
+            color_discrete_sequence=["#2A2F38", "#4A5563", "#7A8797", "#A7B0BC", "#C4CBD4"],
+            labels={
+                "date": "Date",
+                "spot": "Simulated Price",
+                "name": "Underlying"
+            }
+        )
+        fig_paths.update_layout(
+            height=650,                  
+            width=800,                   
+            margin=dict(t=20, b=10, l=10, r=10),
+            template="plotly_dark"
+        )
+        st.plotly_chart(fig_paths, use_container_width=False)
     # =========================
-    # Cash Positions
+    # Delivered Stocks
     # =========================
-    st.write("### Cash Positions")
     
-    st.dataframe(
-        cash_df.rename(columns={
-            "currency": "Currency",
-            "total_cash": "Total Cash Redemption"
-        }),
-        width=1200,
-        hide_index=True
-    )
         
     
