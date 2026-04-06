@@ -5,13 +5,17 @@ import numpy as np
 
 class ScenarioEngine:
 
-    def __init__(self, portfolio, beta_map, scenarios=None):
+    def __init__(self, portfolio, beta_map, vol_map, scenarios=None):
         self.portfolio = portfolio
         self.beta_map = beta_map
         self.scenarios = scenarios
+        self.vol = vol_map
         
     def get_beta(self, isin):
         return self.beta_map.get(isin, 1.0)
+    
+    def get_vol(self, isin):
+        return self.vol.get(isin, 0.15)
     
     def build_shocks(self, row, market_shock):
         shocks = []
@@ -283,119 +287,138 @@ class ScenarioEngine:
 
     def build_shock_paths(self, row, scenario):
         """
-        Piecewise deterministic path to terminal spot at product maturity.
-    
-       
-        -----------------------------------------
-        S_final = S_current
-                  * exp(pre_shock_drift  * T_first_shock)     # drift to shock
-                  * (1 + beta * market_shock/100)^n_shocks    # compounded shocks
-                  * exp(post_shock_drift * T_post_shock)      # drift to maturity
-    
-        Post-shock drift interpretation
-        --------------------------------
-        0.0   : permanent shock — most conservative stress assumption
-        >0    : recovery — approximates equity risk premium (~5% for Swiss equities)
-        <0    : continued deterioration — bear market / crisis scenario
-    
+        Day-by-day GBM simulation from today to maturity.
+
+        Each business day:
+          1. Identify drift phase (pre-shock / between shocks / post-shock)
+          2. Apply GBM step: S *= exp((drift - 0.5*vol²)*dt + vol*sqrt(dt)*Z)
+          3. Apply discrete shock on shock dates (beta-scaled)
+
+        The final path price is the terminal spot — used for both the payoff
+        calculation and the path chart. Single source of truth.
+
         Parameters
         ----------
         scenario : dict
-            market_shock        : float  — % index move per shock event (e.g. -20)
-            n_shocks            : int    — number of shock events (default 1)
-            shock_in_days       : int    — days from today to first shock (default 0)
-            shock_spacing_days  : int    — days between shocks if n_shocks > 1
-            pre_shock_drift_pa  : float  — annual drift before first shock (default 0.0)
-            post_shock_drift_pa : float  — annual drift after last shock to maturity
-                                           0.0 = permanent shock
-                                           0.05 = ERP-based recovery
-                                           -0.10 = bear market continuation
-    
+            market_shock        : float — % index move per shock (e.g. -20)
+            n_shocks            : int   — number of shock events (default 1)
+            shock_in_days       : int   — calendar days from today to first shock
+            shock_spacing_days  : int   — calendar days between consecutive shocks
+            pre_shock_drift_pa  : float — annualised drift before first shock
+            post_shock_drift_pa : float — annualised drift after last shock to maturity
+                                          0.0  → permanent shock (conservative)
+                                          0.05 → ERP recovery
+                                         -0.10 → bear market continuation
+
+        Volatility is sourced from self.vol (isin-keyed dict, annualised).
+        Beta    is sourced from self.beta_map (isin-keyed dict).
+
         Returns
         -------
-        shocks : list of float
-            % change from current spot to terminal spot per underlying.
-            Passed directly into ReverseConvertible(final_levels=shocks).
-    
-        final_spots : list of float
-            Actual terminal spot level per underlying at product maturity.
-            Used for display and audit — not passed into ReverseConvertible.
-    
-        T_remaining : float
-            Years from today to product maturity.
-    
-        path_summary : dict
-            Human-readable path description for display in Streamlit.
+        shocks      : list[float]   % change current→terminal per underlying
+        final_spots : list[float]   terminal spot per underlying at maturity
+        T_remaining : float         years from today to maturity
+        path_summary: dict          human-readable audit trail
+        paths       : dict[isin → pd.DataFrame(date, price)]
         """
-        today = datetime.today()
-        maturity = datetime.strptime(row["maturity_date"], "%Y-%m-%d")
-        T_remaining = (maturity - today).days / 365
-    
-        # Unpack scenario parameters
-        market_shock        = scenario.get("market_shock", 0)
-        n_shocks            = scenario.get("n_shocks", 1)
-        shock_in_days       = scenario.get("shock_in_days", 0)
-        shock_spacing_days  = scenario.get("shock_spacing_days", 0)
-        pre_shock_drift     = scenario.get("pre_shock_drift_pa", 0.0)
-        post_shock_drift    = scenario.get("post_shock_drift_pa", 0.0)
-    
-        # Timing — all capped at maturity
-        T_first_shock = min(shock_in_days / 365, T_remaining)
-        T_last_shock  = min(
-            (shock_in_days + shock_spacing_days * (n_shocks - 1)) / 365,
-            T_remaining
+        today    = pd.Timestamp.today().normalize()
+        maturity = pd.Timestamp(row["maturity_date"])
+        T_remaining = (maturity - today).days / 360
+
+        # Scenario parameters
+        market_shock       = scenario.get("market_shock", 0)
+        n_shocks           = scenario.get("n_shocks", 1)
+        shock_in_days      = scenario.get("shock_in_days", 0)
+        shock_spacing_days = scenario.get("shock_spacing_days", 0)
+        pre_shock_drift    = scenario.get("pre_shock_drift_pa", 0.0)
+        post_shock_drift   = scenario.get("post_shock_drift_pa", 0.0)
+
+        # Business-day grid from today to maturity (inclusive)
+        date_range = pd.bdate_range(start=today, end=maturity)
+
+        # Shock offsets (calendar days from today), filtered to product life
+        shock_day_offsets = sorted(
+            shock_in_days + i * shock_spacing_days
+            for i in range(n_shocks)
+            if (shock_in_days + i * shock_spacing_days) / 360 <= T_remaining
         )
+
+        # Snap each shock offset to the nearest business day in the grid
+        shock_dates = set()
+        for d in shock_day_offsets:
+            target = today + pd.Timedelta(days=d)
+            if len(date_range) > 0:
+                nearest_idx =  np.argmin(np.abs(date_range - target))
+                shock_dates.add(date_range[nearest_idx])
+
+        # Phase boundary (years from today) — same for all underlyings
+        T_first_shock = shock_day_offsets[0] / 365 if shock_day_offsets else T_remaining
+        T_last_shock  = shock_day_offsets[-1] / 365 if shock_day_offsets else 0.0
         T_post_shock  = max(T_remaining - T_last_shock, 0.0)
-    
+
         shocks      = []
         final_spots = []
-    
+        paths       = {}
+
         for isin, spot in zip(row["underlying_isins"], row["current_spots"]):
             beta = self.get_beta(isin)
-    
-            # ─────────────────────────────────────────
-            # Phase 1: pre-shock drift to first shock
-            # ─────────────────────────────────────────
-            spot_at_shock = spot * np.exp(pre_shock_drift * T_first_shock)
-    
-            # ─────────────────────────────────────────
-            # Phase 2: n compounded discrete shocks
-            # beta scales each shock to the underlying
-            # ─────────────────────────────────────────
-            spot_after_shocks = spot_at_shock * (
-                (1 + beta * market_shock / 100) ** n_shocks
-            )
-    
-            # ─────────────────────────────────────────
-            # Phase 3: post-shock drift to maturity
-            # this is where ERP / recovery assumption lives
-            # ─────────────────────────────────────────
-            final_spot = spot_after_shocks * np.exp(post_shock_drift * T_post_shock)
-    
-            # % change from current spot — what ReverseConvertible expects
+            vol  = self.get_vol(isin)
+
+            current_price = float(spot)
+            price_path    = []
+            prev_date     = today
+
+            for t_idx, bday in enumerate(date_range):
+                # ACT/360 day fraction (0 for the first observation)
+                dt      = (bday - prev_date).days / 360 if t_idx > 0 else 0.0
+                t_years = (bday - today).days / 360
+
+                # Drift phase
+                if t_years <= T_first_shock:
+                    drift = pre_shock_drift * beta
+                elif t_years > T_last_shock:
+                    drift = post_shock_drift * beta
+                else:
+                    drift = 0.0
+
+                # GBM step (drift + optional volatility noise)
+                if dt > 0:
+                    Z = np.random.standard_normal()
+                    current_price *= np.exp(
+                        (drift - 0.5 * vol ** 2) * dt + vol * np.sqrt(dt) * Z
+                    )
+
+                # Discrete beta-scaled shock on shock dates
+                if bday in shock_dates:
+                    current_price *= (1 + market_shock / 100)
+
+                price_path.append(current_price)
+                prev_date = bday
+
+            final_spot = price_path[-1] if price_path else float(spot)
             pct_change = (final_spot / spot - 1) * 100
-    
+
             shocks.append(pct_change)
             final_spots.append(round(final_spot, 4))
-    
-        # ─────────────────────────────────────────
-        # Path summary — for display and audit
-        # ─────────────────────────────────────────
+            paths[isin] = pd.DataFrame({"date": date_range, "price": price_path})
+
         path_summary = {
-            "maturity_date"     : row["maturity_date"],
-            "T_remaining_years" : round(T_remaining, 3),
-            "T_first_shock"     : round(T_first_shock, 3),
-            "T_post_shock"      : round(T_post_shock, 3),
-            "n_shocks"          : n_shocks,
-            "market_shock_pct"  : market_shock,
-            "pre_shock_drift_pa": pre_shock_drift,
-            "post_shock_drift_pa": post_shock_drift,
+            "maturity_date"       : row["maturity_date"],
+            "T_remaining_years"   : round(T_remaining, 3),
+            "T_first_shock_years" : round(T_first_shock, 3),
+            "T_post_shock_years"  : round(T_post_shock, 3),
+            "effective_n_shocks"  : len(shock_day_offsets),
+            "market_shock_pct"    : market_shock,
+            "pre_shock_drift_pa"  : pre_shock_drift,
+            "post_shock_drift_pa" : post_shock_drift,
         }
+
+        return shocks, final_spots, T_remaining, path_summary, paths
+
     
-        return shocks, final_spots, T_remaining, path_summary
 
     def run_product_path_scenario(self, row, scenario):
-        shocks, final_spots, T_remaining, path_summary = self.build_shock_paths(row, scenario)
+        shocks, final_spots, T_remaining, path_summary, paths = self.build_shock_paths(row, scenario)
     
         rc = ReverseConvertible(row, final_levels=shocks)
         s = rc.summary()

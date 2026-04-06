@@ -154,6 +154,16 @@ beta_map = {
     "US0090661010": 1.4    # Airbnb
 }
 
+vol_map = {
+    "CH0432492467": 0.24,   # ALCON
+    "CH0012221716": 0.22,   # ABB
+    "CH0012214059": 0.18,   # HOLCIM
+    "CH0012005267": 0.16,   # NOVARTIS
+    "CH0012032048": 0.14,   # ROCHE
+    "CH0013841017": 0.28,   # LONZA
+    "CH0038863350": 0.12,   # NESTLE
+    "US0090661010": 0.35    # Airbnb
+}
 scenarios = {
     "Current": 0,
     "Down 5%": -5,
@@ -431,12 +441,12 @@ elif view == "Portfolio":
             }
         )
         fig_treemap.update_layout(height=350, margin=dict(t=20, b=10, l=10, r=10))
-        st.plotly_chart(fig_treemap, use_container_width=True)
+        st.plotly_chart(fig_treemap, width='stretch')
 
     with col_exp:
         st.dataframe(
             underlying_table,
-            use_container_width=True,
+            width='stretch',
             hide_index=True,
             column_config={
                 "underlying": "Underlying",
@@ -647,7 +657,8 @@ elif view == "Stress Testing":
     # =========================
     engine = ScenarioEngine(
         portfolio=portfolio,
-        beta_map=beta_map
+        beta_map=beta_map,
+        vol_map=vol_map
     )
 
     res = engine.run_path_scenario(scenario)
