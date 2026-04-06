@@ -2,7 +2,7 @@ from src.reverse_convertible import ReverseConvertible
 import pandas as pd
 from datetime import datetime
 import numpy as np
-
+import hashlib
 class ScenarioEngine:
 
     def __init__(self, portfolio, beta_map, vol_map, scenarios=None):
@@ -363,6 +363,11 @@ class ScenarioEngine:
         for isin, spot in zip(row["underlying_isins"], row["current_spots"]):
             beta = self.get_beta(isin)
             vol  = self.get_vol(isin)
+            
+            # Deterministic RNG seeded by ISIN — same underlying always
+            # produces the same path regardless of which product calls it
+            seed = int(hashlib.md5(isin.encode()).hexdigest(), 16) % (2 ** 31)
+            rng  = np.random.default_rng(seed)
 
             current_price = float(spot)
             price_path    = []
@@ -383,12 +388,12 @@ class ScenarioEngine:
 
                 # GBM step (drift + optional volatility noise)
                 if dt > 0:
-                    Z = np.random.standard_normal()
+                    Z = rng.standard_normal()
                     current_price *= np.exp(
                         (drift - 0.5 * vol ** 2) * dt + vol * np.sqrt(dt) * Z
                     )
 
-                # Discrete beta-scaled shock on shock dates
+                
                 if bday in shock_dates:
                     current_price *= (1 + market_shock / 100)
 
