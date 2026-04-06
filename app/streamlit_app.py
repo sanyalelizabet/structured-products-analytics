@@ -16,10 +16,30 @@ from src.scenario_engine import ScenarioEngine
 from src.eod_client import EODClient
 from src.market_data_engine import MarketDataEngine
 
-api_key = st.secrets["EOD_API_KEY"]
-client = EODClient(api_key)
-market_engine = MarketDataEngine(client)
-db = market_engine.load_db()
+
+@st.cache_resource
+def get_market_engine():
+    api_key = st.secrets["EOD_API_KEY"]
+    client = EODClient(api_key)
+    return MarketDataEngine(client)
+
+@st.cache_data(ttl=3600)
+def fetch_market_data(_portfolio):
+    engine = get_market_engine()
+    try:
+        engine.fetch_latest_prices(_portfolio)
+        updated_portfolio = engine.update_spots(_portfolio)
+        db = engine.load_db()
+        valuation_date = db["date"].max() if not db.empty else None
+        return updated_portfolio, db, valuation_date, None
+    except Exception as e:
+        db = engine.load_db()
+        valuation_date = db["date"].max() if not db.empty else None
+        return _portfolio, db, valuation_date, str(e)
+
+market_engine = get_market_engine()
+
+
 
 
 
