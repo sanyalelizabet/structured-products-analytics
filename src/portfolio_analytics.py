@@ -277,18 +277,28 @@ class PortfolioAnalytics:
 
         bins = [-np.inf, 30, 90, 180, 365, 730, np.inf]
         labels = ["<=1M", "1-3M", "3-6M", "6-12M", "1-2Y", ">2Y"]
-
+        
         df["maturity_bucket"] = pd.cut(df["days_to_maturity"], bins=bins, labels=labels)
-
+  
+        df["total_cost_ref"] = df.apply(
+             lambda row: self.convert_to_reference(row["total_cost"], row["currency"]), axis=1
+         )
+        df["total_payoff_ref"] = df.apply(
+             lambda row: self.convert_to_reference(row["total_payoff"], row["currency"]), axis=1
+         )
+        df["pnl_ref"] = df.apply(
+             lambda row: self.convert_to_reference(row["pnl"], row["currency"]), axis=1
+         )
+  
         return (
-            df.groupby("maturity_bucket", as_index=False, observed=False)
-            .agg(
-                n_products=("product_id", "count"),
-                total_cost=("total_cost", "sum"),
-                total_payoff=("total_payoff", "sum"),
-                total_pnl=("pnl", "sum")
-            )
-        )
+             df.groupby("maturity_bucket", as_index=False, observed=False)
+             .agg(
+                 n_products=("product_id", "count"),
+                 total_cost=("total_cost_ref", "sum"),
+                 total_payoff=("total_payoff_ref", "sum"),
+                 total_pnl=("pnl_ref", "sum")
+             )
+         )
 
     # =========================
     # 6. SCENARIO ATTRIBUTION

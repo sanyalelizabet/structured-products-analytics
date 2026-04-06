@@ -65,7 +65,7 @@ class MarketDataEngine:
                 })
 
             except Exception as e:
-                print(f"Error {ticker}: {e}")
+                break
 
         new_df = pd.DataFrame(rows)
 

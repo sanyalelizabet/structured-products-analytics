@@ -448,9 +448,9 @@ elif view == "Portfolio":
         column_config={
             "maturity_bucket": "Maturity Bucket",
             "n_products": "Number of Products",
-            "total_cost": st.column_config.NumberColumn("Total Cost", format="%.2f"),
-            "total_payoff": st.column_config.NumberColumn("Total Payoff", format="%.2f"),
-            "total_pnl": st.column_config.NumberColumn("Total PnL", format="%.2f"),
+            "total_cost": st.column_config.NumberColumn(f"Total Cost ({analytics.reference_currency})", format="%.2f"),
+            "total_payoff": st.column_config.NumberColumn(f"Total Payoff ({analytics.reference_currency})", format="%.2f"),
+            "total_pnl": st.column_config.NumberColumn(f"Total PnL ({analytics.reference_currency})", format="%.2f"),
         }
     )
     
