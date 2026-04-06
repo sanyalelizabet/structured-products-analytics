@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 import sys
 from pathlib import Path
-
+import plotly.express as px
 
 
 
@@ -436,23 +436,51 @@ elif view == "Portfolio":
             ),
         }
     )
-    st.write("### Maturity Profile")
-
+    st.write("### Maturity Profile")    
+    
     maturity_table = analytics.maturity_profile().copy()
     maturity_table = maturity_table.round(2)
-    
-    st.dataframe(
-        maturity_table,
-        width=800,
-        hide_index=True,
-        column_config={
-            "maturity_bucket": "Maturity Bucket",
-            "n_products": "Number of Products",
-            "total_cost": st.column_config.NumberColumn(f"Total Cost ({analytics.reference_currency})", format="%.2f"),
-            "total_payoff": st.column_config.NumberColumn(f"Total Payoff ({analytics.reference_currency})", format="%.2f"),
-            "total_pnl": st.column_config.NumberColumn(f"Total PnL ({analytics.reference_currency})", format="%.2f"),
-        }
-    )
+
+    col_table, col_chart = st.columns(2)
+
+    with col_chart:
+        bar_df = analytics.product_df[
+            ["maturity_date", "product_type", "notional", "currency", "underlyings"]
+        ].copy()
+        bar_df["maturity_date"] = pd.to_datetime(bar_df["maturity_date"]).dt.strftime("%Y-%m-%d")
+        bar_df["label"] = bar_df["product_type"] + " | " + bar_df["underlyings"]
+
+        fig_maturity = px.bar(
+            bar_df,
+            x="maturity_date",
+            y="notional",
+            color="product_type",
+            text="label",
+            hover_data={"currency": True, "underlyings": True, "label": False},
+            labels={"maturity_date": "Maturity Date", "notional": "Notional", "product_type": "Type"},
+            color_discrete_sequence=["#3D3D3D", "#767676", "#9E8E7E", "#5C6B7A"]
+        )
+        fig_maturity.update_traces(textposition="inside", textangle=0)
+        fig_maturity.update_layout(
+            height=350, margin=dict(t=20, b=10, l=10, r=10),
+            xaxis_type="category", xaxis_title=None, barmode="stack"
+        )
+        st.plotly_chart(fig_maturity,  width="stretch")
+
+    with col_table:
+        st.dataframe(
+            maturity_table,
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "maturity_bucket": "Maturity Bucket",
+                "n_products": "Number of Products",
+                "total_cost": st.column_config.NumberColumn(f"Total Cost ({analytics.reference_currency})", format="%.2f"),
+                "total_payoff": st.column_config.NumberColumn(f"Total Payoff ({analytics.reference_currency})", format="%.2f"),
+                "total_pnl": st.column_config.NumberColumn(f"Total PnL ({analytics.reference_currency})", format="%.2f"),
+            }
+        )
+
     
 elif view == "Stress Testing":    
     
@@ -582,9 +610,7 @@ elif view == "Stress Testing":
             value=float(default["post_shock_drift_pa"])
         )
 
-    # =========================
-    # Show key driver (your request)
-    # =========================
+
     st.write(f"Selected market shock: {market_shock}%")
 
     # =========================
