@@ -389,53 +389,50 @@ elif view == "Portfolio":
             "return_pct": st.column_config.NumberColumn("Return (%)", format="%.2f"),
             "distance_to_barrier": st.column_config.NumberColumn("Distance to Barrier (%)", format="%.2f"),
         }
-    )
-    
+    )    
     st.write("### Underlying Exposure")
-
 
     underlying_table = analytics.underlying_lookthrough().copy()
     underlying_table = underlying_table.round(2)
-    
-    st.dataframe(
-        underlying_table,
-        width=1400,
-        hide_index=True,
-        column_config={
-            "underlying": "Underlying",
-            "isin": "ISIN",
-            "price_ccy": "Price CCY",
-    
-            "n_products": "Number of Products",
-    
-            "allocated_cost_ref": st.column_config.NumberColumn(
-                f"Allocated Cost ({analytics.reference_currency})",
-                format="%.2f"
-            ),
-    
-            "avg_current_spot": st.column_config.NumberColumn(
-                "Current Price",
-                format="%.2f"
-            ),
-    
-            "min_distance_to_barrier": st.column_config.NumberColumn(
-                "Min Distance to Barrier (%)",
-                format="%.2f"
-            ),
-    
-            "avg_distance_to_barrier": st.column_config.NumberColumn(
-                "Avg Distance to Barrier (%)",
-                format="%.2f"
-            ),
-    
-            "worst_of_count": "Worst-Of Count",
-    
-            "weight": st.column_config.NumberColumn(
-                "Portfolio Weight",
-                format="%.2f"
-            ),
-        }
-    )
+
+    col_exp, col_tree = st.columns([2, 1])
+
+    with col_tree:
+        fig_treemap = px.treemap(
+            underlying_table,
+            path=["underlying"],
+            values="allocated_cost_ref",
+            color="min_distance_to_barrier",
+            color_continuous_scale=["#2A2F38", "#4A5563", "#7A8797"],
+            hover_data={"weight": True, "n_products": True, "min_distance_to_barrier": True},
+            labels={
+                "allocated_cost_ref": f"Cost ({analytics.reference_currency})",
+                "min_distance_to_barrier": "Min Distance to Barrier (%)"
+            }
+        )
+        fig_treemap.update_layout(height=350, margin=dict(t=20, b=10, l=10, r=10))
+        st.plotly_chart(fig_treemap, use_container_width=True)
+
+    with col_exp:
+        st.dataframe(
+            underlying_table,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "underlying": "Underlying",
+                "isin": "ISIN",
+                "price_ccy": "Price CCY",
+                "n_products": "Number of Products",
+                "allocated_cost_ref": st.column_config.NumberColumn(
+                    f"Allocated Cost ({analytics.reference_currency})", format="%.2f"
+                ),
+                "avg_current_spot": st.column_config.NumberColumn("Current Price", format="%.2f"),
+                "min_distance_to_barrier": st.column_config.NumberColumn("Min Distance to Barrier (%)", format="%.2f"),
+                "avg_distance_to_barrier": st.column_config.NumberColumn("Avg Distance to Barrier (%)", format="%.2f"),
+                "worst_of_count": "Worst-Of Count",
+                "weight": st.column_config.NumberColumn("Portfolio Weight", format="%.2f"),
+            }
+        )
     st.write("### Maturity Profile")    
     
     maturity_table = analytics.maturity_profile().copy()
@@ -458,7 +455,7 @@ elif view == "Portfolio":
             text="label",
             hover_data={"currency": True, "underlyings": True, "label": False},
             labels={"maturity_date": "Maturity Date", "notional": "Notional", "product_type": "Type"},
-            color_discrete_sequence=["#3D3D3D", "#767676", "#9E8E7E", "#5C6B7A"]
+            color_discrete_sequence=["#2A2F38", "#4A5563", "#7A8797"]
         )
         fig_maturity.update_traces(textposition="inside", textangle=0)
         fig_maturity.update_layout(
