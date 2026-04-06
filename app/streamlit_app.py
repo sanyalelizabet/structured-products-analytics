@@ -308,6 +308,8 @@ elif view == "Portfolio":
     "Projected at maturity assuming current spot prices remain unchanged. "
         "Coupons accrued over full product life."
     )
+    vd_label = valuation_date.strftime('%d.%m.%Y') if valuation_date is not None else "Using default prices"
+    st.caption(f"Valuation Date: {vd_label}")
 
     analytics = PortfolioAnalytics(portfolio, reference_currency="CHF", price_db=db)
     analytics.build_product_analytics()
@@ -364,6 +366,9 @@ elif view == "Portfolio":
             "distance_to_barrier"
         ]
     ].copy()
+    
+    product_table["return_pct"] *= 100
+    product_table["distance_to_barrier"] *= 100
     
     product_table = product_table.round(2)
     
