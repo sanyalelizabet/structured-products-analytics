@@ -144,10 +144,13 @@ scenarios = {
 
 portfolio = pd.DataFrame([p1, p2, p3, p4])
 
-
+valuation_date  = None
 try:
     market_engine.fetch_latest_prices(portfolio)
     portfolio = market_engine.update_spots(portfolio)
+    db = market_engine.load_db()
+    if not db.empty:
+        valuation_date = db["date"].max()
 except Exception as e:
     st.warning(f"Could not refresh market prices. Using portfolio default spots. {e}")
     
@@ -242,6 +245,8 @@ if view == "Product":
     
 
     st.subheader("Key Metrics")
+    vd_label = valuation_date.strftime('%d.%m.%Y') if valuation_date is not None else "Using default values"
+    st.caption(f"Valuation Date: {vd_label}")
     
     col1, col2, col3 = st.columns(3)
     
