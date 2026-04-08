@@ -833,7 +833,7 @@ elif view == "Stress Testing":
             margin=dict(t=20, b=10, l=10, r=10),
             template="plotly_dark"
         )
-        st.plotly_chart(fig_paths, use_container_width=False)
+        st.plotly_chart(fig_paths, width='content')
     # =========================
     # Delivered Stocks
     # =========================

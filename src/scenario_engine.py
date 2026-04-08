@@ -1,8 +1,8 @@
 from src.reverse_convertible import ReverseConvertible
 import pandas as pd
-from datetime import datetime
 import numpy as np
 import hashlib
+
 class ScenarioEngine:
 
     def __init__(self, portfolio, beta_map, vol_map, scenarios=None):
@@ -16,286 +16,21 @@ class ScenarioEngine:
     
     def get_vol(self, isin):
         return self.vol.get(isin, 0.15)
-    
-    def build_shocks(self, row, market_shock):
-        shocks = []
 
-        for isin in row["underlying_isins"]:
-            beta = self.get_beta(isin)
-            shock = beta * market_shock
-            shocks.append(shock)
-        return shocks
-    
-    def run_product(self, row, market_shock):
-        shocks = self.build_shocks(row, market_shock)
-    
-        rc = ReverseConvertible(row, final_levels=shocks)
-        s = rc.summary()
-    
-        idx = row["underlyings"].index(s["worst_underlying"])
-    
-        strike = row["strike"][idx]
-        notional = row["notional"]
-    
-        total_shares = (notional / strike) 
-        price = row["current_spots"][idx] * (1 + shocks[idx] / 100)
-    
-        is_physical = (price < strike)
-    
-        if is_physical:
-            delivered_shares = int(total_shares)
-            fractional_shares = total_shares - delivered_shares
-            fractional_cash = fractional_shares * price
-            delivered_underlying = s["worst_underlying"]
-            cash_redemption = fractional_cash
-            settlement_type = "physical"
-        else:
-            delivered_shares = 0
-            fractional_shares = 0
-            fractional_cash = 0
-            delivered_underlying = None
-            cash_redemption = s["total_payoff"]
-            settlement_type = "cash"
-    
-        return {
-            "product_id": row["product_id"],
-            "product_type": row["product_type"],
-            "currency": row["currency"],
-            "position_units": row["position_units"],
-            "notional": row["notional"],
-            "total_cost": s["total_cost"],
-            "market_shock": market_shock,
-            "underlyings": row["underlyings"],
-            "underlying_isins": row["underlying_isins"],
-            "shocks": shocks,
-            "payoff_per_unit": s["payoff_per_unit"],
-            "total_payoff": s["total_payoff"],
-            "pnl": s["pnl"],
-            "return_pct": s["return_pct"],
-            "barrier_breached": s["barrier_breached"],
-            "worst_underlying": s["worst_underlying"],
-            "settlement_type": settlement_type,
-            "delivered_underlying": delivered_underlying,
-            "delivered_shares": delivered_shares,
-            "strike": strike,
-            "price": price,
-            "fractional_shares": fractional_shares,
-            "fractional_cash": fractional_cash,
-            "cash_redemption": cash_redemption
-        }
-        
-    def run(self, market_shock):
-            """
-            Runs one market scenario across the portfolio.
-            """
-            results = []
-        
-            for _, row in self.portfolio.iterrows():
-                res = self.run_product(row, market_shock)
-                results.append(res)
-        
-            product_df = pd.DataFrame(results)
-        
-            # =========================
-            # Helper columns for weighting
-            # =========================
-            product_df["strike_x_shares"] = product_df["strike"] * product_df["delivered_shares"]
-            product_df["price_x_shares"] = product_df["price"] * product_df["delivered_shares"]
-        
-            # =========================
-            # Cash positions
-            # =========================
-            cash_positions = (
-                product_df.groupby("currency", as_index=False)
-                .agg(
-                    total_cash=("cash_redemption", "sum")
-                )
-            )
-        
-            # =========================
-            # Delivered stocks (weighted)
-            # =========================
-            
-            delivered_df = product_df[
-                product_df["delivered_underlying"].notna()
-                ].copy()
-            
-            delivered_stocks = (
-                delivered_df.groupby(["currency", "delivered_underlying"], as_index=False)
-                .agg(
-                    total_shares=("delivered_shares", "sum"),
-                    total_fractional_cash=("fractional_cash", "sum"),
-                    strike_x_shares=("strike_x_shares", "sum"),
-                    price_x_shares=("price_x_shares", "sum")
-                )
-            )
-        
-            # Weighted strike & price
-            delivered_stocks["strike"] = (
-                delivered_stocks["strike_x_shares"] /
-                delivered_stocks["total_shares"]
-            )
-        
-            delivered_stocks["price"] = (
-                delivered_stocks["price_x_shares"] /
-                delivered_stocks["total_shares"]
-            )
-        
-            # Valuation
-            delivered_stocks["market_value"] = (
-                delivered_stocks["total_shares"] *
-                delivered_stocks["price"]
-            )
-        
-            delivered_stocks["cost"] = (
-                delivered_stocks["total_shares"] *
-                delivered_stocks["strike"]
-            )
-        
-            # Include fractional cash
-            delivered_stocks["total_value_incl_cash"] = (
-                delivered_stocks["market_value"] +
-                delivered_stocks["total_fractional_cash"]
-            )
-        
-            delivered_stocks["pnl"] = (
-                delivered_stocks["total_value_incl_cash"] -
-                delivered_stocks["cost"]
-            )
-        
-            delivered_stocks["return_pct"] = (
-                delivered_stocks["pnl"] / delivered_stocks["cost"]
-            )
-        
-            # Clean output
-            delivered_stocks = delivered_stocks[
-                [
-                    
-                    "delivered_underlying",
-                    "total_shares",
-                    "strike",
-                    "price",
-                    "currency",
-                    "market_value",
-                    "total_fractional_cash",
-                    "total_value_incl_cash",
-                    "cost",
-                    "pnl",
-                    "return_pct"
-                ]
-            ]
-        
-            # =========================
-            # Portfolio per currency
-            # =========================
-            pf_scenario_per_ccy = (
-                product_df.groupby("currency", as_index=False)
-                .agg(
-                    n_products=("product_id", "count"),
-                    total_cost=("total_cost", "sum"),
-                    total_payoff=("total_payoff", "sum"),
-                    total_pnl=("pnl", "sum"),
-                    underlyings=("underlyings", lambda x: sorted(set(sum(x, []))))
-                )
-            )
-        
-            pf_scenario_per_ccy["market_shock"] = market_shock
-        
-            pf_scenario_per_ccy["portfolio_return_pct"] = (
-                pf_scenario_per_ccy["total_pnl"] /
-                pf_scenario_per_ccy["total_cost"]
-            )
-        
-            pf_scenario_per_ccy = pf_scenario_per_ccy[
-                [
-                    "market_shock",
-                    "currency",
-                    "n_products",
-                    "underlyings",
-                    "total_cost",
-                    "total_payoff",
-                    "total_pnl",
-                    "portfolio_return_pct"
-                ]
-            ]
-        
-            return {
-                "product_df": product_df,
-                "pf_scenario_per_ccy": pf_scenario_per_ccy,
-                "cash_positions": cash_positions,
-                "delivered_stocks": delivered_stocks
-            }
-    
-    def stress_test(self):
-        if self.scenarios is None:
-            self.scenarios = {"base": 0}
-        product_results = []
-        portfolio_results = []
-        cash_results = []
-        delivered_results = []
-    
-        for scenario_name, market_shock in self.scenarios.items():
-    
-            res = self.run(market_shock)
-    
-            product_df = res["product_df"].copy()
-            pf_scenario_per_ccy = res["pf_scenario_per_ccy"].copy()
-            cash_positions = res["cash_positions"].copy()
-            delivered_stocks = res["delivered_stocks"].copy()
-    
-            product_df["scenario_name"] = scenario_name
-            pf_scenario_per_ccy["scenario_name"] = scenario_name
-            cash_positions["scenario_name"] = scenario_name
-            delivered_stocks["scenario_name"] = scenario_name
-    
-            product_results.append(product_df)
-            portfolio_results.append(pf_scenario_per_ccy)
-            cash_results.append(cash_positions)
-            delivered_results.append(delivered_stocks)
-    
-        return {
-            "product_scenarios": pd.concat(product_results, ignore_index=True),
-            "portfolio_scenarios": pd.concat(portfolio_results, ignore_index=True),
-            "cash_scenarios": pd.concat(cash_results, ignore_index=True),
-            "delivered_stock_scenarios": pd.concat(delivered_results, ignore_index=True)
-        } 
 
-    def simulate_terminal_spots(self, row, n_paths=10000, vol_map=None, drift_pa=0.0):
+    def build_shock_paths(self, row, scenario, corr_matrix=None):
         """
-        Monte Carlo simulation of terminal spot per underlying.
-        Returns distribution of payoffs across n_paths.
-        """
-        today = datetime.today()
-        maturity = datetime.strptime(row["maturity_date"], "%Y-%m-%d")
-        T = (maturity - today).days / 365
-    
-        results = []
-    
-        for isin, spot in zip(row["underlying_isins"], row["current_spots"]):
-            vol = vol_map.get(isin, 0.25)  # annualised vol per underlying
-    
-            # GBM terminal distribution
-            # S(T) = S0 * exp((mu - 0.5*sigma^2)*T + sigma*sqrt(T)*Z)
-            Z = np.random.standard_normal(n_paths)
-            S_T = spot * np.exp(
-                (drift_pa - 0.5 * vol**2) * T + vol * np.sqrt(T) * Z
-            )
-            results.append(S_T)
-    
-        return np.array(results)   
+        Day-by-day correlated GBM simulation from today to maturity.
 
-
-    def build_shock_paths(self, row, scenario):
-        """
-        Day-by-day GBM simulation from today to maturity.
+        Each business day, all underlyings are stepped jointly using a single
+        Cholesky-correlated draw — so co-movement between assets is preserved
+        throughout the path, not just at the terminal date.
 
         Each business day:
           1. Identify drift phase (pre-shock / between shocks / post-shock)
-          2. Apply GBM step: S *= exp((drift - 0.5*vol²)*dt + vol*sqrt(dt)*Z)
-          3. Apply discrete shock on shock dates (beta-scaled)
-
-        The final path price is the terminal spot — used for both the payoff
-        calculation and the path chart. Single source of truth.
+          2. Apply correlated GBM step across all assets simultaneously:
+               S *= exp((drift - 0.5*vol²)*dt + vol*sqrt(dt)*Z_corr)
+          3. Apply discrete shock on shock dates (market_shock, not beta-scaled)
 
         Parameters
         ----------
@@ -310,6 +45,10 @@ class ScenarioEngine:
                                           0.05 → ERP recovery
                                          -0.10 → bear market continuation
 
+        corr_matrix : np.ndarray of shape (n_assets, n_assets), optional
+            Correlation matrix for the underlyings. Must be positive-definite.
+            Defaults to the identity matrix (independent assets).
+
         Volatility is sourced from self.vol (isin-keyed dict, annualised).
         Beta    is sourced from self.beta_map (isin-keyed dict).
 
@@ -321,12 +60,12 @@ class ScenarioEngine:
         path_summary: dict          human-readable audit trail
         paths       : dict[isin → pd.DataFrame(date, price)]
         """
-        today    = pd.Timestamp.today().normalize()
+        today              = pd.Timestamp.today().normalize()
         portfolio_maturity = pd.to_datetime(self.portfolio["maturity_date"]).max()
-        maturity = pd.Timestamp(row["maturity_date"])
-        
+        maturity           = pd.Timestamp(row["maturity_date"])
+
         T_remaining = (maturity - today).days / 360
-        T_total   = (portfolio_maturity - today).days / 360
+        T_total     = (portfolio_maturity - today).days / 360
 
         # Scenario parameters
         market_shock       = scenario.get("market_shock", 0)
@@ -336,84 +75,100 @@ class ScenarioEngine:
         pre_shock_drift    = scenario.get("pre_shock_drift_pa", 0.0)
         post_shock_drift   = scenario.get("post_shock_drift_pa", 0.0)
 
-        # Business-day grid from today to maturity (inclusive)
-        date_range = pd.bdate_range(start=today, end=portfolio_maturity)
+        isins    = list(row["underlying_isins"])
+        spots    = np.array([float(s) for s in row["current_spots"]])
+        n_assets = len(isins)
 
-        # Shock offsets (calendar days from today), filtered to product life
+        vols  = np.array([self.get_vol(isin)  for isin in isins])   # (n_assets,)
+        betas = np.array([self.get_beta(isin) for isin in isins])   # (n_assets,)
+
+        # ── Correlation & Cholesky ────────────────────────────────────────────
+        if corr_matrix is None:
+            corr_matrix = np.eye(n_assets)
+        L = np.linalg.cholesky(corr_matrix)   # lower-triangular, (n_assets, n_assets)
+
+        # ── Business-day grid ────────────────────────────────────────────────
+        date_range = pd.bdate_range(start=today, end=portfolio_maturity)
+        n_days     = len(date_range)
+
+        # ── Shock offsets → nearest business day ─────────────────────────────
         shock_day_offsets = sorted(
             shock_in_days + i * shock_spacing_days
             for i in range(n_shocks)
             if (shock_in_days + i * shock_spacing_days) / 360 <= T_total
         )
 
-        # Snap each shock offset to the nearest business day in the grid
         shock_dates = set()
         for d in shock_day_offsets:
-            target = today + pd.Timedelta(days=d)
-            if len(date_range) > 0:
-                nearest_idx =  np.argmin(np.abs(date_range - target))
-                shock_dates.add(date_range[nearest_idx])
+            target      = today + pd.Timedelta(days=d)
+            nearest_idx = np.argmin(np.abs(date_range - target))
+            shock_dates.add(date_range[nearest_idx])
 
-        # Phase boundary (years from today) — same for all underlyings
-        T_first_shock = shock_day_offsets[0] / 360 if shock_day_offsets else T_total
+        T_first_shock = shock_day_offsets[0]  / 360 if shock_day_offsets else T_total
         T_last_shock  = shock_day_offsets[-1] / 360 if shock_day_offsets else 0.0
         T_post_shock  = max(T_total - T_last_shock, 0.0)
 
-        shocks      = []
-        final_spots = []
-        paths       = {}
+        # ── Single seeded RNG per product ────────────────────────────────────
+        # Seeding on product_id keeps paths reproducible regardless of
+        # scenario parameters.
+        seed = int(hashlib.md5(str(row["product_id"]).encode()).hexdigest(), 16) % (2 ** 31)
+        rng  = np.random.default_rng(seed)
 
-        for isin, spot in zip(row["underlying_isins"], row["current_spots"]):
-            beta = self.get_beta(isin)
-            vol  = self.get_vol(isin)
-            
-            # Deterministic RNG seeded by ISIN — same underlying always
-            # produces the same path regardless of which product calls it
-            seed = int(hashlib.md5(isin.encode()).hexdigest(), 16) % (2 ** 31)
-            rng  = np.random.default_rng(seed)
+        # ── Draw all correlated normals upfront ──────────────────────────────
+        # Z_raw  : (n_days, n_assets)  — independent standard normals
+        # Z_corr : (n_days, n_assets)  — correlated via Cholesky
+        Z_raw  = rng.standard_normal((n_days, n_assets))
+        Z_corr = Z_raw @ L.T
 
-            current_price = float(spot)
-            price_path    = []
-            prev_date     = today
-            product_final_price = None
+        # ── Simulate all assets jointly day-by-day ───────────────────────────
+        prices              = spots.copy()                        # (n_assets,)
+        price_paths         = np.zeros((n_days, n_assets))
+        product_final_prices = np.full(n_assets, np.nan)
+        prev_date           = today
 
-            for t_idx, bday in enumerate(date_range):
-                # ACT/360 day fraction (0 for the first observation)
-                dt      = (bday - prev_date).days / 360 if t_idx > 0 else 0.0
-                t_years = (bday - today).days / 360
+        for t_idx, bday in enumerate(date_range):
+            dt      = (bday - prev_date).days / 360 if t_idx > 0 else 0.0
+            t_years = (bday - today).days / 360
 
-                # Drift phase
-                if t_years <= T_first_shock:
-                    drift = pre_shock_drift * beta
-                elif t_years > T_last_shock:
-                    drift = post_shock_drift * beta
-                else:
-                    drift = 0.0
+            # Drift phase (beta-scaled, vectorised over assets)
+            if t_years <= T_first_shock:
+                drift = pre_shock_drift  * betas   # (n_assets,)
+            elif t_years > T_last_shock:
+                drift = post_shock_drift * betas
+            else:
+                drift = np.zeros(n_assets)
 
-                # GBM step (drift + optional volatility noise)
-                if dt > 0:
-                    Z = rng.standard_normal()
-                    current_price *= np.exp(
-                        (drift - 0.5 * vol ** 2) * dt + vol * np.sqrt(dt) * Z
-                    )
+            # GBM step — all assets in one vectorised expression
+            if dt > 0:
+                prices *= np.exp(
+                    (drift - 0.5 * vols ** 2) * dt
+                    + vols * np.sqrt(dt) * Z_corr[t_idx]   # correlated draw
+                )
 
-                
-                if bday in shock_dates:
-                    current_price *= (1 + market_shock / 100)
-                    
-                if bday >= maturity and product_final_price is None:
-                    product_final_price = current_price
+            # Discrete shock applied uniformly across all underlyings
+            if bday in shock_dates:
+                prices *= (1 + market_shock / 100)
 
-                price_path.append(current_price)
-                prev_date = bday
+            # Capture each product's terminal price at its own maturity
+            if bday >= maturity:
+                mask = np.isnan(product_final_prices)
+                product_final_prices = np.where(mask, prices, product_final_prices)
 
-            final_spot = price_path[-1] if price_path else float(spot)
-            pct_change = (final_spot / spot - 1) * 100
+            price_paths[t_idx] = prices
+            prev_date = bday
 
-            shocks.append(pct_change)
-            final_spots.append(round(product_final_price, 4))
-            
-            paths[isin] = pd.DataFrame({"date": date_range, "price": price_path})
+        # Safety: if maturity is beyond the grid, use last price
+        still_nan = np.isnan(product_final_prices)
+        product_final_prices = np.where(still_nan, price_paths[-1], product_final_prices)
+
+        # ── Outputs ──────────────────────────────────────────────────────────
+        shocks      = [(product_final_prices[i] / spots[i] - 1) * 100 for i in range(n_assets)]
+        final_spots = [round(float(p), 4) for p in product_final_prices]
+
+        paths = {
+            isin: pd.DataFrame({"date": date_range, "price": price_paths[:, i]})
+            for i, isin in enumerate(isins)
+        }
 
         path_summary = {
             "maturity_date"       : row["maturity_date"],
@@ -424,27 +179,28 @@ class ScenarioEngine:
             "market_shock_pct"    : market_shock,
             "pre_shock_drift_pa"  : pre_shock_drift,
             "post_shock_drift_pa" : post_shock_drift,
+            "correlation_used"    : corr_matrix is not None,
         }
 
         return shocks, final_spots, T_remaining, path_summary, paths
 
-    
+    def run_product_path_scenario(self, row, scenario, corr_matrix=None):
+        shocks, final_spots, T_remaining, path_summary, paths = self.build_shock_paths(
+            row, scenario, corr_matrix=corr_matrix
+        )
 
-    def run_product_path_scenario(self, row, scenario):
-        shocks, final_spots, T_remaining, path_summary, paths = self.build_shock_paths(row, scenario)
-    
         rc = ReverseConvertible(row, final_levels=shocks)
         s = rc.summary()
-    
+
         idx = row["underlyings"].index(s["worst_underlying"])
         strike = row["strike"][idx]
         notional = row["notional"]
-    
+
         total_shares = notional / strike
-        price = final_spots[idx]  # ← final spot at maturity, not current * shock
-    
+        price = final_spots[idx]
+
         is_physical = price < strike
-    
+
         if is_physical:
             delivered_shares     = int(total_shares)
             fractional_shares    = total_shares - delivered_shares
@@ -459,7 +215,7 @@ class ScenarioEngine:
             delivered_underlying = None
             cash_redemption      = s["total_payoff"]
             settlement_type      = "cash"
-    
+
         return {
             # Product identifiers
             "product_id"          : row["product_id"],
@@ -468,18 +224,18 @@ class ScenarioEngine:
             "position_units"      : row["position_units"],
             "notional"            : row["notional"],
             "maturity_date"       : row["maturity_date"],
-    
+
             # Path
             "T_remaining_years"   : round(T_remaining, 2),
-            "final_spots"         : final_spots,  # terminal levels at maturity
-    
-            # Scenario inputs — explicit for auditability
+            "final_spots"         : final_spots,
+
+            # Scenario inputs
             "market_shock"        : scenario.get("market_shock", 0),
             "n_shocks"            : scenario.get("n_shocks", 1),
             "shock_in_days"       : scenario.get("shock_in_days", 0),
             "pre_shock_drift_pa"  : scenario.get("pre_shock_drift_pa", 0.0),
             "post_shock_drift_pa" : scenario.get("post_shock_drift_pa", 0.0),
-    
+
             # Payoff
             "total_cost"          : s["total_cost"],
             "payoff_per_unit"     : s["payoff_per_unit"],
@@ -488,41 +244,46 @@ class ScenarioEngine:
             "return_pct"          : s["return_pct"],
             "barrier_breached"    : s["barrier_breached"],
             "worst_underlying"    : s["worst_underlying"],
-    
+
             # Settlement
             "settlement_type"     : settlement_type,
             "delivered_underlying": delivered_underlying,
             "delivered_shares"    : delivered_shares,
             "strike"              : strike,
-            "price"               : price,  # final spot at maturity of worst underlying
+            "price"               : price,
             "fractional_shares"   : fractional_shares,
             "fractional_cash"     : fractional_cash,
             "cash_redemption"     : cash_redemption,
-    
+
             # Full path audit
             "path_summary"        : path_summary,
-            "paths"               : paths
+            "paths"               : paths,
+        }
 
-        } 
-    def run_path_scenario(self, scenario):
+    def run_path_scenario(self, scenario, corr_matrix=None):
         """
         Runs path-based scenario across full portfolio
-        (equivalent to run(), but using path logic)
+        (equivalent to run(), but using correlated path logic).
+
+        Parameters
+        ----------
+        corr_matrix : np.ndarray of shape (n_assets, n_assets), optional
+            Shared correlation matrix applied to every product.
+            Each product's underlying subset must match the matrix dimension.
+            Defaults to identity (independent assets) per product.
         """
-    
-        results = []
+        results   = []
         all_paths = {}
-    
+
         for _, row in self.portfolio.iterrows():
-            res = self.run_product_path_scenario(row, scenario)
+            res = self.run_product_path_scenario(row, scenario, corr_matrix=corr_matrix)
             for isin, path_df in res.pop("paths", {}).items():
                 if isin not in all_paths:
                     all_paths[isin] = path_df
-                
             results.append(res)
-    
+
         product_df = pd.DataFrame(results)
-    
+
         # =========================
         # Cash positions
         # =========================
@@ -532,16 +293,15 @@ class ScenarioEngine:
                 total_cash=("cash_redemption", "sum")
             )
         )
-    
+
         # =========================
         # Delivered stocks
         # =========================
         delivered_df = product_df[
             product_df["delivered_underlying"].notna()
         ].copy()
-    
+
         if not delivered_df.empty:
-    
             delivered_stocks = (
                 delivered_df.groupby(["currency", "delivered_underlying"], as_index=False)
                 .agg(
@@ -551,44 +311,24 @@ class ScenarioEngine:
                     price_x_shares=("price", lambda x: (x * delivered_df.loc[x.index, "delivered_shares"]).sum()),
                 )
             )
-    
+
             delivered_stocks["strike"] = delivered_stocks["strike_x_shares"] / delivered_stocks["total_shares"]
-            delivered_stocks["price"] = delivered_stocks["price_x_shares"] / delivered_stocks["total_shares"]
-    
-            delivered_stocks["market_value"] = delivered_stocks["total_shares"] * delivered_stocks["price"]
-            delivered_stocks["cost"] = delivered_stocks["total_shares"] * delivered_stocks["strike"]
-    
-            delivered_stocks["total_value_incl_cash"] = (
-                delivered_stocks["market_value"] +
-                delivered_stocks["total_fractional_cash"]
-            )
-    
-            delivered_stocks["pnl"] = (
-                delivered_stocks["total_value_incl_cash"] -
-                delivered_stocks["cost"]
-            )
-    
-            delivered_stocks["return_pct"] = delivered_stocks["pnl"] / delivered_stocks["cost"]
-    
-            delivered_stocks = delivered_stocks[
-                [
-                    "delivered_underlying",
-                    "total_shares",
-                    "strike",
-                    "price",
-                    "currency",
-                    "market_value",
-                    "total_fractional_cash",
-                    "total_value_incl_cash",
-                    "cost",
-                    "pnl",
-                    "return_pct"
-                ]
-            ]
-    
+            delivered_stocks["price"]  = delivered_stocks["price_x_shares"]  / delivered_stocks["total_shares"]
+
+            delivered_stocks["market_value"]          = delivered_stocks["total_shares"] * delivered_stocks["price"]
+            delivered_stocks["cost"]                  = delivered_stocks["total_shares"] * delivered_stocks["strike"]
+            delivered_stocks["total_value_incl_cash"] = delivered_stocks["market_value"] + delivered_stocks["total_fractional_cash"]
+            delivered_stocks["pnl"]                   = delivered_stocks["total_value_incl_cash"] - delivered_stocks["cost"]
+            delivered_stocks["return_pct"]            = delivered_stocks["pnl"] / delivered_stocks["cost"]
+
+            delivered_stocks = delivered_stocks[[
+                "delivered_underlying", "total_shares", "strike", "price", "currency",
+                "market_value", "total_fractional_cash", "total_value_incl_cash",
+                "cost", "pnl", "return_pct"
+            ]]
         else:
             delivered_stocks = pd.DataFrame()
-    
+
         # =========================
         # Portfolio aggregation
         # =========================
@@ -602,16 +342,16 @@ class ScenarioEngine:
                 underlyings=("worst_underlying", lambda x: sorted(set(x)))
             )
         )
-    
+
         pf_scenario_per_ccy["portfolio_return_pct"] = (
             pf_scenario_per_ccy["total_pnl"] /
             pf_scenario_per_ccy["total_cost"]
         )
-    
+
         return {
-            "product_df": product_df,
+            "product_df"        : product_df,
             "pf_scenario_per_ccy": pf_scenario_per_ccy,
-            "cash_positions": cash_positions,
-            "delivered_stocks": delivered_stocks,
-            "paths"             : all_paths
-        }                             
+            "cash_positions"    : cash_positions,
+            "delivered_stocks"  : delivered_stocks,
+            "paths"             : all_paths,
+        }
