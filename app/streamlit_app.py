@@ -829,7 +829,6 @@ elif view == "Stress Testing":
         
     with right_col:
         st.write("### Underlying Scenario Paths")
-        st.write("Scenario:", scenario)
         
         fig_paths = px.line(
             path_plot_df,
@@ -852,14 +851,6 @@ elif view == "Stress Testing":
         )
         st.plotly_chart(fig_paths, width='content')
         
-    st.write("### Correlation Matrix")
-    st.dataframe(
-        corr_df.round(3),
-        width="stretch"
-    )
-        # =========================
-    # Delivered Stocks
-    # =========================
     
         
     
