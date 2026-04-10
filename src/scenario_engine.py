@@ -18,7 +18,7 @@ class ScenarioEngine:
         return self.vol.get(isin, 0.15)
 
 
-    def build_shock_paths(self, row, scenario, corr_matrix=None):
+    def build_shock_paths(self, row, scenario, corr_matrix=None, scenario_seed=0):
         """
         Day-by-day correlated GBM simulation from today to maturity.
 
@@ -72,8 +72,8 @@ class ScenarioEngine:
         n_shocks           = scenario.get("n_shocks", 1)
         shock_in_days      = scenario.get("shock_in_days", 0)
         shock_spacing_days = scenario.get("shock_spacing_days", 0)
-        pre_shock_drift    = scenario.get("pre_shock_drift_pa", 0.0)
-        post_shock_drift   = scenario.get("post_shock_drift_pa", 0.0)
+        pre_shock_drift    = scenario.get("pre_shock_drift_pa", 0.05)
+        post_shock_drift   = scenario.get("post_shock_drift_pa", 0.05)
 
         isins    = list(row["underlying_isins"])
         spots    = np.array([float(s) for s in row["current_spots"]])
@@ -85,6 +85,7 @@ class ScenarioEngine:
         # ── Correlation & Cholesky ────────────────────────────────────────────
         if corr_matrix is None:
             corr_matrix = np.eye(n_assets)
+            
         L = np.linalg.cholesky(corr_matrix)   # lower-triangular, (n_assets, n_assets)
 
         # ── Business-day grid ────────────────────────────────────────────────
@@ -108,16 +109,15 @@ class ScenarioEngine:
         T_last_shock  = shock_day_offsets[-1] / 360 if shock_day_offsets else 0.0
         T_post_shock  = max(T_total - T_last_shock, 0.0)
 
-        # ── Single seeded RNG per product ────────────────────────────────────
-        # Seeding on product_id keeps paths reproducible regardless of
-        # scenario parameters.
-        seed = int(hashlib.md5(str(row["product_id"]).encode()).hexdigest(), 16) % (2 ** 31)
-        rng  = np.random.default_rng(seed)
+        rng_map = self._get_isin_rng_map(isins, scenario_seed=scenario_seed)
+       
 
-        # ── Draw all correlated normals upfront ──────────────────────────────
-        # Z_raw  : (n_days, n_assets)  — independent standard normals
-        # Z_corr : (n_days, n_assets)  — correlated via Cholesky
-        Z_raw  = rng.standard_normal((n_days, n_assets))
+        Z_raw = np.column_stack([
+                rng_map[isin].standard_normal(n_days)
+                for isin in isins
+            ])  # (n_days, n_assets)
+
+            # apply correlation
         Z_corr = Z_raw @ L.T
 
         # ── Simulate all assets jointly day-by-day ───────────────────────────
@@ -135,8 +135,8 @@ class ScenarioEngine:
                 drift = pre_shock_drift  * betas   # (n_assets,)
             elif t_years > T_last_shock:
                 drift = post_shock_drift * betas
-            else:
-                drift = np.zeros(n_assets)
+            #else:
+             #   drift = np.zeros(n_assets)
 
             # GBM step — all assets in one vectorised expression
             if dt > 0:
@@ -158,8 +158,8 @@ class ScenarioEngine:
             prev_date = bday
 
         # Safety: if maturity is beyond the grid, use last price
-        still_nan = np.isnan(product_final_prices)
-        product_final_prices = np.where(still_nan, price_paths[-1], product_final_prices)
+        #still_nan = np.isnan(product_final_prices)
+       # product_final_prices = np.where(still_nan, price_paths[-1], product_final_prices)
 
         # ── Outputs ──────────────────────────────────────────────────────────
         shocks      = [(product_final_prices[i] / spots[i] - 1) * 100 for i in range(n_assets)]
@@ -184,9 +184,12 @@ class ScenarioEngine:
 
         return shocks, final_spots, T_remaining, path_summary, paths
 
-    def run_product_path_scenario(self, row, scenario, corr_matrix=None):
+    def run_product_path_scenario(self, row, scenario, corr_df=None, scenario_seed=0):
+
+        corr_matrix = self.get_corr_subset(row, corr_df)
+
         shocks, final_spots, T_remaining, path_summary, paths = self.build_shock_paths(
-            row, scenario, corr_matrix=corr_matrix
+            row, scenario, corr_matrix=corr_matrix, scenario_seed=scenario_seed
         )
 
         rc = ReverseConvertible(row, final_levels=shocks)
@@ -260,26 +263,33 @@ class ScenarioEngine:
             "paths"               : paths,
         }
 
-    def run_path_scenario(self, scenario, corr_matrix=None):
+    def run_path_scenario(self, scenario, corr_df=None):
         """
         Runs path-based scenario across full portfolio
         (equivalent to run(), but using correlated path logic).
 
         Parameters
         ----------
-        corr_matrix : np.ndarray of shape (n_assets, n_assets), optional
-            Shared correlation matrix applied to every product.
-            Each product's underlying subset must match the matrix dimension.
+        corr_df : pd.DataFrame, optional
+            Full correlation matrix with ISINs as both index and columns.
             Defaults to identity (independent assets) per product.
+
+        A scenario_seed is derived from the scenario parameters so that
+        different scenarios produce visually distinct path shapes, while
+        all products within one run share the same seed (portfolio consistency).
         """
+        # Derive a repeatable seed from the scenario so each unique scenario
+        # produces different random draws while remaining deterministic.
+        scenario_seed = int(hashlib.md5(str(sorted(scenario.items())).encode()).hexdigest(), 16) % (2 ** 31)
+
         results   = []
         all_paths = {}
 
         for _, row in self.portfolio.iterrows():
-            res = self.run_product_path_scenario(row, scenario, corr_matrix=corr_matrix)
+            res = self.run_product_path_scenario(row, scenario, corr_df=corr_df,
+                                                  scenario_seed=scenario_seed)
             for isin, path_df in res.pop("paths", {}).items():
-                if isin not in all_paths:
-                    all_paths[isin] = path_df
+                all_paths[isin] = path_df
             results.append(res)
 
         product_df = pd.DataFrame(results)
@@ -354,4 +364,53 @@ class ScenarioEngine:
             "cash_positions"    : cash_positions,
             "delivered_stocks"  : delivered_stocks,
             "paths"             : all_paths,
+        }
+    
+    
+    def get_corr_subset(self, row, corr_df):
+        """
+        Extract product-specific correlation submatrix in the exact order of
+        row["underlying_isins"].
+    
+        Parameters
+        ----------
+        row : pd.Series
+            Portfolio row containing "underlying_isins"
+        corr_df : pd.DataFrame
+            Full correlation matrix with ISINs as both index and columns
+    
+        Returns
+        -------
+        np.ndarray
+            Correlation matrix subset with shape (n_assets, n_assets)
+        """
+        isins = list(row["underlying_isins"])
+    
+        if corr_df is None:
+            return np.eye(len(isins))
+    
+        missing = [isin for isin in isins if isin not in corr_df.index or isin not in corr_df.columns]
+        if missing:
+            raise KeyError(f"Missing ISIN(s) in correlation matrix: {missing}")
+    
+        corr_subset = corr_df.loc[isins, isins]
+    
+        return corr_subset.to_numpy(dtype=float)
+    
+    def _get_isin_rng_map(self, isins, scenario_seed=0):
+        """
+        Deterministic RNG per ISIN — same underlying always gets the same path
+        within one portfolio run (portfolio consistency).
+
+        scenario_seed : int
+            XOR'd into every ISIN seed so different scenarios produce different
+            path shapes, not just a scaled version of the same path.
+            Pass the same value for every product in one run_path_scenario call.
+        """
+        return {
+            isin: np.random.default_rng(
+                (int(hashlib.md5(str(isin).encode()).hexdigest(), 16) % (2 ** 31))
+                ^ scenario_seed
+            )
+            for isin in isins
         }

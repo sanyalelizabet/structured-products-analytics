@@ -1,6 +1,6 @@
 import requests
 from datetime import datetime
-
+from datetime import timedelta
 class EODClient:
     BASE_URL = "https://eodhistoricaldata.com/api"
 
@@ -33,3 +33,48 @@ class EODClient:
             "date": market_timestamp,
             "source": "EOD"
         }
+    
+    
+    def get_monthly_prices(self, ticker, years=4):
+        """
+        Download monthly adjusted-close prices for a ticker.
+
+        Parameters
+        ----------
+        ticker : str   e.g. "ALC.SW", "ABNB"
+        years  : int   how many calendar years of history to fetch (default 4)
+
+        Returns
+        -------
+        list[dict]  each entry: { "date": "YYYY-MM-DD", "adjusted_close": float }
+        """
+        to_date   = datetime.today()
+        from_date = to_date - timedelta(days=int(years * 365.25))
+
+        url = f"{self.BASE_URL}/eod/{ticker}"
+        params = {
+            "api_token": self.api_key,
+            "period"   : "m",
+            "from"     : from_date.strftime("%Y-%m-%d"),
+            "to"       : to_date.strftime("%Y-%m-%d"),
+            "fmt"      : "json",
+        }
+
+        response = requests.get(url, params=params)
+
+        if response.status_code != 200:
+            raise ValueError(f"HTTP {response.status_code} for {ticker}: {response.text}")
+
+        data = response.json()
+
+        if not data:
+            raise ValueError(f"No historical data returned for {ticker}")
+
+        return [
+            {
+                "date"          : row["date"],
+                "adjusted_close": float(row["adjusted_close"]),
+            }
+            for row in data
+            if row.get("adjusted_close") is not None
+        ]

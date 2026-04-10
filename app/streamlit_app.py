@@ -142,18 +142,28 @@ p4 = {
     "maturity_date": "2026-10-09",
     "barrier_breached": False
 }
-
-beta_map = {
-    "CH0432492467": 1.0,   # ALCON
-    "CH0012221716": 1.1,   # ABB
-    "CH0012214059": 0.9,   # HOLCIM
-    "CH0012005267": 0.8,   # NOVARTIS
-    "CH0012032048": 0.7,   # ROCHE
-    "CH0013841017": 1.2,   # LONZA
-    "CH0038863350": 0.6,   # NESTLE
-    "US0090661010": 1.4    # Airbnb
+isin_ticker_map = {
+    "CH0432492467": "ALC.SW",
+    "CH0012221716": "ABBN.SW",
+    "CH0012214059": "HOLN.SW",
+    "CH0012005267": "NOVN.SW",
+    "CH0012032048": "ROG.SW",
+    "CH0013841017": "LONN.SW",
+    "CH0038863350": "NESN.SW",
+    "US0090661010": "ABNB",
 }
 
+
+beta_map = {
+    "CH0432492467": 0.75,   # ALCON
+    "CH0012221716": 0.95,   # ABB
+    "CH0012214059": 0.70,   # HOLCIM
+    "CH0012005267": 0.55,   # NOVARTIS
+    "CH0012032048": 0.25,   # ROCHE
+    "CH0013841017": 0.20,   # LONZA
+    "CH0038863350": 0.50,   # NESTLE
+    "US0090661010": 1.15    # Airbnb
+}
 vol_map = {
     "CH0432492467": 0.24,   # ALCON
     "CH0012221716": 0.22,   # ABB
@@ -203,7 +213,7 @@ df = pd.DataFrame(results)
 df["return_pa"] *= 100
 df["distance_to_barrier"] *= 100
 
-# reduce columns
+corr_df = market_engine.build_corr_matrix(isin_ticker_map, years=4)
 
 
 # =========================
@@ -269,6 +279,8 @@ if view == "Product":
         "distance_to_barrier": "Distance to Barrier (%)"
     })
     row_selected = df_display[df_display["Product ID"] == selected_product].iloc[0]
+    
+    
 
 
 
@@ -530,7 +542,7 @@ elif view == "Stress Testing":
         "Current": {
             "market_shock": 0,
             "n_shocks": 1,
-            "shock_in_days": 0,
+            "shock_in_days": 2,
             "shock_spacing_days": 0,
             "pre_shock_drift_pa": 0.0,
             "post_shock_drift_pa": 0.0,
@@ -538,34 +550,34 @@ elif view == "Stress Testing":
         "Down 5%": {
             "market_shock": -5,
             "n_shocks": 1,
-            "shock_in_days": 0,
+            "shock_in_days": 2,
             "shock_spacing_days": 0,
-            "pre_shock_drift_pa": 5.0,
-            "post_shock_drift_pa": 5.0,
+            "pre_shock_drift_pa": 0.05,
+            "post_shock_drift_pa": 0.05,
         },
         "Down 10%": {
             "market_shock": -10,
             "n_shocks": 1,
-            "shock_in_days": 0,
+            "shock_in_days": 2,
             "shock_spacing_days": 0,
-            "pre_shock_drift_pa": 5.0,
-            "post_shock_drift_pa":5.0,
+            "pre_shock_drift_pa": 0.05,
+            "post_shock_drift_pa":0.05,
         },
         "Crash (-20%)": {
             "market_shock": -20,
             "n_shocks": 1,
             "shock_in_days": 0,
             "shock_spacing_days": 0,
-            "pre_shock_drift_pa": 5.0,
-            "post_shock_drift_pa": 5.0,
+            "pre_shock_drift_pa": 0.05,
+            "post_shock_drift_pa": 0.05,
         },
         "Recovery (+10% + ERP)": {
             "market_shock": -20,
             "n_shocks": 1,
-            "shock_in_days": 0,
+            "shock_in_days": 1,
             "shock_spacing_days": 0,
-            "pre_shock_drift_pa": 5.0,
-            "post_shock_drift_pa": 5.0,
+            "pre_shock_drift_pa": 0.05,
+            "post_shock_drift_pa": 0.05,
         },
     }
 
@@ -584,7 +596,7 @@ elif view == "Stress Testing":
         "n_shocks": 1,
         "shock_in_days": 15,
         "shock_spacing_days": 0,
-        "pre_shock_drift_pa": 0.0,
+        "pre_shock_drift_pa": 0.05,
         "post_shock_drift_pa": 0.0,
     }
 
@@ -597,7 +609,7 @@ elif view == "Stress Testing":
         market_shock = st.slider(
             "Market Shock per Event (%)",
             min_value=-25,
-            max_value=0,
+            max_value=2,
             value=int(default["market_shock"])
         )
 
@@ -610,7 +622,7 @@ elif view == "Stress Testing":
 
         shock_in_days = st.number_input(
             "Days to First Shock",
-            min_value=15,
+            min_value=1,
             max_value=300,
             value=int(default["shock_in_days"])
         )
@@ -651,7 +663,8 @@ elif view == "Stress Testing":
         "pre_shock_drift_pa": float(pre_shock_drift),
         "post_shock_drift_pa": float(post_shock_drift),
     }
-
+    
+    
     # =========================
     # Run engine
     # =========================
@@ -661,7 +674,10 @@ elif view == "Stress Testing":
         vol_map=vol_map
     )
 
-    res = engine.run_path_scenario(scenario)
+    res = engine.run_path_scenario(
+        scenario,
+        corr_df=corr_df
+    )
     paths = res["paths"]
     
     path_rows = []
@@ -813,6 +829,7 @@ elif view == "Stress Testing":
         
     with right_col:
         st.write("### Underlying Scenario Paths")
+        st.write("Scenario:", scenario)
         
         fig_paths = px.line(
             path_plot_df,
@@ -834,7 +851,13 @@ elif view == "Stress Testing":
             template="plotly_dark"
         )
         st.plotly_chart(fig_paths, width='content')
-    # =========================
+        
+    st.write("### Correlation Matrix")
+    st.dataframe(
+        corr_df.round(3),
+        width="stretch"
+    )
+        # =========================
     # Delivered Stocks
     # =========================
     
