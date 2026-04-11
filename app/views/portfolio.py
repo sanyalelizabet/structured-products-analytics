@@ -1,9 +1,10 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 
 
-def render(analytics, df, valuation_date):
+def render(analytics, df, greeks_df, pf_delta, valuation_date):
 
     st.subheader("Portfolio Analytics")
     st.caption(
@@ -157,3 +158,86 @@ def render(analytics, df, valuation_date):
                 "total_pnl":       st.column_config.NumberColumn(f"Total PnL ({analytics.reference_currency})",    format="%.2f"),
             }
         )
+
+    # =========================
+    # Greeks
+    # =========================
+    st.write("### Greeks")
+    st.caption(
+        "Computed via Monte Carlo bump-and-reprice. "
+        "Delta = FV change for a 1% spot move. "
+        "Vega = FV change for a 1pp vol move. "
+        "Theta = FV change per calendar day. "
+        "Corr = FV change per 1pp uniform correlation shift (MBRC only)."
+    )
+
+    col_greek_table, col_delta_chart = st.columns([2, 1])
+
+    with col_greek_table:
+        st.write("#### Per-Product Greeks")
+        st.dataframe(
+            greeks_df.rename(columns={
+                "product_id":  "Product ID",
+                "currency":    "CCY",
+                "isin":        "ISIN",
+                "underlying":  "Underlying",
+                "delta_1pct":  "Delta (1% spot)",
+                "vega_1pp":    "Vega (1pp vol)",
+                "theta":       "Theta (daily)",
+                "rho":         "Rho (1bp rate)",
+                "corr_sens":   "Corr Sens (1pp)",
+            }),
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "Delta (1% spot)":  st.column_config.NumberColumn(format="%.2f"),
+                "Vega (1pp vol)":   st.column_config.NumberColumn(format="%.2f"),
+                "Theta (daily)":    st.column_config.NumberColumn(format="%.2f"),
+                "Rho (1bp rate)":   st.column_config.NumberColumn(format="%.2f"),
+                "Corr Sens (1pp)":  st.column_config.NumberColumn(format="%.2f"),
+            }
+        )
+
+        st.write("#### Portfolio Delta by Underlying")
+        st.caption("Sum of delta across all products per underlying — shows net directional exposure.")
+        st.dataframe(
+            pf_delta.rename(columns={
+                "isin":             "ISIN",
+                "underlying":       "Underlying",
+                "currency":         "CCY",
+                "total_delta_1pct": "Total Delta (1% spot)",
+            }),
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "Total Delta (1% spot)": st.column_config.NumberColumn(format="%.2f"),
+            }
+        )
+
+    with col_delta_chart:
+        st.write("#### Portfolio Delta")
+        colors = [
+            "#4C9BE8" if d >= 0 else "#E84C4C"
+            for d in pf_delta["total_delta_1pct"]
+        ]
+        fig_delta = go.Figure(go.Bar(
+            x=pf_delta["total_delta_1pct"],
+            y=pf_delta["underlying"],
+            orientation="h",
+            marker_color=colors,
+            text=pf_delta["total_delta_1pct"].apply(lambda x: f"{x:+.0f}"),
+            textposition="outside",
+            hovertemplate=(
+                "<b>%{y}</b><br>"
+                "Total Delta: %{x:+.2f}<extra></extra>"
+            )
+        ))
+        fig_delta.update_layout(
+            template="plotly_dark",
+            height=max(250, len(pf_delta) * 55),
+            margin=dict(t=20, b=20, l=10, r=80),
+            xaxis_title="FV change per 1% spot move",
+            yaxis_title=None,
+            showlegend=False,
+        )
+        st.plotly_chart(fig_delta, width="stretch")

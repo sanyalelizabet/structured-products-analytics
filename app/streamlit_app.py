@@ -52,6 +52,11 @@ def compute_fair_values(_portfolio, _corr_df, vol_map, risk_free_rates):
     pricer = MonteCarloPricer(n_paths=10_000, seed=42)
     return pricer.price_portfolio(_portfolio, vol_map, risk_free_rates, corr_df=_corr_df)
 
+@st.cache_data(ttl=3600)
+def compute_greeks(_portfolio, _corr_df, vol_map, risk_free_rates):
+    pricer = MonteCarloPricer(n_paths=10_000, seed=42)
+    return pricer.compute_portfolio_greeks(_portfolio, vol_map, risk_free_rates, corr_df=_corr_df)
+
 
 # =========================
 # Page setup
@@ -68,9 +73,10 @@ portfolio, db, valuation_date, fetch_error = fetch_market_data(portfolio)
 if fetch_error:
     st.warning(f"Could not refresh market prices. Using portfolio default spots. {fetch_error}")
 
-analytics, df = build_product_analytics(portfolio, db)
-corr_df    = build_corr_matrix()
-fv_df      = compute_fair_values(portfolio, corr_df, vol_map, risk_free_rates)
+analytics, df       = build_product_analytics(portfolio, db)
+corr_df             = build_corr_matrix()
+fv_df               = compute_fair_values(portfolio, corr_df, vol_map, risk_free_rates)
+greeks_df, pf_delta = compute_greeks(portfolio, corr_df, vol_map, risk_free_rates)
 
 # Merge fair value columns into product analytics df
 df = df.merge(fv_df[["product_id", "fair_value", "fair_value_pct"]], on="product_id", how="left")
@@ -82,7 +88,7 @@ if view == "Product":
     product.render(portfolio, df, analytics, valuation_date, vol_map, beta_map)
 
 elif view == "Portfolio":
-    portfolio_view.render(analytics, df, valuation_date)
+    portfolio_view.render(analytics, df, greeks_df, pf_delta, valuation_date)
 
 elif view == "Stress Testing":
     stress_testing.render(portfolio, corr_df, beta_map, vol_map)

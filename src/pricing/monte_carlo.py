@@ -287,6 +287,196 @@ class MonteCarloPricer:
         return pd.DataFrame(rows)
 
     # ------------------------------------------------------------------
+    # Greeks — bump and reprice
+    # ------------------------------------------------------------------
+    def compute_greeks(
+        self,
+        row: pd.Series,
+        payoff_fn: Callable,
+        vol_map: dict,
+        risk_free_rate: float,
+        corr_matrix: np.ndarray | None = None,
+        spot_bump_pct: float = 0.01,   # 1 % spot move
+        vol_bump: float = 0.01,        # 1 pp vol move
+        rate_bump: float = 0.0001,     # 1 bp rate move
+        corr_bump: float = 0.01,       # 1 pp correlation move (MBRC)
+    ) -> dict:
+        """
+        Per-product Greeks via central finite differences.
+
+        The same RNG seed is used for base and every bumped reprice so that
+        the Monte Carlo noise cancels almost entirely in the difference —
+        the signal-to-noise ratio of a finite-difference Greek is much better
+        than that of the fair value itself.
+
+        All Greeks are expressed as the absolute FV change (in product
+        currency) per one unit of the bump:
+
+          delta    — FV change for a 1 % spot move, per underlying
+          vega     — FV change for a 1 pp (0.01) vol move, per underlying
+          theta    — FV change for 1 calendar day passing (approx)
+          rho      — FV change for a 1 bp (0.0001) rate move
+          corr_sens— FV change for a 1 pp uniform correlation shift (MBRC only)
+
+        Returns
+        -------
+        dict with keys: product_id, isins, underlyings,
+                        delta (list), vega (list), theta, rho, corr_sens
+        """
+        base_fv = self.price(row, payoff_fn, vol_map, risk_free_rate, corr_matrix)["fair_value"]
+
+        isins  = list(row["underlying_isins"])
+        names  = list(row["underlyings"])
+        spots  = [float(s) for s in row["current_spots"]]
+        n      = len(isins)
+
+        # ── Delta ─────────────────────────────────────────────────────────
+        deltas = []
+        for i in range(n):
+            bump = spots[i] * spot_bump_pct
+
+            spots_up = spots.copy(); spots_up[i] += bump
+            spots_dn = spots.copy(); spots_dn[i] -= bump
+
+            row_up = row.copy(); row_up["current_spots"] = spots_up
+            row_dn = row.copy(); row_dn["current_spots"] = spots_dn
+
+            fv_up = self.price(row_up, payoff_fn, vol_map, risk_free_rate, corr_matrix)["fair_value"]
+            fv_dn = self.price(row_dn, payoff_fn, vol_map, risk_free_rate, corr_matrix)["fair_value"]
+
+            # FV change for a 1 % spot move (central diff over ±1 %)
+            deltas.append((fv_up - fv_dn) / 2)
+
+        # ── Vega ──────────────────────────────────────────────────────────
+        vegas = []
+        for isin in isins:
+            base_vol = vol_map.get(isin, 0.15)
+            vol_up = {**vol_map, isin: base_vol + vol_bump}
+            vol_dn = {**vol_map, isin: base_vol - vol_bump}
+
+            fv_up = self.price(row, payoff_fn, vol_up, risk_free_rate, corr_matrix)["fair_value"]
+            fv_dn = self.price(row, payoff_fn, vol_dn, risk_free_rate, corr_matrix)["fair_value"]
+
+            # FV change per 1 pp vol move
+            vegas.append((fv_up - fv_dn) / 2)
+
+        # ── Theta ─────────────────────────────────────────────────────────
+        # Approximate by moving maturity 1 day closer (= 1 day has passed).
+        mat = pd.Timestamp(row["maturity_date"])
+        row_th = row.copy()
+        row_th["maturity_date"] = (mat - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+        fv_th = self.price(row_th, payoff_fn, vol_map, risk_free_rate, corr_matrix)["fair_value"]
+        theta = fv_th - base_fv   # negative = daily decay
+
+        # ── Rho ───────────────────────────────────────────────────────────
+        fv_up = self.price(row, payoff_fn, vol_map, risk_free_rate + rate_bump, corr_matrix)["fair_value"]
+        fv_dn = self.price(row, payoff_fn, vol_map, risk_free_rate - rate_bump, corr_matrix)["fair_value"]
+        rho = (fv_up - fv_dn) / 2   # per 1 bp
+
+        # ── Correlation sensitivity (MBRC only) ───────────────────────────
+        corr_sens = None
+        if n > 1 and corr_matrix is not None:
+            off_diag = 1 - np.eye(n)
+
+            corr_up = np.clip(corr_matrix + corr_bump * off_diag, -1.0, 1.0)
+            corr_dn = np.clip(corr_matrix - corr_bump * off_diag, -1.0, 1.0)
+
+            # Fall back to base if bumped matrix is no longer positive-definite
+            for bumped, original in [(corr_up, corr_matrix), (corr_dn, corr_matrix)]:
+                try:
+                    np.linalg.cholesky(bumped)
+                except np.linalg.LinAlgError:
+                    bumped[:] = original
+
+            fv_up = self.price(row, payoff_fn, vol_map, risk_free_rate, corr_up)["fair_value"]
+            fv_dn = self.price(row, payoff_fn, vol_map, risk_free_rate, corr_dn)["fair_value"]
+            corr_sens = (fv_up - fv_dn) / 2   # per 1 pp correlation move
+
+        return {
+            "product_id":  row["product_id"],
+            "isins":       isins,
+            "underlyings": names,
+            "delta":       deltas,    # list[float]
+            "vega":        vegas,     # list[float]
+            "theta":       theta,     # float
+            "rho":         rho,       # float
+            "corr_sens":   corr_sens, # float | None
+        }
+
+    # ------------------------------------------------------------------
+    # Portfolio-level Greeks
+    # ------------------------------------------------------------------
+    def compute_portfolio_greeks(
+        self,
+        portfolio: pd.DataFrame,
+        vol_map: dict,
+        risk_free_rates: dict,
+        corr_df: pd.DataFrame | None = None,
+    ) -> tuple[pd.DataFrame, pd.DataFrame]:
+        """
+        Compute Greeks for every product and aggregate delta to portfolio level.
+
+        Returns
+        -------
+        greeks_df : pd.DataFrame (long format — one row per product × underlying)
+            product_id, currency, isin, underlying,
+            delta_1pct, vega_1pp, theta, rho, corr_sens
+
+        portfolio_delta : pd.DataFrame (one row per unique underlying)
+            isin, underlying, total_delta_1pct
+            Sorted by absolute delta descending — shows largest exposures first.
+        """
+        greeks_rows = []
+        delta_agg   = {}   # isin → {"underlying": str, "currency": str, "total": float}
+
+        for _, row in portfolio.iterrows():
+            r           = float(risk_free_rates.get(row["currency"], 0.02))
+            corr_matrix = self._get_corr_subset(row, corr_df)
+            payoff_fn   = self._resolve_payoff(row)
+
+            g = self.compute_greeks(row, payoff_fn, vol_map, r, corr_matrix)
+
+            for isin, name, delta, vega in zip(
+                g["isins"], g["underlyings"], g["delta"], g["vega"]
+            ):
+                greeks_rows.append({
+                    "product_id":  row["product_id"],
+                    "currency":    row["currency"],
+                    "isin":        isin,
+                    "underlying":  name,
+                    "delta_1pct":  round(delta, 2),
+                    "vega_1pp":    round(vega, 2),
+                    "theta":       round(g["theta"], 2),
+                    "rho":         round(g["rho"], 2),
+                    "corr_sens":   round(g["corr_sens"], 2) if g["corr_sens"] is not None else None,
+                })
+
+                if isin not in delta_agg:
+                    delta_agg[isin] = {"underlying": name, "currency": row["currency"], "total": 0.0}
+                delta_agg[isin]["total"] += delta
+
+        greeks_df = pd.DataFrame(greeks_rows)
+
+        portfolio_delta = pd.DataFrame([
+            {
+                "isin":            isin,
+                "underlying":      v["underlying"],
+                "currency":        v["currency"],
+                "total_delta_1pct": round(v["total"], 2),
+            }
+            for isin, v in delta_agg.items()
+        ])
+        portfolio_delta = (
+            portfolio_delta
+            .assign(abs_delta=lambda d: d["total_delta_1pct"].abs())
+            .sort_values("abs_delta", ascending=False)
+            .drop(columns="abs_delta")
+            .reset_index(drop=True)
+        )
+
+        return greeks_df, portfolio_delta
+
+    # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
     def _resolve_payoff(self, row: pd.Series) -> Callable:
