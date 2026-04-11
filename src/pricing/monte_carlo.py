@@ -361,12 +361,32 @@ class MonteCarloPricer:
             vegas.append((fv_up - fv_dn) / 2)
 
         # ── Theta ─────────────────────────────────────────────────────────
-        # Approximate by moving maturity 1 day closer (= 1 day has passed).
-        mat = pd.Timestamp(row["maturity_date"])
-        row_th = row.copy()
-        row_th["maturity_date"] = (mat - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
-        fv_th = self.price(row_th, payoff_fn, vol_map, risk_free_rate, corr_matrix)["fair_value"]
-        theta = fv_th - base_fv   # negative = daily decay
+        # Theta = FV if we were 1 business day closer to maturity.
+        #
+        # Naive approach (shift maturity date by -1 day) breaks CRN because
+        # the path grid changes size, so Monte Carlo noise swamps the tiny
+        # signal (~a few CHF per day).
+        #
+        # Correct approach: generate paths to full maturity (same grid, CRN
+        # preserved), then evaluate the payoff at the penultimate step and
+        # discount for T_remaining - 1 business day. The coupon is fixed
+        # contractually and is unchanged by 1 day passing.
+        today = pd.Timestamp.today().normalize()
+        mat   = pd.Timestamp(row["maturity_date"])
+
+        paths_full, dates_full = self.simulate_paths(row, vol_map, risk_free_rate, corr_matrix)
+
+        if len(dates_full) >= 2:
+            # Use penultimate step as the terminal value (= 1 business day closer)
+            paths_tm1    = paths_full[:, :-1, :]
+            dates_tm1    = dates_full[:-1]
+            T_tm1        = max((dates_full[-2] - today).days / 360, 0.0)
+
+            payoffs_tm1  = payoff_fn(paths_tm1, dates_tm1, row)   # row dates unchanged → coupon fixed
+            fv_tm1       = float(np.mean(payoffs_tm1)) * np.exp(-risk_free_rate * T_tm1)
+            theta        = fv_tm1 - base_fv
+        else:
+            theta = 0.0
 
         # ── Rho ───────────────────────────────────────────────────────────
         fv_up = self.price(row, payoff_fn, vol_map, risk_free_rate + rate_bump, corr_matrix)["fair_value"]

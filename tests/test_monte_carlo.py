@@ -342,3 +342,158 @@ class TestPricePortfolio:
 
         with pytest.raises(NotImplementedError, match="american"):
             pricer.price_portfolio(portfolio, VOL_MAP, {"CHF": 0.01})
+
+
+# ---------------------------------------------------------------------------
+# Greeks
+# ---------------------------------------------------------------------------
+
+# Shared fixtures — products with enough time remaining for meaningful Greeks
+BRC_GREEK = make_brc_row(
+    notional=100_000, coupon=0.08,
+    strike=70.0, current_spot=95.0,
+    initial_fixing_date="2024-01-01", maturity_date="2027-01-01",
+)
+MBRC_GREEK = make_mbrc_row(
+    notional=100_000, coupon=0.08,
+    strikes=[70.0, 56.0], current_spots=[95.0, 76.0],
+    initial_fixing_date="2024-01-01", maturity_date="2027-01-01",
+)
+VOL_BRC_G  = {"CH0012221716": 0.20}
+VOL_MBRC_G = {"CH0012221716": 0.20, "CH0012221717": 0.25}
+CORR_2x2   = np.array([[1.0, 0.65], [0.65, 1.0]])
+R_CHF      = 0.01
+
+
+class TestGreeks:
+
+    # ── Sign checks ───────────────────────────────────────────────────────
+
+    def test_brc_delta_positive(self):
+        """BRC holder is long spot — delta must be positive."""
+        g = make_pricer(n_paths=10_000).compute_greeks(
+            BRC_GREEK, european_brc_payoff, VOL_BRC_G, R_CHF
+        )
+        assert g["delta"][0] > 0
+
+    def test_brc_vega_negative(self):
+        """BRC holder is short a put — short vega, so FV falls when vol rises."""
+        g = make_pricer(n_paths=10_000).compute_greeks(
+            BRC_GREEK, european_brc_payoff, VOL_BRC_G, R_CHF
+        )
+        assert g["vega"][0] < 0
+
+    def test_brc_theta_positive(self):
+        """Each passing day reduces T_remaining — discount on the coupon shrinks,
+        and the short put decays — both benefit the holder."""
+        g = make_pricer(n_paths=10_000).compute_greeks(
+            BRC_GREEK, european_brc_payoff, VOL_BRC_G, R_CHF
+        )
+        assert g["theta"] > 0
+
+    def test_mbrc_corr_sens_positive(self):
+        """Higher correlation between underlyings reduces worst-of risk — FV rises."""
+        g = make_pricer(n_paths=10_000).compute_greeks(
+            MBRC_GREEK, european_brc_payoff, VOL_MBRC_G, R_CHF, CORR_2x2
+        )
+        assert g["corr_sens"] > 0
+
+    def test_brc_corr_sens_is_none(self):
+        """Single-underlying product has no correlation sensitivity."""
+        g = make_pricer(n_paths=500).compute_greeks(
+            BRC_GREEK, european_brc_payoff, VOL_BRC_G, R_CHF
+        )
+        assert g["corr_sens"] is None
+
+    # ── Output structure ──────────────────────────────────────────────────
+
+    def test_delta_length_matches_underlyings(self):
+        g_brc  = make_pricer(n_paths=500).compute_greeks(BRC_GREEK,  european_brc_payoff, VOL_BRC_G,  R_CHF)
+        g_mbrc = make_pricer(n_paths=500).compute_greeks(MBRC_GREEK, european_brc_payoff, VOL_MBRC_G, R_CHF, CORR_2x2)
+        assert len(g_brc["delta"])  == 1
+        assert len(g_mbrc["delta"]) == 2
+
+    def test_vega_length_matches_underlyings(self):
+        g = make_pricer(n_paths=500).compute_greeks(MBRC_GREEK, european_brc_payoff, VOL_MBRC_G, R_CHF, CORR_2x2)
+        assert len(g["vega"]) == 2
+
+    def test_output_keys_present(self):
+        g = make_pricer(n_paths=500).compute_greeks(BRC_GREEK, european_brc_payoff, VOL_BRC_G, R_CHF)
+        assert {"product_id", "isins", "underlyings", "delta", "vega", "theta", "rho", "corr_sens"}.issubset(g.keys())
+
+    # ── Monotonicity checks ───────────────────────────────────────────────
+
+    def test_mbrc_fv_increases_with_correlation(self):
+        """FV should be non-decreasing as pairwise correlation rises."""
+        pricer = make_pricer(n_paths=10_000, seed=0)
+        fvs = [
+            pricer.price(
+                MBRC_GREEK, european_brc_payoff, VOL_MBRC_G, R_CHF,
+                corr_matrix=np.array([[1.0, rho], [rho, 1.0]])
+            )["fair_value"]
+            for rho in [0.1, 0.3, 0.5, 0.7, 0.9]
+        ]
+        assert all(fvs[i] <= fvs[i + 1] for i in range(len(fvs) - 1))
+
+    def test_higher_vol_lowers_fv(self):
+        """Higher vol → more chance of barrier breach → lower fair value."""
+        pricer = make_pricer(n_paths=10_000, seed=0)
+        vol_low  = {"CH0012221716": 0.10}
+        vol_high = {"CH0012221716": 0.40}
+        fv_low  = pricer.price(BRC_GREEK, european_brc_payoff, vol_low,  R_CHF)["fair_value"]
+        fv_high = pricer.price(BRC_GREEK, european_brc_payoff, vol_high, R_CHF)["fair_value"]
+        assert fv_high < fv_low
+
+    # ── Analytical benchmark (delta vs Black-Scholes) ─────────────────────
+
+    def test_brc_delta_close_to_black_scholes(self):
+        """For a single European BRC the MC delta should match BS within 5%.
+
+        A BRC with notional N and barrier (strike) K is equivalent to:
+            N bonds  −  (N/K) vanilla puts struck at K
+
+        So the BRC delta = (N/K) × |put_delta| × S × 0.01  (per 1% spot move).
+        """
+        from src.pricing.black_scholes import BlackScholes
+
+        pricer = make_pricer(n_paths=20_000, seed=42)
+        g = pricer.compute_greeks(BRC_GREEK, european_brc_payoff, VOL_BRC_G, R_CHF)
+
+        today    = pd.Timestamp.today().normalize()
+        T        = (pd.Timestamp(BRC_GREEK["maturity_date"]) - today).days / 360
+        S        = 95.0
+        K        = float(BRC_GREEK["strike"][0])
+        N        = float(BRC_GREEK["notional"])
+        bs       = BlackScholes(S=S, K=K, T=T, r=R_CHF, sigma=0.20)
+
+        # BRC embeds N/K puts; short-put delta is positive
+        bs_delta = -bs.delta("put") * (N / K) * S * 0.01
+
+        err_pct = abs(g["delta"][0] - bs_delta) / abs(bs_delta) * 100
+        assert err_pct < 10.0, f"Delta error {err_pct:.1f}% exceeds 10% tolerance"
+
+    # ── Portfolio Greeks ──────────────────────────────────────────────────
+
+    def test_portfolio_greeks_output_shape(self):
+        pricer    = make_pricer(n_paths=500)
+        portfolio = make_portfolio()
+        greeks_df, pf_delta = pricer.compute_portfolio_greeks(
+            portfolio, {**VOL_BRC_G, **VOL_MBRC_G}, {"CHF": R_CHF}
+        )
+        # One row per product × underlying
+        total_underlyings = sum(len(row["underlying_isins"]) for _, row in portfolio.iterrows())
+        assert len(greeks_df) == total_underlyings
+        assert {"product_id", "isin", "underlying", "delta_1pct", "vega_1pp", "theta", "rho"}.issubset(greeks_df.columns)
+
+    def test_portfolio_delta_aggregates_by_isin(self):
+        """ABB (CH0012221716) appears in both BRC and MBRC — its portfolio delta
+        should equal the sum of its individual product deltas."""
+        pricer    = make_pricer(n_paths=2_000, seed=42)
+        portfolio = make_portfolio()
+        greeks_df, pf_delta = pricer.compute_portfolio_greeks(
+            portfolio, {**VOL_BRC_G, **VOL_MBRC_G}, {"CHF": R_CHF}
+        )
+        isin = "CH0012221716"
+        sum_from_products = greeks_df[greeks_df["isin"] == isin]["delta_1pct"].sum()
+        pf_value          = pf_delta[pf_delta["isin"] == isin]["total_delta_1pct"].iloc[0]
+        assert abs(sum_from_products - pf_value) < 0.01
