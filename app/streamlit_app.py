@@ -10,7 +10,6 @@ import plotly.express as px
 # make src importable
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 logo_path = Path(__file__).resolve().parent / "assets" / "logo.png"
-from src.reverse_convertible import ReverseConvertible
 from src.portfolio_analytics import PortfolioAnalytics
 from src.scenario_engine import ScenarioEngine
 from src.eod_client import EODClient
@@ -26,6 +25,18 @@ def get_market_engine():
     return MarketDataEngine(client)
 
 @st.cache_data(ttl=3600)
+def build_product_analytics(_portfolio, _db):
+    pa = PortfolioAnalytics(_portfolio, reference_currency="CHF", price_db=_db)
+    df = pa.build_product_analytics()
+    df["return_pa"] *= 100
+    df["distance_to_barrier"] *= 100
+    return pa, df
+
+@st.cache_data(ttl=3600)
+def build_corr_matrix():
+    return get_market_engine().build_corr_matrix(isin_ticker_map, years=4)
+
+@st.cache_data(ttl=3600)
 def fetch_market_data(_portfolio):
     engine = get_market_engine()
     try:
@@ -39,11 +50,6 @@ def fetch_market_data(_portfolio):
         valuation_date = db["date"].max() if not db.empty else None
         return _portfolio, db, valuation_date, str(e)
 
-market_engine = get_market_engine()
-
-
-
-
 
 st.set_page_config(page_title="Structured Products Dashboard", layout="wide")
 st.title("Structured Products Analytics")
@@ -52,36 +58,17 @@ view = st.sidebar.radio("View", ["Product", "Portfolio", "Stress Testing"])
 
 
 
-valuation_date  = None
-try:
-    market_engine.fetch_latest_prices(portfolio)
-    portfolio = market_engine.update_spots(portfolio)
-    db = market_engine.load_db()
-    if not db.empty:
-        valuation_date = db["date"].max()
-except Exception as e:
-    st.warning(f"Could not refresh market prices. Using portfolio default spots. {e}")
+portfolio, db, valuation_date, fetch_error = fetch_market_data(portfolio)
+if fetch_error:
+    st.warning(f"Could not refresh market prices. Using portfolio default spots. {fetch_error}")
     
 
 # =========================
 # Build Analytics
 # =========================
 
-results = []
-
-for _, row in portfolio.iterrows():
-    rc = ReverseConvertible(row, price_db=db)
-    res = rc.summary()
-    res["product_id"] = row["product_id"]
-    results.append(res)
-
-df = pd.DataFrame(results)
-
-# format %
-df["return_pa"] *= 100
-df["distance_to_barrier"] *= 100
-
-corr_df = market_engine.build_corr_matrix(isin_ticker_map, years=4)
+analytics, df = build_product_analytics(portfolio, db)
+corr_df = build_corr_matrix()
 
 
 # =========================
@@ -105,7 +92,23 @@ if view == "Product":
         "Coupons accrued over full product life."
     )
         
-    st.dataframe(portfolio[overview_cols], width="stretch")
+    overview_display = portfolio[overview_cols].copy()
+    overview_display["coupon"] = overview_display["coupon"] * 100
+
+    st.dataframe(
+        overview_display,
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "product_id":   st.column_config.TextColumn("Product ID",   width="medium"),
+            "product_type": st.column_config.TextColumn("Type",         width="small"),
+            "underlyings":  st.column_config.ListColumn("Underlyings",  width="medium"),
+            "notional":     st.column_config.NumberColumn("Notional",   width="small", format="%.0f"),
+            "currency":     st.column_config.TextColumn("CCY",          width="small"),
+            "coupon":       st.column_config.NumberColumn("Coupon (%)", width="small", format="%.2f"),
+            "maturity_date":st.column_config.TextColumn("Maturity",     width="small"),
+        }
+    )
 
 # =========================
 # Product Selection
@@ -244,13 +247,13 @@ if view == "Product":
         detail["Value"] = detail["Value"].apply(
             lambda x: f"{x:.2f}" if isinstance(x, (int, float, np.floating)) else str(x)
         )
-        st.dataframe(detail, use_container_width=True, hide_index=True)
+        st.dataframe(detail, width="stretch", hide_index=True)
 
     with col_und:
         st.caption("Underlying Metrics")
         st.dataframe(
             und_df,
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
             column_config={
                 "Spot":    st.column_config.NumberColumn("Spot", format="%.2f"),
@@ -269,9 +272,6 @@ elif view == "Portfolio":
     )
     vd_label = valuation_date.strftime('%d.%m.%Y') if valuation_date is not None else "Using default prices"
     st.caption(f"Valuation Date: {vd_label}")
-
-    analytics = PortfolioAnalytics(portfolio, reference_currency="CHF", price_db=db)
-    analytics.build_product_analytics()
 
     st.write("### Portfolio Overview")
     portfolio_overview = analytics.total_portfolio_metrics()
