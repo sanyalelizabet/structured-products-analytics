@@ -15,6 +15,8 @@ from src.portfolio_analytics import PortfolioAnalytics
 from src.scenario_engine import ScenarioEngine
 from src.eod_client import EODClient
 from src.market_data_engine import MarketDataEngine
+from data.reference_data import isin_ticker_map, beta_map, vol_map
+from data.portfolio import portfolio
 
 
 @st.cache_resource
@@ -49,140 +51,6 @@ st.sidebar.image(str(logo_path), width=160)
 view = st.sidebar.radio("View", ["Product", "Portfolio", "Stress Testing"])
 
 
-# =========================
-# Portfolio Input
-# =========================
-
-p1 = {
-    "product_id": "CH1483491150",
-    "product_type": "BRC",
-    "type_style": "European",
-    "underlyings": ["ALCON"],
-    "underlying_isins": ["CH0432492467"],
-    "tickers": ["ALC.SW"], 
-    "currency": "CHF",
-    "position_units": 1,
-    "notional": 1000,
-    "cost_price": 1.00,
-    "initial_levels": [59.72],
-    "current_spots": [58.76],
-    "strike": [59.72],
-    "barrier_pct": 0.70,
-    "coupon": 0.04,
-    "initial_fixing_date": "2025-11-10",
-    "maturity_date": "2026-11-17",
-    "barrier_breached": False
-}
-
-p2 = {
-    "product_id": "CH1449111066",
-    "product_type": "MBRC",
-    "type_style": "European",
-    "underlyings": ["ABB", "HOLCIM", "NOVARTIS", "ROCHE"],
-    "underlying_isins": [
-        "CH0012221716",
-        "CH0012214059",
-        "CH0012005267",
-        "CH0012032048"
-    ],
-    "tickers": ["ABBN.SW", "HOLN.SW", "NOVN.SW", "ROG.SW"],
-    "currency": "CHF",
-    "position_units": 1,
-    "notional": 1000,
-    "cost_price": 0.98,
-    "initial_levels": [35.00, 70.00, 90.00, 250.00],
-    "current_spots": [34.00, 68.00, 92.00, 245.00],
-    "strike": [35.00, 70.00, 90.00, 250.00],
-    "barrier_pct": 0.70,
-    "coupon": 0.0675,
-    "initial_fixing_date": "2025-12-30",
-    "maturity_date": "2026-12-28",
-    "barrier_breached": True
-}
-
-p3 = {
-    "product_id": "CH1461018793",
-    "product_type": "MBRC",
-    "type_style": "European",
-    "underlyings": ["ABB", "LONZA", "NESTLE"],
-    "underlying_isins": ["CH0012221716", "CH0013841017", "CH0038863350"],
-    "tickers": ["ABBN.SW", "LONN.SW", "NESN.SW"],
-    "currency": "CHF",
-    "position_units": 10,
-    "notional": 10000,
-    "cost_price": 1.00,
-    "initial_levels": [53.94, 555.20, 72.49],
-    "current_spots": [53.94, 555.20, 72.49],
-    "strike": [53.94, 555.20, 72.49],
-    "barrier_pct": 0.70,
-    "coupon": 0.0866,
-    "initial_fixing_date": "2025-08-19",
-    "maturity_date": "2026-08-19",
-    "barrier_breached": False
-}
-
-
-p4 = {
-    "product_id": "CH1483484015",
-    "product_type": "BRC",
-    "type_style": "European",
-    "underlyings": ["Airbnb Inc."],
-    "underlying_isins": ["US0090661010"],
-    "tickers": ["ABNB"],
-    "currency": "USD",
-    "position_units": 1,
-    "notional": 5000,
-    "cost_price": 0.98,
-    "initial_levels": [120.46],
-    "current_spots": [120.46],  
-    "strike": [120.46],
-    "barrier_pct": 0.65,
-    "coupon": 0.100556,
-    "initial_fixing_date": "2025-10-02",
-    "maturity_date": "2026-10-09",
-    "barrier_breached": False
-}
-isin_ticker_map = {
-    "CH0432492467": "ALC.SW",
-    "CH0012221716": "ABBN.SW",
-    "CH0012214059": "HOLN.SW",
-    "CH0012005267": "NOVN.SW",
-    "CH0012032048": "ROG.SW",
-    "CH0013841017": "LONN.SW",
-    "CH0038863350": "NESN.SW",
-    "US0090661010": "ABNB",
-}
-
-
-beta_map = {
-    "CH0432492467": 0.75,   # ALCON
-    "CH0012221716": 0.95,   # ABB
-    "CH0012214059": 0.70,   # HOLCIM
-    "CH0012005267": 0.55,   # NOVARTIS
-    "CH0012032048": 0.25,   # ROCHE
-    "CH0013841017": 0.20,   # LONZA
-    "CH0038863350": 0.50,   # NESTLE
-    "US0090661010": 1.15    # Airbnb
-}
-vol_map = {
-    "CH0432492467": 0.24,   # ALCON
-    "CH0012221716": 0.22,   # ABB
-    "CH0012214059": 0.18,   # HOLCIM
-    "CH0012005267": 0.16,   # NOVARTIS
-    "CH0012032048": 0.14,   # ROCHE
-    "CH0013841017": 0.28,   # LONZA
-    "CH0038863350": 0.12,   # NESTLE
-    "US0090661010": 0.35    # Airbnb
-}
-scenarios = {
-    "Current": 0,
-    "Down 5%": -5,
-    "Down 10%": -10,
-    "Crash (-20%)": -20,
-    "Up 10%": 10
-}
-
-portfolio = pd.DataFrame([p1, p2, p3, p4])
 
 valuation_date  = None
 try:
@@ -276,7 +144,7 @@ if view == "Product":
         "break_even": "Break-even",
         "return_pa": "Return p.a. (%)",
         "return_pct": "Return (%)",
-        "distance_to_barrier": "Distance to Barrier (%)"
+        "distance_to_barrier": "Downside to Barrier (%)"
     })
     row_selected = df_display[df_display["Product ID"] == selected_product].iloc[0]
     
@@ -478,7 +346,7 @@ elif view == "Portfolio":
             "payoff_ref": st.column_config.NumberColumn(f"Payoff ({ref_ccy})", format="%.2f"),
             "pnl_ref": st.column_config.NumberColumn(f"PnL ({ref_ccy})", format="%.2f"),
             "return_pct": st.column_config.NumberColumn("Return (%)", format="%.2f"),
-            "distance_to_barrier": st.column_config.NumberColumn("Distance to Barrier (%)", format="%.2f"),
+            "distance_to_barrier": st.column_config.NumberColumn("Downside to Barrier (%)", format="%.2f"),
         }
     )    
     st.write("### Underlying Exposure")
@@ -498,7 +366,7 @@ elif view == "Portfolio":
             hover_data={"weight": True, "n_products": True, "min_distance_to_barrier": True},
             labels={
                 "allocated_cost_ref": f"Cost ({analytics.reference_currency})",
-                "min_distance_to_barrier": "Min Distance to Barrier (%)"
+                "min_distance_to_barrier": "Min Downside to Barrier (%)"
             }
         )
         fig_treemap.update_layout(height=350, margin=dict(t=20, b=10, l=10, r=10))
@@ -518,8 +386,8 @@ elif view == "Portfolio":
                     f"Allocated Cost ({analytics.reference_currency})", format="%.2f"
                 ),
                 "avg_current_spot": st.column_config.NumberColumn("Current Price", format="%.2f"),
-                "min_distance_to_barrier": st.column_config.NumberColumn("Min Distance to Barrier (%)", format="%.2f"),
-                "avg_distance_to_barrier": st.column_config.NumberColumn("Avg Distance to Barrier (%)", format="%.2f"),
+                "min_distance_to_barrier": st.column_config.NumberColumn("Min Downside to Barrier (%)", format="%.2f"),
+                "avg_distance_to_barrier": st.column_config.NumberColumn("Avg Downside to Barrier (%)", format="%.2f"),
                 "worst_of_count": "Worst-Of Count",
                 "weight": st.column_config.NumberColumn("Portfolio Weight", format="%.2f"),
             }
