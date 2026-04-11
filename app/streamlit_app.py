@@ -4,6 +4,7 @@ import numpy as np
 import sys
 from pathlib import Path
 import plotly.express as px
+import plotly.graph_objects as go
 
 
 
@@ -16,6 +17,7 @@ from src.eod_client import EODClient
 from src.market_data_engine import MarketDataEngine
 from data.reference_data import isin_ticker_map, beta_map, vol_map
 from data.portfolio import portfolio
+from app.config import SCENARIO_PRESETS, SCENARIO_CUSTOM_DEFAULT
 
 
 @st.cache_resource
@@ -211,22 +213,9 @@ if view == "Product":
     und_spots   = prod_row["current_spots"]
     und_strikes = prod_row["strike"]
 
-    def calc_ytd(isin, current_price):
-        if db.empty:
-            return None
-        isin_db = db[db["isin"] == isin].copy()
-        if isin_db.empty:
-            return None
-        year_start = pd.Timestamp(pd.Timestamp.today().year, 1, 1)
-        historical = isin_db[isin_db["date"] < year_start].sort_values("date")
-        if historical.empty:
-            return None
-        soy_price = historical.iloc[-1]["price"]
-        return (current_price / soy_price - 1) * 100
-
     und_rows = []
     for name, isin, spot, strike in zip(und_names, und_isins, und_spots, und_strikes):
-        ytd = calc_ytd(isin, spot)
+        ytd = analytics.calc_ytd(isin, spot)
         und_rows.append({
             "Underlying": name,
             "Spot":       round(spot, 2),
@@ -454,68 +443,13 @@ elif view == "Stress Testing":
    # =========================
     # Presets
     # =========================
-    scenario_presets = {
-        "Custom": None,
-        "Current": {
-            "market_shock": 0,
-            "n_shocks": 1,
-            "shock_in_days": 2,
-            "shock_spacing_days": 0,
-            "pre_shock_drift_pa": 0.0,
-            "post_shock_drift_pa": 0.0,
-        },
-        "Down 5%": {
-            "market_shock": -5,
-            "n_shocks": 1,
-            "shock_in_days": 2,
-            "shock_spacing_days": 0,
-            "pre_shock_drift_pa": 0.05,
-            "post_shock_drift_pa": 0.05,
-        },
-        "Down 10%": {
-            "market_shock": -10,
-            "n_shocks": 1,
-            "shock_in_days": 2,
-            "shock_spacing_days": 0,
-            "pre_shock_drift_pa": 0.05,
-            "post_shock_drift_pa":0.05,
-        },
-        "Crash (-20%)": {
-            "market_shock": -20,
-            "n_shocks": 1,
-            "shock_in_days": 0,
-            "shock_spacing_days": 0,
-            "pre_shock_drift_pa": 0.05,
-            "post_shock_drift_pa": 0.05,
-        },
-        "Recovery (+10% + ERP)": {
-            "market_shock": -20,
-            "n_shocks": 1,
-            "shock_in_days": 1,
-            "shock_spacing_days": 0,
-            "pre_shock_drift_pa": 0.05,
-            "post_shock_drift_pa": 0.05,
-        },
-    }
-
     selected_preset = st.selectbox(
         "Scenario Preset",
-        list(scenario_presets.keys())
+        list(SCENARIO_PRESETS.keys())
     )
 
-    preset = scenario_presets[selected_preset]
-
-    # =========================
-    # Default values (from preset or fallback)
-    # =========================
-    default = preset if preset is not None else {
-        "market_shock": -10,
-        "n_shocks": 1,
-        "shock_in_days": 15,
-        "shock_spacing_days": 0,
-        "pre_shock_drift_pa": 0.05,
-        "post_shock_drift_pa": 0.0,
-    }
+    preset = SCENARIO_PRESETS[selected_preset]
+    default = preset if preset is not None else SCENARIO_CUSTOM_DEFAULT
 
     # =========================
     # Manual Controls
@@ -671,7 +605,7 @@ elif view == "Stress Testing":
     )
     st.write("### Stress Testing Results")
 
-    left_col, right_col = st.columns([2, 3])
+    left_col, right_col = st.columns([2, 2])
     
     with left_col:
     
@@ -746,27 +680,91 @@ elif view == "Stress Testing":
         
     with right_col:
         st.write("### Underlying Scenario Paths")
-        
-        fig_paths = px.line(
-            path_plot_df,
-            x="date",
-            y="price",
-            color="name",
-            line_group="isin",
-            color_discrete_sequence=["#2A2F38", "#4A5563", "#7A8797", "#A7B0BC", "#C4CBD4"],
-            labels={
-                "date": "Date",
-                "spot": "Simulated Price",
-                "name": "Underlying"
-            }
+
+        # build isin → strike map from portfolio
+        isin_to_strike = {}
+        for _, prow in portfolio.iterrows():
+            for isin, strike in zip(prow["underlying_isins"], prow["strike"]):
+                isin_to_strike[isin] = strike
+
+        # compute shock dates from scenario params
+        today = pd.Timestamp.today().normalize()
+        shock_dates = [
+            today + pd.Timedelta(days=shock_in_days + i * shock_spacing_days)
+            for i in range(int(n_shocks))
+        ]
+
+        colors = ["#4C9BE8", "#E8844C", "#4CE87A", "#E84C4C",
+                  "#C44CE8", "#E8D94C", "#4CE8D9", "#E84C99"]
+
+        fig_paths = go.Figure()
+
+        for idx, (isin, grp) in enumerate(path_plot_df.groupby("isin")):
+            name   = isin_to_name.get(isin, isin)
+            strike = isin_to_strike.get(isin)
+            color  = colors[idx % len(colors)]
+            grp    = grp.sort_values("date")
+            norm   = grp["price"] / grp["price"].iloc[0] * 100
+
+            # price path
+            fig_paths.add_trace(go.Scatter(
+                x=grp["date"], y=norm,
+                mode="lines", name=name,
+                line=dict(color=color, width=2),
+                customdata=grp["price"].values,
+                hovertemplate=(
+                    f"<b>{name}</b><br>"
+                    "Date: %{x|%d %b %Y}<br>"
+                    "Price: %{customdata:.2f}<br>"
+                    "Normalised: %{y:.1f}<extra></extra>"
+                )
+            ))
+
+            # strike line
+            if strike is not None:
+                norm_strike = strike / grp["price"].iloc[0] * 100
+                fig_paths.add_hline(
+                    y=norm_strike,
+                    line=dict(color=color, dash="dash", width=1),
+                    opacity=0.45,
+                    annotation_text=f"{name} strike",
+                    annotation_position="right",
+                    annotation_font=dict(color=color, size=10),
+                )
+
+        # starting reference line
+        fig_paths.add_hline(
+            y=100,
+            line=dict(color="grey", dash="dot", width=1),
+            opacity=0.4,
         )
+
+        # shock vertical lines
+        for i, sd in enumerate(shock_dates):
+            fig_paths.add_vline(
+                x=sd.timestamp() * 1000,
+                line=dict(color="red", dash="dash", width=1.5),
+                opacity=0.8,
+                annotation_text=f"Shock {i+1}: {market_shock:+}%",
+                annotation_position="top right" if i % 2 == 0 else "top left",
+                annotation_font=dict(color="red", size=10),
+            )
+
         fig_paths.update_layout(
-            height=650,                  
-            width=800,                   
-            margin=dict(t=20, b=10, l=10, r=10),
-            template="plotly_dark"
+            template="plotly_dark",
+            height=600,
+            margin=dict(t=40, b=40, l=40, r=120),
+            xaxis_title="Date",
+            yaxis_title="Normalised Price (base 100)",
+            legend=dict(
+                orientation="h",
+                yanchor="bottom", y=1.02,
+                xanchor="left", x=0
+            ),
+            hovermode="x unified",
         )
-        st.plotly_chart(fig_paths, width='content')
+
+        st.plotly_chart(fig_paths, width="stretch")
         
     
         
