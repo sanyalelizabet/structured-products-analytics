@@ -333,16 +333,65 @@ if view == "Product":
 
     st.subheader("Product Detail")
 
-    detail = pd.DataFrame({
-    "Metric": row_selected.index,
-    "Value": row_selected.values
-    })
+    # --- Underlying metrics (spot, vol, beta, YTD) ---
+    prod_row = portfolio[portfolio["product_id"] == selected_product].iloc[0]
+    und_isins   = prod_row["underlying_isins"]
+    und_names   = prod_row["underlyings"]
+    und_spots   = prod_row["current_spots"]
+    und_strikes = prod_row["strike"]
 
-    detail["Value"] = detail["Value"].apply(
-        lambda x: f"{x:.2f}" if isinstance(x, (int, float, np.floating)) else str(x)
-    )
+    def calc_ytd(isin, current_price):
+        if db.empty:
+            return None
+        isin_db = db[db["isin"] == isin].copy()
+        if isin_db.empty:
+            return None
+        year_start = pd.Timestamp(pd.Timestamp.today().year, 1, 1)
+        historical = isin_db[isin_db["date"] < year_start].sort_values("date")
+        if historical.empty:
+            return None
+        soy_price = historical.iloc[-1]["price"]
+        return (current_price / soy_price - 1) * 100
 
-    st.dataframe(detail, width="content", hide_index=True)
+    und_rows = []
+    for name, isin, spot, strike in zip(und_names, und_isins, und_spots, und_strikes):
+        ytd = calc_ytd(isin, spot)
+        und_rows.append({
+            "Underlying": name,
+            "Spot":       round(spot, 2),
+            "Strike":     round(strike, 2),
+            "Vol (%)":    round(vol_map.get(isin, float("nan")) * 100, 1),
+            "Beta":       beta_map.get(isin, float("nan")),
+            "YTD (%)":    round(ytd, 2) if ytd is not None else "n/a",
+        })
+    und_df = pd.DataFrame(und_rows)
+
+    col_detail, col_und = st.columns([1, 2])
+
+    with col_detail:
+        detail = pd.DataFrame({
+            "Metric": row_selected.index,
+            "Value": row_selected.values
+        })
+        detail["Value"] = detail["Value"].apply(
+            lambda x: f"{x:.2f}" if isinstance(x, (int, float, np.floating)) else str(x)
+        )
+        st.dataframe(detail, use_container_width=True, hide_index=True)
+
+    with col_und:
+        st.caption("Underlying Metrics")
+        st.dataframe(
+            und_df,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Spot":    st.column_config.NumberColumn("Spot", format="%.2f"),
+                "Strike":  st.column_config.NumberColumn("Strike", format="%.2f"),
+                "Vol (%)": st.column_config.NumberColumn("Vol (%)", format="%.1f"),
+                "Beta":    st.column_config.NumberColumn("Beta", format="%.2f"),
+                "YTD (%)": st.column_config.NumberColumn("YTD (%)", format="%.2f"),
+            }
+        )
 elif view == "Portfolio":
 
     st.subheader("Portfolio Analytics")
