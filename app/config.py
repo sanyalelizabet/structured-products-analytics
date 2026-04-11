@@ -33,7 +33,7 @@ SCENARIO_PRESETS = {
     "Crash (-20%)": {
         "market_shock": -20,
         "n_shocks": 1,
-        "shock_in_days": 0,
+        "shock_in_days": 1,
         "shock_spacing_days": 0,
         "pre_shock_drift_pa": 0.05,
         "post_shock_drift_pa": 0.05,

@@ -135,8 +135,8 @@ class ScenarioEngine:
                 drift = pre_shock_drift  * betas   # (n_assets,)
             elif t_years > T_last_shock:
                 drift = post_shock_drift * betas
-            #else:
-             #   drift = np.zeros(n_assets)
+            else:
+                drift =  post_shock_drift * betas
 
             # GBM step — all assets in one vectorised expression
             if dt > 0:
