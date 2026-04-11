@@ -3,7 +3,7 @@ import pandas as pd
 import plotly.express as px
 
 
-def render(analytics, valuation_date):
+def render(analytics, df, valuation_date):
 
     st.subheader("Portfolio Analytics")
     st.caption(
@@ -39,9 +39,15 @@ def render(analytics, valuation_date):
     product_table["payoff_ref"] = product_table.apply(lambda r: analytics.convert_to_reference(r["total_payoff"], r["currency"]), axis=1)
     product_table["pnl_ref"]    = product_table.apply(lambda r: analytics.convert_to_reference(r["pnl"],          r["currency"]), axis=1)
 
+    # Merge fair value from the enriched df passed in from the app
+    fv_cols = df[["product_id", "fair_value", "fair_value_pct"]].copy()
+    fv_cols["fair_value_pct"] = fv_cols["fair_value_pct"] * 100
+    product_table = product_table.merge(fv_cols, on="product_id", how="left")
+
     product_table = product_table[[
         "product_id", "currency", "notional", "maturity_date", "product_type",
-        "underlyings", "cost_ref", "payoff_ref", "pnl_ref", "return_pct", "distance_to_barrier"
+        "underlyings", "cost_ref", "payoff_ref", "pnl_ref", "return_pct",
+        "distance_to_barrier", "fair_value", "fair_value_pct"
     ]].copy()
     product_table["return_pct"]          *= 100
     product_table["distance_to_barrier"] *= 100
@@ -63,6 +69,8 @@ def render(analytics, valuation_date):
             "pnl_ref":             st.column_config.NumberColumn(f"PnL ({ref_ccy})",      format="%.2f"),
             "return_pct":          st.column_config.NumberColumn("Return (%)",            format="%.2f"),
             "distance_to_barrier": st.column_config.NumberColumn("Downside to Barrier (%)", format="%.2f"),
+            "fair_value":          st.column_config.NumberColumn("Fair Value",            format="%.2f"),
+            "fair_value_pct":      st.column_config.NumberColumn("Fair Value (%)",        format="%.2f"),
         }
     )
 

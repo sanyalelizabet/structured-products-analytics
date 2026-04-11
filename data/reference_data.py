@@ -28,7 +28,18 @@ beta_map = {
     "US0090661010": 1.15,   # AIRBNB
 }
 
-# Implied volatility (annualised, as a decimal)
+
+# Risk-free rates (annualised, continuously compounded, as a decimal).
+# Used as the risk-neutral drift in Monte Carlo pricing.
+# Sources: SNB, Fed, ECB policy rates (approximate, update periodically).
+risk_free_rates = {
+    "CHF": 0.00,    # SNB at lower bound after 2025 cuts
+    "USD": 0.0365,   # Fed funds effective
+    "EUR": 0.025,   # ECB deposit rate
+    "GBP": 0.045,   # BoE Bank Rate
+}
+
+#  volatility (annualised, as a decimal)
 vol_map = {
     "CH0432492467": 0.24,   # ALCON
     "CH0012221716": 0.22,   # ABB

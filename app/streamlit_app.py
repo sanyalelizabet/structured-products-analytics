@@ -9,7 +9,8 @@ logo_path = Path(__file__).resolve().parent / "assets" / "logo.png"
 from src.portfolio_analytics import PortfolioAnalytics
 from src.eod_client import EODClient
 from src.market_data_engine import MarketDataEngine
-from data.reference_data import isin_ticker_map, beta_map, vol_map
+from data.reference_data import isin_ticker_map, beta_map, vol_map, risk_free_rates
+from src.pricing.monte_carlo import MonteCarloPricer
 from data.portfolio import portfolio
 from app.views import product, portfolio as portfolio_view, stress_testing
 
@@ -46,6 +47,11 @@ def build_product_analytics(_portfolio, _db):
 def build_corr_matrix():
     return get_market_engine().build_corr_matrix(isin_ticker_map, years=4)
 
+@st.cache_data(ttl=3600)
+def compute_fair_values(_portfolio, _corr_df, vol_map, risk_free_rates):
+    pricer = MonteCarloPricer(n_paths=10_000, seed=42)
+    return pricer.price_portfolio(_portfolio, vol_map, risk_free_rates, corr_df=_corr_df)
+
 
 # =========================
 # Page setup
@@ -63,7 +69,11 @@ if fetch_error:
     st.warning(f"Could not refresh market prices. Using portfolio default spots. {fetch_error}")
 
 analytics, df = build_product_analytics(portfolio, db)
-corr_df = build_corr_matrix()
+corr_df    = build_corr_matrix()
+fv_df      = compute_fair_values(portfolio, corr_df, vol_map, risk_free_rates)
+
+# Merge fair value columns into product analytics df
+df = df.merge(fv_df[["product_id", "fair_value", "fair_value_pct"]], on="product_id", how="left")
 
 # =========================
 # Route to view
@@ -72,7 +82,7 @@ if view == "Product":
     product.render(portfolio, df, analytics, valuation_date, vol_map, beta_map)
 
 elif view == "Portfolio":
-    portfolio_view.render(analytics, valuation_date)
+    portfolio_view.render(analytics, df, valuation_date)
 
 elif view == "Stress Testing":
     stress_testing.render(portfolio, corr_df, beta_map, vol_map)

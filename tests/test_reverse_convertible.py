@@ -209,27 +209,32 @@ class TestPayoff:
 
 class TestBarrierDistance:
     def test_distance_formula(self):
-        # spot=90, strike=100, barrier_pct=0.60 → 0.90 - 0.60 = 0.30
-        rc = brc(current_spot=90.0, strike=100.0, barrier_pct=0.60)
+        # spot=90, strike=70 (barrier level) → (90-70)/90 = 0.2222...
+        rc = brc(current_spot=90.0, strike=70.0, barrier_pct=0.60)
         distances = rc.current_barrier_distances()
-        assert abs(distances[0] - 0.30) < 1e-9
+        assert abs(distances[0] - (20 / 90)) < 1e-9
+
+    def test_distance_zero_at_barrier(self):
+        # spot exactly at barrier (strike) → distance = 0
+        rc = brc(current_spot=70.0, strike=70.0, barrier_pct=0.60)
+        assert abs(rc.current_barrier_distances()[0]) < 1e-9
 
     def test_distance_to_barrier_brc_single(self):
-        rc = brc(current_spot=90.0, strike=100.0, barrier_pct=0.60)
+        rc = brc(current_spot=90.0, strike=70.0, barrier_pct=0.60)
         assert abs(rc.distance_to_barrier() - rc.current_barrier_distances()[0]) < 1e-9
 
     def test_distance_to_barrier_mbrc_is_minimum(self):
         rc = mbrc(
             current_spots=[90.0, 70.0],
-            strikes=[100.0, 100.0],
+            strikes=[70.0, 60.0],
             barrier_pct=0.60,
         )
         expected = min(rc.current_barrier_distances())
         assert abs(rc.distance_to_barrier() - expected) < 1e-9
 
     def test_negative_distance_means_breached_intraday(self):
-        # spot at 55% of strike, barrier at 60% → distance negative
-        rc = brc(current_spot=55.0, strike=100.0, barrier_pct=0.60)
+        # spot below barrier (strike) → distance negative
+        rc = brc(current_spot=55.0, strike=70.0, barrier_pct=0.60)
         assert rc.current_barrier_distances()[0] < 0
 
 

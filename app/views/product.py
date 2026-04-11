@@ -13,21 +13,28 @@ def render(portfolio, df, analytics, valuation_date, vol_map, beta_map):
         "Coupons accrued over full product life."
     )
 
+    # Merge fair value into overview
+    fv_cols = df[["product_id", "fair_value", "fair_value_pct"]].copy()
+    fv_cols["fair_value_pct"] = fv_cols["fair_value_pct"] * 100
+
     overview_display = portfolio[overview_cols].copy()
     overview_display["coupon"] = overview_display["coupon"] * 100
+    overview_display = overview_display.merge(fv_cols, on="product_id", how="left")
 
     st.dataframe(
         overview_display,
         width="stretch",
         hide_index=True,
         column_config={
-            "product_id":    st.column_config.TextColumn("Product ID",   width="medium"),
-            "product_type":  st.column_config.TextColumn("Type",         width="small"),
-            "underlyings":   st.column_config.ListColumn("Underlyings",  width="medium"),
-            "notional":      st.column_config.NumberColumn("Notional",   width="small", format="%.0f"),
-            "currency":      st.column_config.TextColumn("CCY",          width="small"),
-            "coupon":        st.column_config.NumberColumn("Coupon (%)", width="small", format="%.2f"),
-            "maturity_date": st.column_config.TextColumn("Maturity",     width="small"),
+            "product_id":     st.column_config.TextColumn("Product ID",      width="medium"),
+            "product_type":   st.column_config.TextColumn("Type",            width="small"),
+            "underlyings":    st.column_config.ListColumn("Underlyings",     width="medium"),
+            "notional":       st.column_config.NumberColumn("Notional",      width="small", format="%.0f"),
+            "currency":       st.column_config.TextColumn("CCY",             width="small"),
+            "coupon":         st.column_config.NumberColumn("Coupon (%)",    width="small", format="%.2f"),
+            "maturity_date":  st.column_config.TextColumn("Maturity",        width="small"),
+            "fair_value":     st.column_config.NumberColumn("Fair Value",    width="small", format="%.2f"),
+            "fair_value_pct": st.column_config.NumberColumn("Fair Value (%)", width="small", format="%.2f"),
         }
     )
 
