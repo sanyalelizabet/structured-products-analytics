@@ -13,6 +13,19 @@ def render(analytics, df, greeks_df, pf_delta, valuation_date):
     )
     vd_label = valuation_date.strftime('%d.%m.%Y') if valuation_date is not None else "Using default prices"
     st.caption(f"Valuation Date: {vd_label}")
+    
+    used_ccys = sorted(set(analytics.product_df["currency"]))
+    ref_ccy = analytics.reference_currency
+    
+    fx_strings = []
+    for ccy in used_ccys:
+        if ccy != ref_ccy:
+            rate = analytics.fx_rates.get((ccy, ref_ccy))
+            if rate:
+                fx_strings.append(f"{ccy}/{ref_ccy}: {rate:.4f}")
+    
+    if fx_strings:
+        st.caption("FX Rates used: " + " | ".join(fx_strings))
 
     # =========================
     # Portfolio Overview
@@ -22,12 +35,55 @@ def render(analytics, df, greeks_df, pf_delta, valuation_date):
     ref_ccy  = portfolio_overview["reference_currency"]
     pnl      = portfolio_overview["total_pnl"]
     notional = portfolio_overview["total_notional"]
+    proj_payoff = portfolio_overview["total_payoff"]
+    
+    
+    mtm_table = df.copy()
 
+    # Convert fair value into reference currency
+    mtm_table["fair_value_ref"] = mtm_table.apply(
+        lambda r: analytics.convert_to_reference(r["fair_value"], r["currency"])
+        if pd.notnull(r["fair_value"]) else None,
+        axis=1
+    )
+    
+    # Convert cost into reference currency (same logic as analytics)
+    mtm_table["cost_ref"] = mtm_table.apply(
+        lambda r: analytics.convert_to_reference(r["total_cost"], r["currency"]),
+        axis=1
+    )
+    
+    # Drop rows without fair value
+    mtm_table = mtm_table[mtm_table["fair_value_ref"].notna()]
+    
+    # Aggregate
+    mtm_total_cost  = mtm_table["cost_ref"].sum()
+    mtm_total_value = mtm_table["fair_value_ref"].sum()
+    mtm_total_pnl   = mtm_total_value - mtm_total_cost
+    
+    mtm_return_pct = (
+        mtm_total_pnl / mtm_total_cost
+        if mtm_total_cost != 0 else None
+    )
+    mtm1, mtm2, mtm3, mtm4 = st.columns(4)
+    mtm1.metric("MTM Value", f"{ref_ccy} {mtm_total_value:,.2f}")
+    mtm2.metric("MTM PnL", f"{ref_ccy} {mtm_total_pnl:,.2f}")
+    mtm3.metric(
+        "MTM Return (%)",
+        f"{mtm_return_pct * 100:.2f}" if mtm_return_pct is not None else "n/a"
+    )
+    mtm4.metric("# Products", portfolio_overview["total_products"])
+    
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Total PnL",      f"{ref_ccy} {pnl:,.2f}")
-    col2.metric("Return (%)",     f"{portfolio_overview['portfolio_return_pct']*100:.2f}")
-    col3.metric("Total Notional", f"{ref_ccy} {notional:,.2f}")
-    col4.metric("# Products",     portfolio_overview["total_products"])
+    
+    
+    col1.metric("Proj. Payoff",     f"{ref_ccy} {proj_payoff:,.2f}")    
+    col2.metric("Proj. PnL",      f"{ref_ccy} {pnl:,.2f}")
+    col3.metric("Proj. Return (%)",     f"{portfolio_overview['portfolio_return_pct']*100:.2f}")
+    col4.metric("Total Notional", f"{ref_ccy} {notional:,.2f}")
+    
+    
+    
 
     # =========================
     # Product Analytics
