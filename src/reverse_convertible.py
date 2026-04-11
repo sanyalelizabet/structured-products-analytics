@@ -172,10 +172,13 @@ class ReverseConvertible:
     
     def current_barrier_distances(self):
         """
-         
+        How far spot can fall from current price before hitting the barrier.
+        Expressed as a fraction of current spot:
+            (spot - strike) / spot  where strike is the barrier level
+        Positive = above barrier, 0 = at barrier, negative = below barrier.
         """
         return [
-            (spot / strike) - self.barrier_pct
+            (spot- strike)/spot
             for spot, strike in zip(self.current_spots, self.strike_levels)
         ]
     
