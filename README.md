@@ -1,8 +1,8 @@
 # Structured Products Analytics
 
-A professional analytics framework for evaluating, pricing, and risk-managing structured products, with a focus on barrier reverse convertibles (BRC) and multi-asset worst-of structures.
+A  analytics framework for evaluating, pricing, and risk-managing structured products, with a focus on barrier reverse convertibles (BRC) and multi-asset worst-of structures.
 
-Built to replicate real-world workflows used on trading, structuring, and portfolio management desks.
+
 
 ---
 
