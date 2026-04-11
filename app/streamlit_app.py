@@ -316,7 +316,7 @@ if view == "Product":
     )
     
     col5.metric(
-        "Distance to Barrier (%)",
+        "Downside to Barrier (%)",
         f"{row['distance_to_barrier']:.2f}%",
         delta=f"{row['distance_delta']*100:+.2f}pp vs yesterday" if row["distance_delta"] is not None else None,
         delta_color="normal"  # positive = further from barrier = green = good
