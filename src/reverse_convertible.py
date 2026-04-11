@@ -172,11 +172,10 @@ class ReverseConvertible:
     
     def current_barrier_distances(self):
         """
-        
-        current/strike 
+         
         """
         return [
-            (spot / strike) 
+            (spot / strike) - self.barrier_pct
             for spot, strike in zip(self.current_spots, self.strike_levels)
         ]
     
