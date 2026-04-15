@@ -1,0 +1,5 @@
+isin,ticker,code,exchange,name,type,country,currency
+CH0038863350,NESR.F,NESR,F,Nestlé S.A,Common Stock,Germany,EUR
+CH0038863350,0QR4.LSE,0QR4,LSE,Nestlé S.A,Common Stock,UK,GBP
+CH0038863350,NESN.SW,NESN,SW,Nestle S.A.,Common Stock,Switzerland,CHF
+CH0038863350,NSRGF.US,NSRGF,US,Nestle SA,Common Stock,USA,USD

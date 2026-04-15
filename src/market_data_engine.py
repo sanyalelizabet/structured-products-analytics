@@ -1,13 +1,17 @@
 import pandas as pd
-import numpy as np
 from pathlib import Path
 from pandas.tseries.offsets import BDay
 
 class MarketDataEngine:
 
+    MASTER_COLUMNS = ["isin", "ticker", "code", "exchange", "name", "type", "country", "currency"]
+
     def __init__(self, client, db_path="data/prices.csv"):
         self.client = client
         self.db_path = Path(db_path)
+        self.master_path = self.db_path.parent / "securities_master_data.csv"
+
+
 
     def load_db(self):
         if self.db_path.exists():
@@ -145,70 +149,54 @@ class MarketDataEngine:
 
         return db
 
-    def build_corr_matrix(self, isin_ticker_map, years=6, force_refresh=False):
+    def fetch_securities_master(self, isins, force_refresh=False):
         """
-        Compute a realized pairwise correlation matrix from monthly log-returns.
+        Download master data for each ISIN and store in securities_master_data.csv.
 
-        Steps
-        -----
-        1. fetch_monthly_prices  — download if not cached, else load from CSV
-        2. Pivot wide            — rows = dates, columns = ISINs
-        3. Resample monthly      — take last price per calendar month per ISIN
-                                   (handles any mixed daily/monthly rows)
-        4. dropna(how='any')     — align on common history window
-                                   (Airbnb from Dec-2020 constrains the window)
-        5. log returns           — log(P_t / P_{t-1})
-        6. .corr()               — Pearson correlation matrix
+        For each ISIN, calls search_by_isin and appends ALL exchange listings —
+        one row per (isin, exchange) pair.  This means a security cross-listed
+        on multiple exchanges will have multiple rows.
 
         Parameters
         ----------
-        isin_ticker_map : dict  { isin: ticker }
-        years           : int   years of history (default 4)
-        force_refresh   : bool  re-download monthly prices
+        isins         : list[str]  list of ISINs
+        force_refresh : bool       re-download even if ISIN already in CSV
 
         Returns
         -------
-        pd.DataFrame  correlation matrix, ISIN as both index and columns
-                      → pass directly to ScenarioEngine(corr_df=...)
+        pd.DataFrame  contents of securities_master_data.csv after update
         """
-        db = self.fetch_monthly_prices(
-            isin_ticker_map, years=years, force_refresh=force_refresh
-        )
+        if self.master_path.exists():
+            master = pd.read_csv(self.master_path)
+        else:
+            master = pd.DataFrame(columns=self.MASTER_COLUMNS)
 
-        # Keep only the requested ISINs
-        db = db[db["isin"].isin(isin_ticker_map.keys())]
+        rows = []
 
-        # Pivot: rows = date, columns = isin
-        prices_wide = (
-            db.pivot_table(index="date", columns="isin", values="price", aggfunc="last")
-            .sort_index()
-        )
+        for isin in isins:
+            if not force_refresh and isin in master["isin"].values:
+                continue
 
-        # Resample to month-end so daily and monthly rows align on the same grid
-        prices_wide = prices_wide.resample("ME").last()
+            try:
+                listings = self.client.search_by_isin(isin)
+                print(listings)
 
-        # Drop any month where at least one ISIN has no price
-        prices_wide = prices_wide.dropna(axis=0, how="any")
+                if not listings:
+                    print(f"No listings found for {isin}")
+                    continue
 
-        n_obs    = len(prices_wide)
-        n_assets = len(isin_ticker_map)
+                rows.extend(listings)
 
-        if n_obs < max(12, n_assets * 3):
-            raise ValueError(
-                f"Only {n_obs} common monthly observations for {n_assets} assets — "
-                f"need at least {max(12, n_assets * 3)}. "
-                "Try increasing years= or check data availability."
-            )
+            except Exception as e:
+                print(f"Master data fetch failed for {isin}: {e}")
 
-        # Monthly log returns → Pearson correlation
-        log_returns = np.log(prices_wide / prices_wide.shift(1)).dropna()
-        corr_df     = log_returns.corr()
-        
-        
+        if rows:
+            new_df = pd.DataFrame(rows)
+            master = pd.concat([master, new_df], ignore_index=True)
+            master = master.sort_values(["isin", "exchange"]).reset_index(drop=True)
+            self.master_path.parent.mkdir(parents=True, exist_ok=True)
+            master.to_csv(self.master_path, index=False)
 
-        return corr_df
+        return master
 
-    
-    
-    
-    
+

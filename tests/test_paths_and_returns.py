@@ -19,6 +19,7 @@ import pytest
 from src.reverse_convertible import ReverseConvertible
 from src.scenario_engine import ScenarioEngine
 from src.market_data_engine import MarketDataEngine
+from src.correlation_engine import CorrelationEngine
 from tests.conftest import (
     make_brc_row, make_mbrc_row, make_portfolio,
     BETA_MAP, VOL_MAP,
@@ -295,7 +296,7 @@ class TestPortfolioIsinConsistency:
 
 class TestCorrelationMatrix:
     """
-    Tests for MarketDataEngine.build_corr_matrix and ScenarioEngine.get_corr_subset.
+    Tests for CorrelationEngine.build_corr_matrix and ScenarioEngine.get_corr_subset.
     """
 
     # ── get_corr_subset ───────────────────────────────────────────────────────
@@ -339,7 +340,7 @@ class TestCorrelationMatrix:
         # original[0,1] = NESN-NOVN = 0.7, swapped[0,1] = NOVN-NESN = 0.7 (same value)
         assert abs(result[0, 1] - original[0, 1]) < 1e-9
 
-    # ── build_corr_matrix via MarketDataEngine ────────────────────────────────
+    # ── build_corr_matrix via CorrelationEngine ───────────────────────────────
 
     def _make_db_with_monthly_prices(self, engine, isin_prices: dict, n_months=48):
         """
@@ -368,7 +369,7 @@ class TestCorrelationMatrix:
         mults = [1.01] * 48
         self._make_db_with_monthly_prices(engine, {"CH001": mults, "CH002": mults})
 
-        corr = engine.build_corr_matrix({"CH001": "A.SW", "CH002": "B.SW"})
+        corr = CorrelationEngine(engine).build_corr_matrix({"CH001": "A.SW", "CH002": "B.SW"})
         np.testing.assert_array_almost_equal(corr.values, corr.values.T)
 
     def test_diagonal_is_one(self, tmp_path):
@@ -378,7 +379,7 @@ class TestCorrelationMatrix:
         mults = [1.01] * 48
         self._make_db_with_monthly_prices(engine, {"CH001": mults, "CH002": mults})
 
-        corr = engine.build_corr_matrix({"CH001": "A.SW", "CH002": "B.SW"})
+        corr = CorrelationEngine(engine).build_corr_matrix({"CH001": "A.SW", "CH002": "B.SW"})
         np.testing.assert_array_almost_equal(np.diag(corr.values), [1.0, 1.0])
 
     def test_identical_series_gives_correlation_one(self, tmp_path):
@@ -389,7 +390,7 @@ class TestCorrelationMatrix:
         mults = [1.01, 0.99, 1.02, 1.00, 1.01, 0.98] * 8  # 48 months
         self._make_db_with_monthly_prices(engine, {"CH001": mults, "CH002": mults})
 
-        corr = engine.build_corr_matrix({"CH001": "A.SW", "CH002": "B.SW"})
+        corr = CorrelationEngine(engine).build_corr_matrix({"CH001": "A.SW", "CH002": "B.SW"})
         assert abs(corr.loc["CH001", "CH002"] - 1.0) < 1e-6
 
     def test_opposite_series_gives_correlation_minus_one(self, tmp_path):
@@ -401,7 +402,7 @@ class TestCorrelationMatrix:
         down = [0.98, 1.02] * 24   # exact opposite
         self._make_db_with_monthly_prices(engine, {"CH001": up, "CH002": down})
 
-        corr = engine.build_corr_matrix({"CH001": "A.SW", "CH002": "B.SW"})
+        corr = CorrelationEngine(engine).build_corr_matrix({"CH001": "A.SW", "CH002": "B.SW"})
         assert corr.loc["CH001", "CH002"] < -0.99
 
     def test_off_diagonal_between_minus_one_and_one(self, tmp_path):
@@ -414,7 +415,7 @@ class TestCorrelationMatrix:
         mults_b = [1.0 + random.uniform(-0.03, 0.03) for _ in range(48)]
         self._make_db_with_monthly_prices(engine, {"CH001": mults_a, "CH002": mults_b})
 
-        corr = engine.build_corr_matrix({"CH001": "A.SW", "CH002": "B.SW"})
+        corr = CorrelationEngine(engine).build_corr_matrix({"CH001": "A.SW", "CH002": "B.SW"})
         val = corr.loc["CH001", "CH002"]
         assert -1.0 <= val <= 1.0
 
@@ -426,7 +427,7 @@ class TestCorrelationMatrix:
         self._make_db_with_monthly_prices(engine, {"CH001": mults, "CH002": mults})
 
         with pytest.raises(ValueError, match="common monthly observations"):
-            engine.build_corr_matrix({"CH001": "A.SW", "CH002": "B.SW"})
+            CorrelationEngine(engine).build_corr_matrix({"CH001": "A.SW", "CH002": "B.SW"})
 
 
 # ══════════════════════════════════════════════════════════════════════════════

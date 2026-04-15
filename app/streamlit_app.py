@@ -9,6 +9,7 @@ logo_path = Path(__file__).resolve().parent / "assets" / "logo.png"
 from src.portfolio_analytics import PortfolioAnalytics
 from src.eod_client import EODClient
 from src.market_data_engine import MarketDataEngine
+from src.correlation_engine import CorrelationEngine
 from data.reference_data import isin_ticker_map, beta_map, vol_map, risk_free_rates
 from src.pricing.monte_carlo import MonteCarloPricer
 from data.portfolio import portfolio
@@ -26,6 +27,7 @@ def fetch_market_data(_portfolio):
     engine = get_market_engine()
     try:
         engine.fetch_latest_prices(_portfolio)
+        engine.fetch_securities_master(["CH0038863350"], force_refresh=True)
         updated_portfolio = engine.update_spots(_portfolio)
         db = engine.load_db()
         valuation_date = db["date"].max() if not db.empty else None
@@ -45,7 +47,7 @@ def build_product_analytics(_portfolio, _db):
 
 @st.cache_data(ttl=3600)
 def build_corr_matrix():
-    return get_market_engine().build_corr_matrix(isin_ticker_map, years=4)
+    return CorrelationEngine(get_market_engine()).build_corr_matrix(isin_ticker_map, years=4)
 
 @st.cache_data(ttl=3600)
 def compute_fair_values(_portfolio, _corr_df, vol_map, risk_free_rates):

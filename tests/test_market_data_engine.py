@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 from unittest.mock import MagicMock, patch
 from src.market_data_engine import MarketDataEngine
+from src.correlation_engine import CorrelationEngine
 from tests.conftest import make_brc_row
 
 
@@ -212,7 +213,7 @@ class TestBuildCorrMatrix:
     def test_returns_dataframe_with_isin_index(self, engine, mock_client):
         self._make_monthly_db(engine, ["CH001", "CH002"])
         mock_client.get_monthly_prices.return_value = []
-        corr = engine.build_corr_matrix({"CH001": "A.SW", "CH002": "B.SW"})
+        corr = CorrelationEngine(engine).build_corr_matrix({"CH001": "A.SW", "CH002": "B.SW"})
         assert isinstance(corr, pd.DataFrame)
         assert "CH001" in corr.index
         assert "CH002" in corr.index
@@ -220,14 +221,14 @@ class TestBuildCorrMatrix:
     def test_diagonal_is_one(self, engine, mock_client):
         self._make_monthly_db(engine, ["CH001", "CH002"])
         mock_client.get_monthly_prices.return_value = []
-        corr = engine.build_corr_matrix({"CH001": "A.SW", "CH002": "B.SW"})
+        corr = CorrelationEngine(engine).build_corr_matrix({"CH001": "A.SW", "CH002": "B.SW"})
         assert abs(corr.loc["CH001", "CH001"] - 1.0) < 1e-9
         assert abs(corr.loc["CH002", "CH002"] - 1.0) < 1e-9
 
     def test_off_diagonal_between_minus_one_and_one(self, engine, mock_client):
         self._make_monthly_db(engine, ["CH001", "CH002"])
         mock_client.get_monthly_prices.return_value = []
-        corr = engine.build_corr_matrix({"CH001": "A.SW", "CH002": "B.SW"})
+        corr = CorrelationEngine(engine).build_corr_matrix({"CH001": "A.SW", "CH002": "B.SW"})
         val = corr.loc["CH001", "CH002"]
         assert -1.0 <= val <= 1.0
 
@@ -244,4 +245,4 @@ class TestBuildCorrMatrix:
         mock_client.get_monthly_prices.return_value = []
 
         with pytest.raises(ValueError, match="common monthly observations"):
-            engine.build_corr_matrix({"CH001": "A.SW", "CH002": "B.SW"})
+            CorrelationEngine(engine).build_corr_matrix({"CH001": "A.SW", "CH002": "B.SW"})

@@ -78,3 +78,43 @@ class EODClient:
             for row in data
             if row.get("adjusted_close") is not None
         ]
+
+    def search_by_isin(self, isin):
+        """
+        Uses Search API (ISIN supported).
+        Returns ALL listings (not guaranteed complete).
+        """
+        url = f"{self.BASE_URL}/search/{isin}"
+        params = {"api_token": self.api_key, "fmt": "json"}
+
+        r = requests.get(url, params=params)
+
+        if r.status_code != 200:
+            raise ValueError(f"Search failed {isin}: {r.text}")
+
+        results = r.json()
+
+        listings = []
+
+        for r in results:
+            code = r.get("Code")
+            exch = r.get("Exchange")
+
+            if not code or not exch:
+                continue
+
+            ticker = f"{code}.{exch}"
+
+            listings.append({
+                "isin": isin,
+                "ticker": ticker,
+                "code": code,
+                "exchange": exch,
+                "name": r.get("Name"),
+                "type": r.get("Type"),
+                "country": r.get("Country"),
+                "currency": r.get("Currency"),
+            })
+
+        return listings
+
