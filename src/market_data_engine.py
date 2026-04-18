@@ -106,7 +106,7 @@ class MarketDataEngine:
     
         return portfolio
 
-    def fetch_monthly_prices(self, isin_ticker_map, years=6, force_refresh=False):
+    def fetch_monthly_prices(self, isin_ticker_map, years=6, force_refresh=True):
         """
         Download monthly adjusted-close prices and append to prices.csv.
         Same schema as daily rows — month-end dates coexist naturally.
@@ -154,7 +154,7 @@ class MarketDataEngine:
 
         return db
 
-    def fetch_securities_master(self, isins, force_refresh=False):
+    def fetch_securities_master(self, isins, force_refresh=True):
         """
         Download master data for each ISIN and store in securities_master_data.csv.
 
@@ -225,7 +225,7 @@ class MarketDataEngine:
         # fallback
         return matches.iloc[0]["ticker"]
 
-    def fetch_options_chain(self, isins, yahoo_client, force_refresh=False):
+    def fetch_options_chain(self, isins, yahoo_client, force_refresh=True):
         """
         Download the full options chain for each ISIN using YahooClient.
         Tickers are resolved from securities_master_data.csv via _resolve_ticker.
@@ -251,8 +251,11 @@ class MarketDataEngine:
         frames = []
 
         for isin in isins:
-            ticker = self._resolve_ticker(isin)
-            ticker = ticker.split(".")[0]
+            try:
+                ticker = self._resolve_ticker(isin).split(".")[0]
+            except ValueError as e:
+                print(f"Skipping {isin}: {e}")
+                continue
 
             already_fetched_today = (
                     not options_db.empty
@@ -276,21 +279,119 @@ class MarketDataEngine:
                 print(f"Options fetch failed for {ticker} ({isin}): {e}")
 
         if frames:
-            new_df = pd.concat(frames, ignore_index=True)
-            new_df = new_df[self.OPTIONS_COLUMNS]
+            try:
+                new_df = pd.concat(frames, ignore_index=True)
+                print(f"Columns in fetched data: {list(new_df.columns)}")
+                new_df = new_df[self.OPTIONS_COLUMNS]
 
-            # Drop stale rows for the same ISINs fetched on a previous day
-            if not options_db.empty:
-                options_db = options_db[
-                    ~options_db["isin"].isin(new_df["isin"].unique())
-                ]
+                # Drop stale rows for the same ISINs fetched on a previous day
+                if not options_db.empty:
+                    options_db = options_db[
+                        ~options_db["isin"].isin(new_df["isin"].unique())
+                    ]
 
-            options_db = pd.concat([options_db, new_df], ignore_index=True)
-            options_db = options_db.sort_values(["isin", "expiry", "type", "strike"]).reset_index(drop=True)
-            self.options_path.parent.mkdir(parents=True, exist_ok=True)
-            options_db.to_csv(self.options_path, index=False)
+                options_db = pd.concat([options_db, new_df], ignore_index=True)
+                for col in ["volume", "open_interest"]:
+                    options_db[col] = options_db[col].astype("Int64")
+                options_db = options_db.sort_values(["isin", "expiry", "type", "strike"]).reset_index(drop=True)
+                self.options_path.parent.mkdir(parents=True, exist_ok=True)
+                options_db.to_csv(self.options_path, index=False)
+                print(f"Options saved to {self.options_path} ({len(options_db)} rows)")
+            except Exception as e:
+                print(f"Failed to save options: {e}")
 
         return options_db
+
+
+    def build_atm_vol_map(self, portfolio, fallback_vol=0.15):
+        """
+        Build a { isin: atm_implied_vol } map from stored options.csv and prices.csv.
+
+        For each ISIN the expiry is matched to the product's maturity_date —
+        the available option expiry closest to maturity is used, so the vol
+        reflects the correct point on the term structure.
+
+        If an ISIN appears in multiple products (different maturities), the
+        longest maturity wins — conservative choice for a portfolio view.
+
+        Parameters
+        ----------
+        portfolio    : pd.DataFrame  portfolio rows, must have underlying_isins
+                                     and maturity_date columns
+        fallback_vol : float         used if no options data exists for an ISIN
+
+        Returns
+        -------
+        dict  { isin: float }  — drop-in replacement for the static vol_map
+        """
+        if not self.options_path.exists():
+            raise ValueError("options.csv not found — run fetch_options_chain first")
+
+        options_db = pd.read_csv(self.options_path)
+        db = self.load_db()
+
+        # Build isin -> maturity map (take longest maturity if ISIN appears in multiple products)
+        isin_maturity = {}
+        for _, row in portfolio.iterrows():
+            maturity = pd.Timestamp(row["maturity_date"])
+            for isin in row["underlying_isins"]:
+                if isin not in isin_maturity or maturity > isin_maturity[isin]:
+                    isin_maturity[isin] = maturity
+
+        vol_map = {}
+
+        for isin, maturity in isin_maturity.items():
+            opts = options_db[options_db["isin"] == isin]
+            if opts.empty:
+                vol_map[isin] = fallback_vol
+                continue
+
+            prices = db[db["isin"] == isin].sort_values("date")
+            if prices.empty:
+                vol_map[isin] = fallback_vol
+                continue
+
+            spot = float(prices.iloc[-1]["price"])
+
+            # Pick expiry closest to product maturity
+            available = pd.to_datetime(opts["expiry"].unique())
+            closest_expiry = min(available, key=lambda d: abs((d - maturity).days))
+
+            chain = opts[opts["expiry"] == closest_expiry.strftime("%Y-%m-%d")].copy()
+            chain["distance"] = (chain["strike"] - spot).abs()
+            atm = chain.loc[chain["distance"].idxmin()]
+
+            vol_map[isin] = float(atm["iv"])
+
+        return vol_map
+
+    def build_isin_ticker_map(self, isins):
+        """
+        Build { isin: ticker } from securities_master_data.csv for a list of ISINs.
+        Uses the same priority logic as _resolve_ticker (US listings first).
+
+        Parameters
+        ----------
+        isins : list[str]
+
+        Returns
+        -------
+        dict  { isin: ticker }  — only includes ISINs found in master data
+        """
+        if not self.master_path.exists():
+            raise ValueError("Security master not initialized")
+
+        master = pd.read_csv(self.master_path)
+        result = {}
+
+        for isin in isins:
+            try:
+                result[isin] = self._resolve_ticker(isin)
+            except ValueError:
+                pass
+
+        return result
+
 
 
 

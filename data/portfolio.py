@@ -94,4 +94,30 @@ p4 = {
     "barrier_breached": False,
 }
 
-portfolio = pd.DataFrame([p1, p2, p3, p4])
+
+p5 = {
+    "product_id": "XS3317100249",
+    "product_type": "MBRC",
+    "type_style": "European",
+    "underlyings": ["Advanced Micro Devices, Inc.", "Broadcom Inc", "NVIDIA Corp"],
+    "underlying_isins": [
+        "US0079031078",
+        "US11135F1012",
+        "US67066G1040",
+    ],
+    "tickers": ["AMD", "AVGO", "NVDA"],
+    "currency": "USD",
+    "position_units": 10,
+    "notional": 10000,
+    "cost_price": 1.00,
+    "initial_levels": [255.07, 380.78, 196.51],
+    "current_spots": [255.07, 380.78, 196.51],   
+    "strike": [255.07, 380.78, 196.51],
+    "barrier_pct": 0.526,
+    "coupon": 0.14,   # 14% p.a. from 8 x USD 35 over USD 1,000 across 2 years
+    "initial_fixing_date": "2026-04-14",
+    "maturity_date": "2028-04-28",
+    "barrier_breached": False,   
+}
+
+portfolio = pd.DataFrame([p1, p2, p3, p4, p5])
