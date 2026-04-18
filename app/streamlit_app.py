@@ -27,7 +27,6 @@ def fetch_market_data(_portfolio):
     engine = get_market_engine()
     try:
         engine.fetch_latest_prices(_portfolio)
-        engine.fetch_securities_master(["CH0038863350"], force_refresh=True)
         updated_portfolio = engine.update_spots(_portfolio)
         db = engine.load_db()
         valuation_date = db["date"].max() if not db.empty else None

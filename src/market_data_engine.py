@@ -6,10 +6,15 @@ class MarketDataEngine:
 
     MASTER_COLUMNS = ["isin", "ticker", "code", "exchange", "name", "type", "country", "currency"]
 
+    OPTIONS_COLUMNS = ["fetch_date", "isin", "ticker", "expiry", "type",
+                       "strike", "last_price", "bid", "ask", "iv",
+                       "volume", "open_interest"]
+
     def __init__(self, client, db_path="data/prices.csv"):
         self.client = client
         self.db_path = Path(db_path)
         self.master_path = self.db_path.parent / "securities_master_data.csv"
+        self.options_path = self.db_path.parent / "options.csv"
 
 
 
@@ -179,7 +184,7 @@ class MarketDataEngine:
 
             try:
                 listings = self.client.search_by_isin(isin)
-                print(listings)
+
 
                 if not listings:
                     print(f"No listings found for {isin}")
@@ -198,5 +203,99 @@ class MarketDataEngine:
             master.to_csv(self.master_path, index=False)
 
         return master
+
+    def _resolve_ticker(self, isin):
+
+        if not self.master_path.exists():
+            raise ValueError("Security master not initialized")
+
+        master = pd.read_csv(self.master_path)
+        matches = master[master["isin"] == isin]
+
+        if matches.empty:
+            raise ValueError(f"{isin} not found in master data")
+
+        # Priority: US first
+        us = matches[matches["country"].str.lower().isin(
+            ["united states", "usa", "us"]
+        )]
+        if not us.empty:
+            return us.iloc[0]["ticker"]
+
+        # fallback
+        return matches.iloc[0]["ticker"]
+
+    def fetch_options_chain(self, isins, yahoo_client, force_refresh=False):
+        """
+        Download the full options chain for each ISIN using YahooClient.
+        Tickers are resolved from securities_master_data.csv via _resolve_ticker.
+        Results are stored in options.csv.
+
+        Parameters
+        ----------
+        isins         : list[str]    ISINs to fetch options for
+        yahoo_client  : YahooClient  Yahoo Finance client instance
+        force_refresh : bool         re-download even if already fetched today
+
+        Returns
+        -------
+        pd.DataFrame  contents of options.csv after update
+        """
+
+        if self.options_path.exists():
+            options_db = pd.read_csv(self.options_path, parse_dates=["fetch_date"])
+        else:
+            options_db = pd.DataFrame(columns=self.OPTIONS_COLUMNS)
+
+        today = pd.Timestamp.today().normalize()
+        frames = []
+
+        for isin in isins:
+            ticker = self._resolve_ticker(isin)
+            ticker = ticker.split(".")[0]
+
+            already_fetched_today = (
+                    not options_db.empty
+                    and (
+                            (options_db["isin"] == isin) &
+                            (options_db["fetch_date"] == today)
+                    ).any()
+            )
+
+            if not force_refresh and already_fetched_today:
+                continue
+
+            try:
+                df = yahoo_client.get_full_chain(ticker)
+                df["isin"] = isin
+                df["fetch_date"] = today
+                frames.append(df)
+                print(f"Options fetched: {ticker} ({len(df)} rows)")
+
+            except Exception as e:
+                print(f"Options fetch failed for {ticker} ({isin}): {e}")
+
+        if frames:
+            new_df = pd.concat(frames, ignore_index=True)
+            new_df = new_df[self.OPTIONS_COLUMNS]
+
+            # Drop stale rows for the same ISINs fetched on a previous day
+            if not options_db.empty:
+                options_db = options_db[
+                    ~options_db["isin"].isin(new_df["isin"].unique())
+                ]
+
+            options_db = pd.concat([options_db, new_df], ignore_index=True)
+            options_db = options_db.sort_values(["isin", "expiry", "type", "strike"]).reset_index(drop=True)
+            self.options_path.parent.mkdir(parents=True, exist_ok=True)
+            options_db.to_csv(self.options_path, index=False)
+
+        return options_db
+
+
+
+
+
+
 
 

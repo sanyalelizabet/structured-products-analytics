@@ -79,6 +79,8 @@ class EODClient:
             if row.get("adjusted_close") is not None
         ]
 
+
+
     def search_by_isin(self, isin):
         """
         Uses Search API (ISIN supported).

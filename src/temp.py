@@ -15,12 +15,10 @@ from src.pricing.monte_carlo import MonteCarloPricer
 from data.portfolio import portfolio
 
 
-
-api_key = st.secrets["EOD_API_KEY"]
-client = EODClient(api_key)
-
-
-engine = MarketDataEngine(client)
+import yfinance as yf
+import pandas as pd
 
 
-engine.fetch_securities_master( ["CH0038863350"] , force_refresh=True)
+from src.yahoo_client import YahooClient
+from src.market_data_engine import MarketDataEngine
+

@@ -6,3 +6,4 @@ datetime
 pathlib
 plotly
 scipy
+yfinance
