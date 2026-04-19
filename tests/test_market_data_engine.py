@@ -21,8 +21,18 @@ def mock_client():
     return client
 
 
+def _write_master(tmp_path):
+    pd.DataFrame([
+        {"isin": "CH001", "ticker": "NESN.SW", "code": "NESN", "exchange": "SW",
+         "name": "Nestle", "type": "Common Stock", "country": "Switzerland", "currency": "CHF"},
+        {"isin": "CH002", "ticker": "NOVN.SW", "code": "NOVN", "exchange": "SW",
+         "name": "Novartis", "type": "Common Stock", "country": "Switzerland", "currency": "CHF"},
+    ]).to_csv(tmp_path / "securities_master_data.csv", index=False)
+
+
 @pytest.fixture
 def engine(mock_client, tmp_path):
+    _write_master(tmp_path)
     return MarketDataEngine(client=mock_client, db_path=str(tmp_path / "prices.csv"))
 
 
@@ -30,14 +40,13 @@ def _simple_portfolio():
     return pd.DataFrame([{
         "product_id": "BRC001",
         "underlying_isins": ["CH001"],
-        "tickers": ["NESN.SW"],
     }])
 
 
 def _two_ticker_portfolio():
     return pd.DataFrame([
-        {"product_id": "BRC001", "underlying_isins": ["CH001"], "tickers": ["NESN.SW"]},
-        {"product_id": "BRC002", "underlying_isins": ["CH002"], "tickers": ["NOVN.SW"]},
+        {"product_id": "BRC001", "underlying_isins": ["CH001"]},
+        {"product_id": "BRC002", "underlying_isins": ["CH002"]},
     ])
 
 
@@ -97,12 +106,8 @@ class TestFetchLatestPrices:
         db = engine.load_db()
         assert db.duplicated(subset=["isin", "date"]).sum() == 0
 
-    @pytest.mark.xfail(reason="BUG: except block uses `break` instead of `continue` — one failed ticker aborts remaining tickers", strict=True)
     def test_api_error_on_one_ticker_continues_to_next(self, engine, mock_client):
-        """
-        If NESN fetch fails, NOVN should still be fetched.
-        Current code uses `break` → stops the entire loop on first error.
-        """
+        """If NESN fetch fails, NOVN should still be fetched."""
         def fail_first(ticker):
             if ticker == "NESN.SW":
                 raise Exception("network error")
@@ -190,6 +195,75 @@ class TestFetchMonthlyPrices:
         mock_client.get_monthly_prices.side_effect = Exception("API down")
         db = engine.fetch_monthly_prices({"CH001": "NESN.SW"})
         assert db is not None
+
+
+# ─────────────────────────────────────────
+# fetch_options_chain
+# ─────────────────────────────────────────
+
+def _make_options_df(ticker="NESN.SW", expiry="2025-06-20"):
+    return pd.DataFrame([
+        {"ticker": ticker, "expiry": expiry, "type": "call",
+         "strike": 90.0, "last_price": 8.0, "bid": 7.9, "ask": 8.1,
+         "iv": 0.20, "volume": 100, "open_interest": 500},
+        {"ticker": ticker, "expiry": expiry, "type": "put",
+         "strike": 90.0, "last_price": 3.0, "bid": 2.9, "ask": 3.1,
+         "iv": 0.22, "volume": 80, "open_interest": 300},
+    ])
+
+
+def _master_csv(tmp_path):
+    """Write a minimal securities_master_data.csv."""
+    master = pd.DataFrame([{
+        "isin": "CH0012221716", "ticker": "NESN.SW", "code": "NESN",
+        "exchange": "SW", "name": "Nestle", "type": "Common Stock",
+        "country": "Switzerland", "currency": "CHF",
+    }])
+    path = tmp_path / "securities_master_data.csv"
+    master.to_csv(path, index=False)
+
+
+@pytest.fixture
+def yahoo_client():
+    yc = MagicMock()
+    yc.get_full_chain.return_value = _make_options_df()
+    return yc
+
+
+@pytest.fixture
+def engine_with_master(mock_client, tmp_path):
+    _master_csv(tmp_path)
+    return MarketDataEngine(
+        client=mock_client,
+        db_path=str(tmp_path / "prices.csv"),
+    )
+
+
+class TestFetchOptionsChain:
+    def test_fetches_and_saves_options(self, engine_with_master, yahoo_client):
+        df = engine_with_master.fetch_options_chain(["CH0012221716"], yahoo_client)
+        assert not df.empty
+        assert set(["isin", "ticker", "expiry", "type", "strike", "iv"]).issubset(df.columns)
+        assert engine_with_master.options_path.exists()
+
+    def test_isin_stored_in_output(self, engine_with_master, yahoo_client):
+        df = engine_with_master.fetch_options_chain(["CH0012221716"], yahoo_client)
+        assert "CH0012221716" in df["isin"].values
+
+    def test_skips_if_already_fetched_today(self, engine_with_master, yahoo_client):
+        engine_with_master.fetch_options_chain(["CH0012221716"], yahoo_client)
+        engine_with_master.fetch_options_chain(["CH0012221716"], yahoo_client)
+        assert yahoo_client.get_full_chain.call_count == 1
+
+    def test_force_refresh_re_fetches(self, engine_with_master, yahoo_client):
+        engine_with_master.fetch_options_chain(["CH0012221716"], yahoo_client)
+        engine_with_master.fetch_options_chain(["CH0012221716"], yahoo_client, force_refresh=True)
+        assert yahoo_client.get_full_chain.call_count == 2
+
+    def test_api_error_does_not_crash(self, engine_with_master, yahoo_client):
+        yahoo_client.get_full_chain.side_effect = Exception("Yahoo down")
+        df = engine_with_master.fetch_options_chain(["CH0012221716"], yahoo_client)
+        assert df is not None
 
 
 # ─────────────────────────────────────────

@@ -46,7 +46,7 @@ def render(portfolio, df, analytics, valuation_date, vol_map, beta_map):
 
     df_display = df[[
         "product_id", "maturity_date", "days_to_expiry", "product_type",
-        "total_payoff", "total_cost", "break_even", "return_pa", "return_pct", "distance_to_barrier"
+        "total_payoff", "total_cost", "break_even", "ytm", "ytm_today", "return_pct", "distance_to_barrier"
     ]].rename(columns={
         "product_id":         "Product ID",
         "maturity_date":      "Maturity Date",
@@ -55,8 +55,9 @@ def render(portfolio, df, analytics, valuation_date, vol_map, beta_map):
         "total_payoff":       "Total Payoff",
         "total_cost":         "Total Cost",
         "break_even":         "Break-even",
-        "return_pa":          "Return p.a. (%)",
-        "return_pct":         "Return (%)",
+        "ytm":                "YTM from Purchase (%)",
+        "ytm_today":          "YTM from Today (%)",
+        "return_pct":         "Total Return (%)",
         "distance_to_barrier":"Downside to Barrier (%)",
     })
     row_selected = df_display[df_display["Product ID"] == selected_product].iloc[0]
@@ -78,7 +79,7 @@ def render(portfolio, df, analytics, valuation_date, vol_map, beta_map):
     col3.metric("Days to Expiry", f"{int(row['days_to_expiry'])}")
 
     col4, col5, col6 = st.columns(3)
-    col4.metric("Return p.a. (%)", f"{row['return_pa']:.2f}")
+    col4.metric("YTM from Today (%)", f"{row['ytm_today']:.2f}")
     col5.metric(
         "Downside to Barrier (%)",
         f"{row['distance_to_barrier']:.2f}%",

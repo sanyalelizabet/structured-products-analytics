@@ -161,14 +161,43 @@ class ReverseConvertible:
         if total_cost == 0:
             return np.nan
         return self.pnl() / total_cost
-    
-    
-    def return_pa(self):
+
+    def _purchase_date(self):
+        """Returns purchase_date if set in row, else falls back to initial_fixing_date."""
+        val = None
+        if "purchase_date" in self.row.index:
+            val = self.row["purchase_date"]
+        if val is None or (hasattr(val, '__class__') and str(val) in ("nan", "NaT", "None")):
+            val = self.row["initial_fixing_date"]
+        return datetime.strptime(str(val), "%Y-%m-%d")
+
+    def ytm(self):
+        """
+        Yield to Maturity from purchase_date to maturity.
+        Annualizes the total projected return over the actual holding period.
+        Falls back to initial_fixing_date if purchase_date not set.
+        """
         days = (datetime.strptime(self.row["maturity_date"], "%Y-%m-%d")
-                - datetime.strptime(self.row["initial_fixing_date"], "%Y-%m-%d")).days
+                - self._purchase_date()).days
         if days <= 0:
             return np.nan
         return self.return_pct() * 360 / days
+
+    def ytm_today(self):
+        """
+        Yield to Maturity from today to maturity.
+        Forward yield — the annualized return earned on remaining holding period.
+        Most comparable metric across products with different remaining tenors.
+        """
+        days = (datetime.strptime(self.row["maturity_date"], "%Y-%m-%d")
+                - datetime.today()).days
+        if days <= 0:
+            return np.nan
+        return self.return_pct() * 360 / days
+
+    def return_pa(self):
+        """Alias for ytm() — kept for backward compatibility."""
+        return self.ytm()
     
     def current_barrier_distances(self):
         """
@@ -220,6 +249,8 @@ class ReverseConvertible:
             "total_cost": self.total_cost(),
             "pnl": self.pnl(),
             "return_pct": self.return_pct(),
+            "ytm": self.ytm(),
+            "ytm_today": self.ytm_today(),
             "return_pa": self.return_pa(),
             "distance_to_barrier": self.distance_to_barrier(),
             "break_even": self.break_even(),

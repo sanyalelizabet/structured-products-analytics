@@ -75,12 +75,18 @@ def render(analytics, df, greeks_df, pf_delta, valuation_date):
     mtm4.metric("# Products", portfolio_overview["total_products"])
     
     col1, col2, col3, col4 = st.columns(4)
-    
-    
-    col1.metric("Proj. Payoff",     f"{ref_ccy} {proj_payoff:,.2f}")    
-    col2.metric("Proj. PnL",      f"{ref_ccy} {pnl:,.2f}")
-    col3.metric("Proj. Return (%)",     f"{portfolio_overview['portfolio_return_pct']*100:.2f}")
-    col4.metric("Total Notional", f"{ref_ccy} {notional:,.2f}")
+    col1.metric("Proj. Payoff",     f"{ref_ccy} {proj_payoff:,.2f}")
+    col2.metric("Proj. PnL",        f"{ref_ccy} {pnl:,.2f}")
+    col3.metric("Proj. Total Return (%)", f"{portfolio_overview['portfolio_return_pct']*100:.2f}")
+    col4.metric("Total Notional",   f"{ref_ccy} {notional:,.2f}")
+
+    col5, = st.columns(1)
+    col5.metric(
+        "MWR / Portfolio IRR (% p.a.)",
+        f"{portfolio_overview['portfolio_mwr']*100:.2f}",
+        help="Money-Weighted Return: annualised IRR accounting for when and how much capital was deployed."
+    )
+
     
     
     

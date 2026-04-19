@@ -32,8 +32,8 @@ def fetch_market_data(_portfolio):
     engine = get_market_engine()
     try:
         all_isins = list({isin for _, row in _portfolio.iterrows() for isin in row["underlying_isins"]})
+        engine.fetch_securities_master(all_isins, force_refresh=True)
         engine.fetch_latest_prices(_portfolio)
-        engine.fetch_securities_master(all_isins)
         updated_portfolio = engine.update_spots(_portfolio)
         db = engine.load_db()
         valuation_date = db["date"].max() if not db.empty else None
@@ -60,8 +60,10 @@ def fetch_implied_vols(_portfolio):
 def build_product_analytics(_portfolio, _db):
     pa = PortfolioAnalytics(_portfolio, reference_currency="CHF", price_db=_db)
     df = pa.build_product_analytics()
-    df["return_pa"] *= 100
-    
+    df["return_pa"]  *= 100
+    df["ytm"]        *= 100
+    df["ytm_today"]  *= 100
+    df["distance_to_barrier"] *= 100
     return pa, df
 
 @st.cache_data(ttl=3600)

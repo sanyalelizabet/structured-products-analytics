@@ -11,7 +11,6 @@ p1 = {
     "type_style": "European",
     "underlyings": ["ALCON"],
     "underlying_isins": ["CH0432492467"],
-    "tickers": ["ALC.SW"],
     "currency": "CHF",
     "position_units": 1,
     "notional": 1000,
@@ -22,6 +21,7 @@ p1 = {
     "barrier_pct": 0.70,
     "coupon": 0.04,
     "initial_fixing_date": "2025-11-10",
+    "purchase_date": "2025-11-10",
     "maturity_date": "2026-11-17",
     "barrier_breached": False,
 }
@@ -37,7 +37,6 @@ p2 = {
         "CH0012005267",
         "CH0012032048",
     ],
-    "tickers": ["ABBN.SW", "HOLN.SW", "NOVN.SW", "ROG.SW"],
     "currency": "CHF",
     "position_units": 1,
     "notional": 1000,
@@ -48,6 +47,7 @@ p2 = {
     "barrier_pct": 0.70,
     "coupon": 0.0675,
     "initial_fixing_date": "2025-12-30",
+    "purchase_date": "2025-12-30",
     "maturity_date": "2026-12-28",
     "barrier_breached": True,
 }
@@ -58,7 +58,6 @@ p3 = {
     "type_style": "European",
     "underlyings": ["ABB", "LONZA", "NESTLE"],
     "underlying_isins": ["CH0012221716", "CH0013841017", "CH0038863350"],
-    "tickers": ["ABBN.SW", "LONN.SW", "NESN.SW"],
     "currency": "CHF",
     "position_units": 10,
     "notional": 10000,
@@ -69,6 +68,7 @@ p3 = {
     "barrier_pct": 0.70,
     "coupon": 0.0866,
     "initial_fixing_date": "2025-08-19",
+    "purchase_date": "2025-08-19",
     "maturity_date": "2026-08-19",
     "barrier_breached": False,
 }
@@ -79,7 +79,6 @@ p4 = {
     "type_style": "European",
     "underlyings": ["Airbnb Inc."],
     "underlying_isins": ["US0090661010"],
-    "tickers": ["ABNB"],
     "currency": "USD",
     "position_units": 1,
     "notional": 5000,
@@ -90,10 +89,10 @@ p4 = {
     "barrier_pct": 0.65,
     "coupon": 0.100556,
     "initial_fixing_date": "2025-10-02",
+    "purchase_date": "2025-10-02",
     "maturity_date": "2026-10-09",
     "barrier_breached": False,
 }
-
 
 p5 = {
     "product_id": "XS3317100249",
@@ -105,19 +104,19 @@ p5 = {
         "US11135F1012",
         "US67066G1040",
     ],
-    "tickers": ["AMD", "AVGO", "NVDA"],
     "currency": "USD",
     "position_units": 10,
     "notional": 10000,
     "cost_price": 1.00,
     "initial_levels": [255.07, 380.78, 196.51],
-    "current_spots": [255.07, 380.78, 196.51],   
+    "current_spots": [255.07, 380.78, 196.51],
     "strike": [255.07, 380.78, 196.51],
     "barrier_pct": 0.526,
-    "coupon": 0.14,   # 14% p.a. from 8 x USD 35 over USD 1,000 across 2 years
+    "coupon": 0.14,
     "initial_fixing_date": "2026-04-14",
+    "purchase_date": "2026-04-14",
     "maturity_date": "2028-04-28",
-    "barrier_breached": False,   
+    "barrier_breached": False,
 }
 
 portfolio = pd.DataFrame([p1, p2, p3, p4, p5])

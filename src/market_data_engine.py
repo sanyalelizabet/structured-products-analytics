@@ -33,18 +33,25 @@ class MarketDataEngine:
 
         rows = []
 
-        unique_pairs = set()
-        for _, row in portfolio.iterrows():
-            unique_pairs.update(zip(row["underlying_isins"], row["tickers"]))
+        unique_isins = {
+            isin
+            for _, row in portfolio.iterrows()
+            for isin in row["underlying_isins"]
+        }
 
-        for isin, ticker in unique_pairs:
+        for isin in unique_isins:
+            try:
+                ticker = self._resolve_ticker(isin)
+            except ValueError as e:
+                print(f"Skipping price fetch for {isin}: {e}")
+                continue
             try:
                 # ----------------------------------
                 # 1. Skip API call if previous trading day already exists
                 # ----------------------------------
                 exists_prev_day = (
-                    (db["isin"] == isin) &
-                    (db["date"] == prev_trading_day)
+                        (db["isin"] == isin) &
+                        (db["date"] == prev_trading_day)
                 ).any()
 
                 if exists_prev_day:
@@ -60,8 +67,8 @@ class MarketDataEngine:
                 # 3. Check whether quoted date already exists
                 # ----------------------------------
                 exists_quote_date = (
-                    (db["isin"] == isin) &
-                    (db["date"] == quote_date)
+                        (db["isin"] == isin) &
+                        (db["date"] == quote_date)
                 ).any()
 
                 if exists_quote_date:
@@ -75,7 +82,8 @@ class MarketDataEngine:
                 })
 
             except Exception as e:
-                break
+                print(f"Price fetch failed for {ticker} ({isin}): {e}")
+                continue
 
         new_df = pd.DataFrame(rows)
 
@@ -85,7 +93,7 @@ class MarketDataEngine:
             self.save_db(db)
 
         return db
-    
+
     def update_spots(self, portfolio):
         portfolio = portfolio.copy()
         db = self.load_db()
@@ -106,7 +114,7 @@ class MarketDataEngine:
     
         return portfolio
 
-    def fetch_monthly_prices(self, isin_ticker_map, years=6, force_refresh=True):
+    def fetch_monthly_prices(self, isin_ticker_map, years=6, force_refresh=False):
         """
         Download monthly adjusted-close prices and append to prices.csv.
         Same schema as daily rows — month-end dates coexist naturally.
@@ -154,7 +162,7 @@ class MarketDataEngine:
 
         return db
 
-    def fetch_securities_master(self, isins, force_refresh=True):
+    def fetch_securities_master(self, isins, force_refresh=False):
         """
         Download master data for each ISIN and store in securities_master_data.csv.
 
@@ -225,7 +233,7 @@ class MarketDataEngine:
         # fallback
         return matches.iloc[0]["ticker"]
 
-    def fetch_options_chain(self, isins, yahoo_client, force_refresh=True):
+    def fetch_options_chain(self, isins, yahoo_client, force_refresh=False):
         """
         Download the full options chain for each ISIN using YahooClient.
         Tickers are resolved from securities_master_data.csv via _resolve_ticker.

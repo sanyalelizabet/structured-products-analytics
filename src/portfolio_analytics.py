@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 import requests
 from datetime import datetime
+from scipy.optimize import brentq
 from src.reverse_convertible import ReverseConvertible
 
 
@@ -46,6 +47,8 @@ class PortfolioAnalytics:
                 "pnl": s["pnl"],
                 "pnl_delta": s["pnl_delta"],
                 "return_pct": s["return_pct"],
+                "ytm": s["ytm"],
+                "ytm_today": s["ytm_today"],
                 "return_pa": s["return_pa"],
                 "distance_to_barrier": s["distance_to_barrier"],
                 "distance_delta": s["distance_delta"],
@@ -232,12 +235,7 @@ class PortfolioAnalytics:
             )
     
         portfolio_return = total_pnl / total_cost if total_cost != 0 else np.nan
-    
-        weighted_return_pa = np.average(
-            product_analytics["return_pa"],
-            weights=product_analytics["total_cost"]
-        ) if total_cost != 0 else np.nan
-    
+
         return {
             "reference_currency": self.reference_currency,
             "total_products": len(product_analytics),
@@ -246,11 +244,79 @@ class PortfolioAnalytics:
             "total_payoff": total_payoff,
             "total_pnl": total_pnl,
             "portfolio_return_pct": portfolio_return,
-            "portfolio_return_pa": weighted_return_pa
+            "portfolio_mwr": self.portfolio_mwr(),
         }
     
     def total_portfolio_table(self) -> pd.DataFrame:
         return pd.DataFrame([self.total_portfolio_metrics()])
+
+    # =========================
+    # PORTFOLIO RETURN METRICS
+    # =========================
+
+    @staticmethod
+    def _xirr(cash_flows):
+        """
+        XIRR: find the annual rate r where NPV of all cash flows = 0.
+        cash_flows: list of (date, float) — negative = outflow, positive = inflow.
+        Uses Brent's method for reliable convergence.
+        """
+        if not cash_flows:
+            return np.nan
+        dates, amounts = zip(*sorted(cash_flows, key=lambda x: x[0]))
+        t0 = pd.Timestamp(dates[0])
+        years = [(pd.Timestamp(d) - t0).days / 365.0 for d in dates]
+
+        def npv(r):
+            return sum(cf / (1 + r) ** t for cf, t in zip(amounts, years))
+
+        try:
+            return brentq(npv, -0.9999, 100.0, maxiter=1000)
+        except (ValueError, RuntimeError):
+            return np.nan
+
+    def portfolio_mwr(self):
+        """
+        Portfolio Money-Weighted Return (XIRR).
+
+        For each product: outflow of -cost at purchase_date,
+        inflow of +projected_payoff at maturity_date.
+        All amounts converted to reference currency.
+
+        This is the single IRR that correctly accounts for the timing
+        and size of every capital deployment across the portfolio.
+        """
+        cash_flows = []
+
+        for _, row in self.portfolio.iterrows():
+            rc = ReverseConvertible(row)
+            purchase_date = rc._purchase_date()
+            maturity_date = pd.Timestamp(row["maturity_date"])
+
+            cost   = self.convert_to_reference(rc.total_cost(),   row["currency"])
+            payoff = self.convert_to_reference(rc.total_payoff(), row["currency"])
+
+            cash_flows.append((purchase_date, -cost))
+            cash_flows.append((maturity_date,  payoff))
+
+        return self._xirr(cash_flows)
+
+    def portfolio_ytm_weighted(self):
+        """
+        Cost-weighted average YTM (from today to maturity) across all products.
+        Weights are each product's total cost converted to reference currency.
+        Comparable to Bloomberg PORT's portfolio yield metric.
+        Computed directly from portfolio rows to avoid double-counting any
+        display-level *100 scaling applied to product_df.
+        """
+        weights, ytms = [], []
+        for _, row in self.portfolio.iterrows():
+            rc = ReverseConvertible(row)
+            cost_ref = self.convert_to_reference(rc.total_cost(), row["currency"])
+            weights.append(cost_ref)
+            ytms.append(rc.ytm_today())
+
+        return np.average(ytms, weights=weights) if sum(weights) > 0 else np.nan
     
     
 
