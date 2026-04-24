@@ -1,6 +1,10 @@
+import logging
+
 import pandas as pd
 from pathlib import Path
 from pandas.tseries.offsets import BDay
+
+log = logging.getLogger(__name__)
 
 class MarketDataEngine:
 
@@ -43,7 +47,7 @@ class MarketDataEngine:
             try:
                 ticker = self._resolve_ticker(isin)
             except ValueError as e:
-                print(f"Skipping price fetch for {isin}: {e}")
+                log.warning("Skipping price fetch for %s: %s", isin, e)
                 continue
             try:
                 # ----------------------------------
@@ -82,7 +86,7 @@ class MarketDataEngine:
                 })
 
             except Exception as e:
-                print(f"Price fetch failed for {ticker} ({isin}): {e}")
+                log.warning("Price fetch failed for %s (%s): %s", ticker, isin, e)
                 continue
 
         new_df = pd.DataFrame(rows)
@@ -151,7 +155,7 @@ class MarketDataEngine:
                     })
 
             except Exception as e:
-                print(f"Monthly fetch failed for {ticker} ({isin}): {e}")
+                log.warning("Monthly fetch failed for %s (%s): %s", ticker, isin, e)
 
         if rows:
             new_df = pd.DataFrame(rows)
@@ -195,13 +199,13 @@ class MarketDataEngine:
 
 
                 if not listings:
-                    print(f"No listings found for {isin}")
+                    log.info("No listings found for %s", isin)
                     continue
 
                 rows.extend(listings)
 
             except Exception as e:
-                print(f"Master data fetch failed for {isin}: {e}")
+                log.warning("Master data fetch failed for %s: %s", isin, e)
 
         if rows:
             new_df = pd.DataFrame(rows)
@@ -262,7 +266,7 @@ class MarketDataEngine:
             try:
                 ticker = self._resolve_ticker(isin).split(".")[0]
             except ValueError as e:
-                print(f"Skipping {isin}: {e}")
+                log.info("Skipping options fetch for %s: %s", isin, e)
                 continue
 
             already_fetched_today = (
@@ -281,15 +285,15 @@ class MarketDataEngine:
                 df["isin"] = isin
                 df["fetch_date"] = today
                 frames.append(df)
-                print(f"Options fetched: {ticker} ({len(df)} rows)")
+                log.info("Options fetched: %s (%d rows)", ticker, len(df))
 
             except Exception as e:
-                print(f"Options fetch failed for {ticker} ({isin}): {e}")
+                log.warning("Options fetch failed for %s (%s): %s", ticker, isin, e)
 
         if frames:
             try:
                 new_df = pd.concat(frames, ignore_index=True)
-                print(f"Columns in fetched data: {list(new_df.columns)}")
+                log.debug("Columns in fetched data: %s", list(new_df.columns))
                 new_df = new_df[self.OPTIONS_COLUMNS]
 
                 # Drop stale rows for the same ISINs fetched on a previous day
@@ -304,9 +308,9 @@ class MarketDataEngine:
                 options_db = options_db.sort_values(["isin", "expiry", "type", "strike"]).reset_index(drop=True)
                 self.options_path.parent.mkdir(parents=True, exist_ok=True)
                 options_db.to_csv(self.options_path, index=False)
-                print(f"Options saved to {self.options_path} ({len(options_db)} rows)")
+                log.info("Options saved to %s (%d rows)", self.options_path, len(options_db))
             except Exception as e:
-                print(f"Failed to save options: {e}")
+                log.error("Failed to save options: %s", e)
 
         return options_db
 

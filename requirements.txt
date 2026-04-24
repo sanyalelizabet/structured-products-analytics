@@ -7,3 +7,4 @@ pathlib
 plotly
 scipy
 yfinance
+tenacity

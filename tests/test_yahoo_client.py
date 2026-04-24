@@ -6,6 +6,7 @@ import pandas as pd
 import pytest
 from unittest.mock import MagicMock, patch
 from src.yahoo_client import YahooClient
+from src.exceptions import DataUnavailableError
 
 
 # ─────────────────────────────────────────
@@ -60,7 +61,7 @@ class TestGetSpot:
         tkr = _mock_ticker()
         tkr.history.return_value = pd.DataFrame()
         with patch("yfinance.Ticker", return_value=tkr):
-            with pytest.raises(ValueError, match="No price data"):
+            with pytest.raises(DataUnavailableError, match="No price data"):
                 client.get_spot("NESN.SW")
 
 
@@ -120,7 +121,7 @@ class TestGetFullChain:
     def test_raises_when_no_expiries(self, client):
         tkr = _mock_ticker(expiries=())
         with patch("yfinance.Ticker", return_value=tkr):
-            with pytest.raises(ValueError, match="No option data"):
+            with pytest.raises(DataUnavailableError, match="No option data"):
                 client.get_full_chain("AAPL")
 
     def test_skips_failed_expiry_and_continues(self, client):

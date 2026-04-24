@@ -4,6 +4,7 @@ Tests for EODClient — all HTTP calls are mocked.
 import pytest
 from unittest.mock import patch, MagicMock
 from src.eod_client import EODClient
+from src.exceptions import DataUnavailableError
 
 
 @pytest.fixture
@@ -36,15 +37,15 @@ class TestGetLastQuote:
             result = client.get_last_quote("NESN.SW")
         assert isinstance(result["price"], float)
 
-    def test_http_error_raises_value_error(self, client):
+    def test_http_error_raises_data_unavailable(self, client):
         with patch("requests.get", return_value=_mock_response(status_code=403)):
-            with pytest.raises(ValueError, match="HTTP error 403"):
+            with pytest.raises(DataUnavailableError, match="HTTP error 403"):
                 client.get_last_quote("NESN.SW")
 
-    def test_missing_close_raises_value_error(self, client):
+    def test_missing_close_raises_data_unavailable(self, client):
         payload = {"open": 95.0}  # no "close" key
         with patch("requests.get", return_value=_mock_response(json_data=payload)):
-            with pytest.raises(ValueError, match="No price returned"):
+            with pytest.raises(DataUnavailableError, match="No price returned"):
                 client.get_last_quote("NESN.SW")
 
     def test_no_timestamp_gives_none_date(self, client):

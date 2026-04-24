@@ -6,6 +6,9 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 logo_path = Path(__file__).resolve().parent / "assets" / "logo.png"
 
+from src.logging_config import configure_logging
+configure_logging()
+
 from src.portfolio_analytics import PortfolioAnalytics
 from src.eod_client import EODClient
 from src.market_data_engine import MarketDataEngine
