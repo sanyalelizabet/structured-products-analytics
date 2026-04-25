@@ -5,11 +5,16 @@ import hashlib
 
 class ScenarioEngine:
 
-    def __init__(self, portfolio, beta_map, vol_map, scenarios=None):
+    def __init__(self, portfolio, beta_map, vol_map, risk_free_rates=None, scenarios=None, mean_reversion_kappa=0.5):
         self.portfolio = portfolio
         self.beta_map = beta_map
         self.scenarios = scenarios
         self.vol = vol_map
+        self.risk_free_rates = risk_free_rates or {}
+        # Speed of mean reversion (per year) — Schwartz-style OU pull on log-prices.
+        # 0.0 → pure GBM. 0.5 ≈ ~1.4y half-life. Unconditional log-spread σ/√(2κ).
+        # Higher κ = tighter paths, especially for high-vol single stocks.
+        self.kappa = mean_reversion_kappa
         
     def get_beta(self, isin):
         return self.beta_map.get(isin, 1.0)
@@ -28,9 +33,13 @@ class ScenarioEngine:
 
         Each business day:
           1. Identify drift phase (pre-shock / between shocks / post-shock)
-          2. Apply correlated GBM step across all assets simultaneously:
-               S *= exp((drift - 0.5*vol²)*dt + vol*sqrt(dt)*Z_corr)
-          3. Apply discrete shock on shock dates (market_shock, not beta-scaled)
+          2. Advance a deterministic fair-value target θ_t at CAPM drift
+          3. Apply correlated mean-reverting GBM step in log-prices:
+               d(log S) = [(μ - 0.5σ²) + κ(θ - log S)] dt + σ dW
+             κ = self.kappa pulls log-prices back toward θ — bounding long-horizon
+             explosion while preserving GBM-like behaviour at short horizons.
+          4. Apply β-scaled discrete shock on shock dates; both S and θ are
+             repriced so reversion does not fight a fundamental shock.
 
         Parameters
         ----------
@@ -82,6 +91,9 @@ class ScenarioEngine:
         vols  = np.array([self.get_vol(isin)  for isin in isins])   # (n_assets,)
         betas = np.array([self.get_beta(isin) for isin in isins])   # (n_assets,)
 
+        # Risk-free rate of the product currency — anchor for CAPM drift
+        r_f = float(self.risk_free_rates.get(row["currency"], 0.0))
+
         # ── Correlation & Cholesky ────────────────────────────────────────────
         if corr_matrix is None:
             corr_matrix = np.eye(n_assets)
@@ -121,33 +133,53 @@ class ScenarioEngine:
         Z_corr = Z_raw @ L.T
 
         # ── Simulate all assets jointly day-by-day ───────────────────────────
-        prices              = spots.copy()                        # (n_assets,)
-        price_paths         = np.zeros((n_days, n_assets))
+        # Schwartz-style mean-reverting GBM in log-prices:
+        #   d(log S) = [(μ - ½σ²) + κ(θ - log S)] dt + σ dW
+        # where θ is a deterministic "fair value" trajectory that grows at CAPM
+        # drift and absorbs discrete shocks (so reversion does not fight a
+        # fundamental repricing).
+        prices               = spots.copy()                        # (n_assets,)
+        log_prices           = np.log(prices)
+        log_theta            = np.log(spots.copy())                # fair-value target
+        price_paths          = np.zeros((n_days, n_assets))
         product_final_prices = np.full(n_assets, np.nan)
-        prev_date           = today
+        prev_date            = today
+        kappa                = self.kappa
 
         for t_idx, bday in enumerate(date_range):
             dt      = (bday - prev_date).days / 360 if t_idx > 0 else 0.0
             t_years = (bday - today).days / 360
 
-            # Drift phase (beta-scaled, vectorised over assets)
+            # Drift phase — CAPM: μ_i = r_f + β_i × (μ_m - r_f)
+            # pre/post_shock_drift are scenario assumptions for the *market* return.
             if t_years <= T_first_shock:
-                drift = pre_shock_drift  * betas   # (n_assets,)
+                mu_m = pre_shock_drift   # before any shock
             elif t_years > T_last_shock:
-                drift = post_shock_drift * betas
+                mu_m = post_shock_drift  # after final shock
             else:
-                drift =  post_shock_drift * betas
+                mu_m = pre_shock_drift   # during shock window — continuous drift continues at pre-shock rate, discrete shocks layer on top
 
-            # GBM step — all assets in one vectorised expression
+            drift = r_f + betas * (mu_m - r_f)   # (n_assets,)
+
+            # OU + GBM step (vectorised across assets)
             if dt > 0:
-                prices *= np.exp(
+                # Target trajectory advances deterministically along Itô-corrected drift.
+                log_theta += (drift - 0.5 * vols ** 2) * dt
+                # Actual log-price: GBM diffusion + restoring force toward θ.
+                log_prices += (
                     (drift - 0.5 * vols ** 2) * dt
-                    + vols * np.sqrt(dt) * Z_corr[t_idx]   # correlated draw
+                    + kappa * (log_theta - log_prices) * dt
+                    + vols * np.sqrt(dt) * Z_corr[t_idx]
                 )
+                prices = np.exp(log_prices)
 
-            # Discrete shock applied uniformly across all underlyings
+            # Discrete shock — β-scaled per asset; reprices both actual and target
+            # so mean reversion does not undo a fundamental shock.
             if bday in shock_dates:
-                prices *= (1 + market_shock / 100)
+                shock_factor = 1 + market_shock / 100 * betas
+                prices *= shock_factor
+                log_prices = np.log(prices)
+                log_theta += np.log(shock_factor)
 
             # Capture each product's terminal price at its own maturity
             if bday >= maturity:

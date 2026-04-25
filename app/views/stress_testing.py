@@ -6,10 +6,13 @@ from src.scenario_engine import ScenarioEngine
 from app.config import SCENARIO_PRESETS, SCENARIO_CUSTOM_DEFAULT
 
 
-def render(portfolio, corr_df, beta_map, vol_map):
+def render(portfolio, corr_df, beta_map, vol_map_implied, vol_map_realised, risk_free_rates):
 
     st.subheader("Stress Testing (Path-Based)")
     st.caption("Scenario defined as a time path: drift → shocks → drift to maturity.")
+
+    vol_mode = st.radio("Volatility", ["Implied", "Realised"], horizontal=True, index=0)
+    vol_map  = vol_map_implied if vol_mode == "Implied" else vol_map_realised
 
     # =========================
     # Scenario Builder
@@ -62,7 +65,7 @@ def render(portfolio, corr_df, beta_map, vol_map):
     # =========================
     # Run engine
     # =========================
-    engine = ScenarioEngine(portfolio=portfolio, beta_map=beta_map, vol_map=vol_map)
+    engine = ScenarioEngine(portfolio=portfolio, beta_map=beta_map, vol_map=vol_map, risk_free_rates=risk_free_rates)
     res = engine.run_path_scenario(scenario, corr_df=corr_df)
 
     paths = res["paths"]

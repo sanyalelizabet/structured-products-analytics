@@ -108,7 +108,7 @@ def render(analytics, df, greeks_df, pf_delta, valuation_date):
     product_table = product_table.merge(fv_cols, on="product_id", how="left")
 
     product_table = product_table[[
-        "product_id", "currency", "notional", "maturity_date", "product_type",
+        "product_id", "currency", "total_notional", "maturity_date", "product_type",
         "underlyings", "cost_ref", "payoff_ref", "pnl_ref", "return_pct",
         "distance_to_barrier", "fair_value", "fair_value_pct"
     ]].copy()
@@ -123,7 +123,7 @@ def render(analytics, df, greeks_df, pf_delta, valuation_date):
         column_config={
             "product_id":          "Product ID",
             "currency":            "Original CCY",
-            "notional":            st.column_config.NumberColumn("Notional",              format="%.2f"),
+            "total_notional":      st.column_config.NumberColumn("Notional",              format="%.2f"),
             "maturity_date":       "Maturity Date",
             "product_type":        "Product Type",
             "underlyings":         "Underlyings",
@@ -189,15 +189,15 @@ def render(analytics, df, greeks_df, pf_delta, valuation_date):
     col_table, col_chart = st.columns(2)
 
     with col_chart:
-        bar_df = analytics.product_df[["maturity_date", "product_type", "notional", "currency", "underlyings"]].copy()
+        bar_df = analytics.product_df[["maturity_date", "product_type", "total_notional", "currency", "underlyings"]].copy()
         bar_df["maturity_date"] = pd.to_datetime(bar_df["maturity_date"]).dt.strftime("%Y-%m-%d")
         bar_df["label"] = bar_df["product_type"] + " | " + bar_df["underlyings"]
 
         fig_maturity = px.bar(
             bar_df,
-            x="maturity_date", y="notional", color="product_type", text="label",
+            x="maturity_date", y="total_notional", color="product_type", text="label",
             hover_data={"currency": True, "underlyings": True, "label": False},
-            labels={"maturity_date": "Maturity Date", "notional": "Notional", "product_type": "Type"},
+            labels={"maturity_date": "Maturity Date", "total_notional": "Notional", "product_type": "Type"},
             color_discrete_sequence=["#2A2F38", "#4A5563", "#7A8797"]
         )
         fig_maturity.update_traces(textposition="inside", textangle=0)

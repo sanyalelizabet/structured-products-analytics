@@ -30,8 +30,12 @@ class PortfolioAnalytics:
                 "product_type": row["product_type"],
                 "type_style": row["type_style"],
                 "currency": row["currency"],
-                "position_units": row["position_units"],
-                "notional": row["notional"],
+                "issuer": s["issuer"],
+                "issuer_rating": s["issuer_rating"],
+                "issuer_country": s["issuer_country"],
+                "denomination": s["denomination"],
+                "position_units": s["position_units"],
+                "total_notional": s["total_notional"],
                 "coupon": row["coupon"],
                 "underlyings": ", ".join(row["underlyings"]),
                 "n_underlyings": len(row["underlyings"]),
@@ -218,7 +222,7 @@ class PortfolioAnalytics:
             currency = row["currency"]
     
             total_notional += self.convert_to_reference(
-                row["notional"],
+                row["total_notional"],
                 currency
             )
             total_cost += self.convert_to_reference(

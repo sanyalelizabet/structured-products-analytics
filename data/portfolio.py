@@ -4,14 +4,24 @@ import pandas as pd
 # Portfolio Input
 # =========================
 # This will be replaced by a CSV loader once all required fields are finalised.
+#
+# Schema notes:
+#   denomination     – contractual nominal of one certificate (per-piece)
+#   position_units   – number of certificates held
+#   total_notional   – derived = denomination * position_units (do not set here)
+#   issuer / issuer_rating / issuer_country – populate from the term sheet
 
 p1 = {
     "product_id": "CH1483491150",
     "product_type": "BRC",
     "type_style": "European",
+    "issuer": "Bank Vontobel AG",
+    "issuer_rating": "",
+    "issuer_country": "CH",
     "underlyings": ["ALCON"],
     "underlying_isins": ["CH0432492467"],
     "currency": "CHF",
+    "denomination": 1000,
     "position_units": 1,
     "notional": 1000,
     "cost_price": 1.00,
@@ -23,6 +33,8 @@ p1 = {
     "initial_fixing_date": "2025-11-10",
     "purchase_date": "2025-11-10",
     "maturity_date": "2026-11-17",
+    "coupon_dates": ["2026-11-17"],
+    "day_count": "30/360",
     "barrier_breached": False,
 }
 
@@ -30,6 +42,9 @@ p2 = {
     "product_id": "CH1449111066",
     "product_type": "MBRC",
     "type_style": "European",
+    "issuer": "Bank Vontobel AG",
+    "issuer_rating": "",
+    "issuer_country": "CH",
     "underlyings": ["ABB", "HOLCIM", "NOVARTIS", "ROCHE"],
     "underlying_isins": [
         "CH0012221716",
@@ -38,6 +53,7 @@ p2 = {
         "CH0012032048",
     ],
     "currency": "CHF",
+    "denomination": 1000,
     "position_units": 1,
     "notional": 1000,
     "cost_price": 0.98,
@@ -49,6 +65,8 @@ p2 = {
     "initial_fixing_date": "2025-12-30",
     "purchase_date": "2025-12-30",
     "maturity_date": "2026-12-28",
+    "coupon_dates": ["2026-12-28"],
+    "day_count": "30/360",
     "barrier_breached": True,
 }
 
@@ -56,9 +74,13 @@ p3 = {
     "product_id": "CH1461018793",
     "product_type": "MBRC",
     "type_style": "European",
+    "issuer": "Bank Vontobel AG",
+    "issuer_rating": "",
+    "issuer_country": "CH",
     "underlyings": ["ABB", "LONZA", "NESTLE"],
     "underlying_isins": ["CH0012221716", "CH0013841017", "CH0038863350"],
     "currency": "CHF",
+    "denomination": 1000,
     "position_units": 10,
     "notional": 10000,
     "cost_price": 1.00,
@@ -70,6 +92,8 @@ p3 = {
     "initial_fixing_date": "2025-08-19",
     "purchase_date": "2025-08-19",
     "maturity_date": "2026-08-19",
+    "coupon_dates": ["2026-08-19"],
+    "day_count": "30/360",
     "barrier_breached": False,
 }
 
@@ -77,9 +101,13 @@ p4 = {
     "product_id": "CH1483484015",
     "product_type": "BRC",
     "type_style": "European",
+    "issuer": "Bank Vontobel AG",
+    "issuer_rating": "",
+    "issuer_country": "CH",
     "underlyings": ["Airbnb Inc."],
     "underlying_isins": ["US0090661010"],
     "currency": "USD",
+    "denomination": 5000,
     "position_units": 1,
     "notional": 5000,
     "cost_price": 0.98,
@@ -91,6 +119,8 @@ p4 = {
     "initial_fixing_date": "2025-10-02",
     "purchase_date": "2025-10-02",
     "maturity_date": "2026-10-09",
+    "coupon_dates": ["2026-10-09"],
+    "day_count": "ACT/360",
     "barrier_breached": False,
 }
 
@@ -98,6 +128,9 @@ p5 = {
     "product_id": "XS3317100249",
     "product_type": "MBRC",
     "type_style": "European",
+    "issuer": "BBVA Global Markets B.V.",
+    "issuer_rating": "",
+    "issuer_country": "ES",
     "underlyings": ["Advanced Micro Devices, Inc.", "Broadcom Inc", "NVIDIA Corp"],
     "underlying_isins": [
         "US0079031078",
@@ -105,6 +138,7 @@ p5 = {
         "US67066G1040",
     ],
     "currency": "USD",
+    "denomination": 1000,
     "position_units": 10,
     "notional": 10000,
     "cost_price": 1.00,
@@ -116,6 +150,8 @@ p5 = {
     "initial_fixing_date": "2026-04-14",
     "purchase_date": "2026-04-14",
     "maturity_date": "2028-04-28",
+    "coupon_dates": ["2027-04-28", "2028-04-28"],
+    "day_count": "ACT/360",
     "barrier_breached": False,
 }
 

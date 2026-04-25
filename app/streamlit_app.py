@@ -13,7 +13,8 @@ from src.portfolio_analytics import PortfolioAnalytics
 from src.eod_client import EODClient
 from src.market_data_engine import MarketDataEngine
 from src.correlation_engine import CorrelationEngine
-from data.reference_data import beta_map, risk_free_rates
+from src.beta_engine import BetaEngine
+from data.reference_data import beta_map as beta_map_static, risk_free_rates
 from src.yahoo_client import YahooClient
 from src.pricing.monte_carlo import MonteCarloPricer
 from data.portfolio import portfolio
@@ -60,6 +61,16 @@ def fetch_implied_vols(_portfolio):
         return vol_map_static
 
 @st.cache_data(ttl=3600)
+def fetch_realised_vols(_portfolio):
+    engine = get_market_engine()
+    try:
+        return engine.build_realised_vol_map(_portfolio, window=252)
+    except Exception as e:
+        st.warning(f"Could not build realised vol map, falling back to static vols. {e}")
+        from data.reference_data import vol_map as vol_map_static
+        return vol_map_static
+
+@st.cache_data(ttl=3600)
 def build_product_analytics(_portfolio, _db):
     pa = PortfolioAnalytics(_portfolio, reference_currency="CHF", price_db=_db)
     df = pa.build_product_analytics()
@@ -74,7 +85,18 @@ def build_corr_matrix(_portfolio):
     engine = get_market_engine()
     isins = list({isin for _, row in _portfolio.iterrows() for isin in row["underlying_isins"]})
     isin_ticker_map = engine.build_isin_ticker_map(isins)
-    return CorrelationEngine(engine).build_corr_matrix(isin_ticker_map, years=4)
+    return CorrelationEngine(engine).build_corr_matrix(isin_ticker_map, years=6)
+
+@st.cache_data(ttl=3600)
+def build_beta_map(_portfolio):
+    engine = get_market_engine()
+    isins = list({isin for _, row in _portfolio.iterrows() for isin in row["underlying_isins"]})
+    isin_ticker_map = engine.build_isin_ticker_map(isins)
+    try:
+        return BetaEngine(engine).build_beta_map(isin_ticker_map, years=3)
+    except Exception as e:
+        st.warning(f"Could not compute dynamic betas, falling back to static. {e}")
+        return beta_map_static
 
 @st.cache_data(ttl=3600)
 def compute_fair_values(_portfolio, _corr_df, vol_map, risk_free_rates):
@@ -102,9 +124,14 @@ portfolio, db, valuation_date, fetch_error = fetch_market_data(portfolio)
 if fetch_error:
     st.warning(f"Could not refresh market prices. Using portfolio default spots. {fetch_error}")
 
-analytics, df       = build_product_analytics(portfolio, db)
-corr_df             = build_corr_matrix(portfolio)
-vol_map             = fetch_implied_vols(portfolio)
+analytics, df        = build_product_analytics(portfolio, db)
+corr_df              = build_corr_matrix(portfolio)
+beta_map             = build_beta_map(portfolio)
+print(beta_map)
+vol_map_implied      = fetch_implied_vols(portfolio)
+vol_map_realised     = fetch_realised_vols(portfolio)
+print(vol_map_realised)
+vol_map              = vol_map_implied
 fv_df               = compute_fair_values(portfolio, corr_df, vol_map, risk_free_rates)
 greeks_df, pf_delta = compute_greeks(portfolio, corr_df, vol_map, risk_free_rates)
 
@@ -121,4 +148,4 @@ elif view == "Portfolio":
     portfolio_view.render(analytics, df, greeks_df, pf_delta, valuation_date)
 
 elif view == "Stress Testing":
-    stress_testing.render(portfolio, corr_df, beta_map, vol_map)
+    stress_testing.render(portfolio, corr_df, beta_map, vol_map_implied, vol_map_realised, risk_free_rates)

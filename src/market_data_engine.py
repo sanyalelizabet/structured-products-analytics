@@ -1,5 +1,6 @@
 import logging
 
+import numpy as np
 import pandas as pd
 from pathlib import Path
 from pandas.tseries.offsets import BDay
@@ -162,6 +163,67 @@ class MarketDataEngine:
             db = pd.concat([db, new_df], ignore_index=True)
             db = db.drop_duplicates(subset=["isin", "date"], keep="last")
             db = db.sort_values(["isin", "date"]).reset_index(drop=True)
+            self.save_db(db)
+
+        return db
+
+    def fetch_daily_prices(self, isin_ticker_map, years=6, force_refresh=False):
+        """
+        Download daily adjusted-close prices and append to prices.csv.
+
+        Parameters
+        ----------
+        isin_ticker_map : dict  { isin: ticker }
+        years           : int   calendar years of history
+        force_refresh   : bool  re-download even if data already exists
+
+        Returns
+        -------
+        pd.DataFrame  full DB after update
+        """
+        db = self.load_db()
+        rows = []
+
+        for isin, ticker in isin_ticker_map.items():
+
+            existing = db[db["isin"] == isin].copy()
+
+            if not existing.empty:
+                existing["date"] = pd.to_datetime(existing["date"])
+
+            # Skip only if data covers the requested history window adequately.
+            # Row-count alone is misleading: sparse daily quotes or old monthly
+            # data can easily exceed 252 rows without covering the full window.
+            if not force_refresh and not existing.empty:
+                required_start = pd.Timestamp.today() - pd.DateOffset(years=years) - pd.Timedelta(days=30)
+                has_history = existing["date"].min() <= required_start
+                has_density = len(existing) >= years * 200  # ~200 trading days/year
+                if has_history and has_density:
+                    continue
+
+            try:
+                data = self.client.get_daily_prices(ticker, years=years)
+
+                for r in data:
+                    rows.append({
+                        "date": pd.to_datetime(r["date"]),
+                        "isin": isin,
+                        "ticker": ticker,
+                        "price": r["adjusted_close"],
+                    })
+
+            except Exception as e:
+                log.warning("Daily fetch failed for %s (%s): %s", ticker, isin, e)
+
+        if rows:
+            new_df = pd.DataFrame(rows)
+
+            db = pd.concat([db, new_df], ignore_index=True)
+            db["date"] = pd.to_datetime(db["date"]).dt.normalize()
+
+            db = db.drop_duplicates(subset=["isin", "date"], keep="last")
+            db = db.sort_values(["isin", "date"]).reset_index(drop=True)
+
             self.save_db(db)
 
         return db
@@ -374,6 +436,49 @@ class MarketDataEngine:
             atm = chain.loc[chain["distance"].idxmin()]
 
             vol_map[isin] = float(atm["iv"])
+
+        return vol_map
+
+    def build_realised_vol_map(self, portfolio, window=252, fallback_vol=0.15):
+        """
+        Build a { isin: realised_vol } map from daily prices in prices.csv.
+
+        σ = std(daily log returns, window) × √252
+
+        Parameters
+        ----------
+        portfolio    : pd.DataFrame  must have underlying_isins column
+        window       : int           rolling window in trading days (default 252 = 1 year)
+        fallback_vol : float         used if insufficient price history
+
+        Returns
+        -------
+        dict  { isin: float }  — drop-in replacement for the static vol_map
+        """
+        db = self.load_db()
+        db["date"] = pd.to_datetime(db["date"])
+
+        isins = list({isin for _, row in portfolio.iterrows() for isin in row["underlying_isins"]})
+
+        vol_map = {}
+
+        for isin in isins:
+            prices = db[db["isin"] == isin].sort_values("date")
+
+            if len(prices) < window // 2:
+                log.warning("Insufficient price history for %s — using fallback vol", isin)
+                vol_map[isin] = fallback_vol
+                continue
+
+            log_returns = np.log(prices["price"] / prices["price"].shift(1)).dropna()
+
+            realized_var = (log_returns ** 2).mean() * 252
+            realized_vol = np.sqrt(realized_var)
+
+            if realized_vol <= 0 or np.isnan(realized_vol):
+                vol_map[isin] = fallback_vol
+            else:
+                vol_map[isin] = round(realized_vol, 4)
 
         return vol_map
 

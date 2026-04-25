@@ -3,6 +3,7 @@ Tests for MarketDataEngine.
 """
 import pandas as pd
 import pytest
+import numpy as np
 from unittest.mock import MagicMock, patch
 from src.market_data_engine import MarketDataEngine
 from src.correlation_engine import CorrelationEngine
@@ -196,7 +197,74 @@ class TestFetchMonthlyPrices:
         db = engine.fetch_monthly_prices({"CH001": "NESN.SW"})
         assert db is not None
 
+class TestFetchDailyPrices:
+    def _daily_data(self):
+        return [
+            {"date": "2024-01-01", "adjusted_close": 100.0},
+            {"date": "2024-01-02", "adjusted_close": 101.0},
+            {"date": "2024-01-03", "adjusted_close": 102.0},
+        ]
 
+    def test_stores_daily_prices(self, engine, mock_client):
+        mock_client.get_daily_prices.return_value = self._daily_data()
+
+        db = engine.fetch_daily_prices({"CH001": "NESN.SW"})
+
+        assert not db.empty
+        assert "CH001" in db["isin"].values
+        assert mock_client.get_daily_prices.called
+
+    def test_skips_isin_with_enough_daily_data(self, engine, mock_client):
+        existing = pd.DataFrame([
+            {
+                "date": pd.Timestamp("2024-01-01") + pd.offsets.BDay(d),
+                "isin": "CH001",
+                "ticker": "NESN.SW",
+                "price": 100.0,
+            }
+            for d in range(300)
+        ])
+
+        engine.save_db(existing)
+
+        engine.fetch_daily_prices({"CH001": "NESN.SW"})
+
+        mock_client.get_daily_prices.assert_not_called()
+
+    def test_force_refresh_overrides_skip(self, engine, mock_client):
+        existing = pd.DataFrame([
+            {
+                "date": pd.Timestamp("2024-01-01") + pd.offsets.BDay(d),
+                "isin": "CH001",
+                "ticker": "NESN.SW",
+                "price": 100.0,
+            }
+            for d in range(300)
+        ])
+
+        engine.save_db(existing)
+        mock_client.get_daily_prices.return_value = self._daily_data()
+
+        engine.fetch_daily_prices({"CH001": "NESN.SW"}, force_refresh=True)
+
+        mock_client.get_daily_prices.assert_called_once_with("NESN.SW", years=6)
+
+    def test_deduplicates_on_isin_and_date(self, engine, mock_client):
+        mock_client.get_daily_prices.return_value = self._daily_data()
+
+        engine.fetch_daily_prices({"CH001": "NESN.SW"})
+        engine.fetch_daily_prices({"CH001": "NESN.SW"}, force_refresh=True)
+
+        db = engine.load_db()
+
+        assert db.duplicated(subset=["isin", "date"]).sum() == 0
+
+    def test_api_error_does_not_crash(self, engine, mock_client):
+        mock_client.get_daily_prices.side_effect = Exception("API down")
+
+        db = engine.fetch_daily_prices({"CH001": "NESN.SW"})
+
+        assert db is not None
 # ─────────────────────────────────────────
 # fetch_options_chain
 # ─────────────────────────────────────────
@@ -266,57 +334,160 @@ class TestFetchOptionsChain:
         assert df is not None
 
 
-# ─────────────────────────────────────────
-# build_corr_matrix
-# ─────────────────────────────────────────
-
 class TestBuildCorrMatrix:
-    def _make_monthly_db(self, engine, isins):
-        """Write 48 months of price data for each ISIN."""
+
+    def _make_daily_db(self, engine, isins, n_days=500, seed=0):
+        """Write realistic daily price paths with mild randomness."""
+        rng = np.random.default_rng(seed)
         rows = []
+
         for isin in isins:
-            for m in range(48):
+            price = 100.0
+            for d in range(n_days):
+                shock = rng.normal(0, 0.01)
+                price *= (1 + shock)
+
                 rows.append({
-                    "date": pd.Timestamp("2020-01-31") + pd.DateOffset(months=m),
+                    "date": pd.Timestamp("2020-01-01") + pd.offsets.BDay(d),
                     "isin": isin,
                     "ticker": isin + ".SW",
-                    "price": 100.0 * (1 + 0.01 * m),
+                    "price": price,
                 })
+
         engine.save_db(pd.DataFrame(rows))
 
-    def test_returns_dataframe_with_isin_index(self, engine, mock_client):
-        self._make_monthly_db(engine, ["CH001", "CH002"])
-        mock_client.get_monthly_prices.return_value = []
-        corr = CorrelationEngine(engine).build_corr_matrix({"CH001": "A.SW", "CH002": "B.SW"})
+
+    def test_returns_dataframe_with_isin_index(self, engine):
+        self._make_daily_db(engine, ["CH001", "CH002"])
+
+        corr = CorrelationEngine(engine).build_corr_matrix({
+            "CH001": "A.SW", "CH002": "B.SW"
+        })
+
         assert isinstance(corr, pd.DataFrame)
-        assert "CH001" in corr.index
-        assert "CH002" in corr.index
+        assert set(corr.index) == {"CH001", "CH002"}
 
-    def test_diagonal_is_one(self, engine, mock_client):
-        self._make_monthly_db(engine, ["CH001", "CH002"])
-        mock_client.get_monthly_prices.return_value = []
-        corr = CorrelationEngine(engine).build_corr_matrix({"CH001": "A.SW", "CH002": "B.SW"})
-        assert abs(corr.loc["CH001", "CH001"] - 1.0) < 1e-9
-        assert abs(corr.loc["CH002", "CH002"] - 1.0) < 1e-9
 
-    def test_off_diagonal_between_minus_one_and_one(self, engine, mock_client):
-        self._make_monthly_db(engine, ["CH001", "CH002"])
-        mock_client.get_monthly_prices.return_value = []
-        corr = CorrelationEngine(engine).build_corr_matrix({"CH001": "A.SW", "CH002": "B.SW"})
+    def test_diagonal_is_one(self, engine):
+        self._make_daily_db(engine, ["CH001", "CH002"])
+
+        corr = CorrelationEngine(engine).build_corr_matrix({
+            "CH001": "A.SW", "CH002": "B.SW"
+        })
+
+        assert np.allclose(np.diag(corr.values), 1.0)
+
+
+    def test_off_diagonal_between_minus_one_and_one(self, engine):
+        self._make_daily_db(engine, ["CH001", "CH002"])
+
+        corr = CorrelationEngine(engine).build_corr_matrix({
+            "CH001": "A.SW", "CH002": "B.SW"
+        })
+
         val = corr.loc["CH001", "CH002"]
         assert -1.0 <= val <= 1.0
 
-    def test_raises_when_insufficient_observations(self, engine, mock_client):
-        """Only 3 monthly rows per ISIN → well below the minimum threshold."""
-        rows = []
-        for isin in ["CH001", "CH002"]:
-            for m in range(3):
-                rows.append({
-                    "date": pd.Timestamp("2024-01-31") + pd.DateOffset(months=m),
-                    "isin": isin, "ticker": isin + ".SW", "price": 100.0,
-                })
-        engine.save_db(pd.DataFrame(rows))
-        mock_client.get_monthly_prices.return_value = []
 
-        with pytest.raises(ValueError, match="common monthly observations"):
-            CorrelationEngine(engine).build_corr_matrix({"CH001": "A.SW", "CH002": "B.SW"})
+    def test_identical_series_gives_correlation_one(self, engine):
+        """Same price path → correlation ≈ 1"""
+        rows = []
+
+        price = 100.0
+        for d in range(500):
+            price *= 1.001
+            date = pd.Timestamp("2020-01-01") + pd.offsets.BDay(d)
+
+            rows.append({"date": date, "isin": "CH001", "ticker": "A", "price": price})
+            rows.append({"date": date, "isin": "CH002", "ticker": "B", "price": price})
+
+        engine.save_db(pd.DataFrame(rows))
+
+        corr = CorrelationEngine(engine).build_corr_matrix({
+            "CH001": "A", "CH002": "B"
+        })
+
+        assert abs(corr.loc["CH001", "CH002"] - 1.0) < 1e-3
+
+
+    def test_opposite_series_gives_correlation_minus_one(self, engine):
+        """Perfect opposite returns → correlation ≈ -1"""
+        rows = []
+
+        price_a = 100.0
+        price_b = 100.0
+
+        for d in range(500):
+            shock = 0.01 if d % 2 == 0 else -0.01
+            price_a *= (1 + shock)
+            price_b *= (1 - shock)
+
+            date = pd.Timestamp("2020-01-01") + pd.offsets.BDay(d)
+
+            rows.append({"date": date, "isin": "CH001", "ticker": "A", "price": price_a})
+            rows.append({"date": date, "isin": "CH002", "ticker": "B", "price": price_b})
+
+        engine.save_db(pd.DataFrame(rows))
+
+        corr = CorrelationEngine(engine).build_corr_matrix({
+            "CH001": "A", "CH002": "B"
+        })
+
+        assert abs(corr.loc["CH001", "CH002"] + 1.0) < 1e-3
+
+
+    def test_raises_when_insufficient_observations(self, engine):
+        """Too few daily observations should raise."""
+        rows = []
+
+        for isin in ["CH001", "CH002"]:
+            for d in range(50):  # below threshold (~252)
+                rows.append({
+                    "date": pd.Timestamp("2024-01-01") + pd.offsets.BDay(d),
+                    "isin": isin,
+                    "ticker": isin + ".SW",
+                    "price": 100.0 * (1 + 0.001 * d),
+                })
+
+        engine.save_db(pd.DataFrame(rows))
+
+        with pytest.raises(ValueError, match="overlapping"):
+            CorrelationEngine(engine).build_corr_matrix({
+                "CH001": "A.SW",
+                "CH002": "B.SW"
+            })
+
+
+    def test_pairwise_correlation_invariant_to_extra_assets(self, engine):
+        """
+        Correlation between two assets should not change when adding a third asset.
+        """
+
+        rows = []
+
+        price_a = 100.0
+        price_b = 100.0
+        price_c = 100.0
+
+        for d in range(500):
+            date = pd.Timestamp("2020-01-01") + pd.offsets.BDay(d)
+
+            price_a *= 1.001
+            price_b *= 1.0012
+            price_c *= 1.0008
+
+            rows.append({"date": date, "isin": "A", "ticker": "A", "price": price_a})
+            rows.append({"date": date, "isin": "B", "ticker": "B", "price": price_b})
+            rows.append({"date": date, "isin": "C", "ticker": "C", "price": price_c})
+
+        engine.save_db(pd.DataFrame(rows))
+
+        corr_engine = CorrelationEngine(engine)
+
+        corr_pair = corr_engine.build_corr_matrix({"A": "A", "B": "B"})
+        corr_full = corr_engine.build_corr_matrix({"A": "A", "B": "B", "C": "C"})
+
+        corr_ab_pair = corr_pair.loc["A", "B"]
+        corr_ab_full = corr_full.loc["A", "B"]
+
+        assert abs(corr_ab_pair - corr_ab_full) < 1e-3

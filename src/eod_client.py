@@ -144,6 +144,36 @@ class EODClient:
         ]
 
     @_RETRY
+    def get_daily_prices(self, ticker: str, years: int = 6) -> list[dict]:
+        to_date = datetime.today()
+        from_date = to_date - timedelta(days=int(years * 365.25))
+
+        url = f"{self.BASE_URL}/eod/{ticker}"
+        params = {
+            "api_token": self.api_key,
+            "period": "d",
+            "from": from_date.strftime("%Y-%m-%d"),
+            "to": to_date.strftime("%Y-%m-%d"),
+            "fmt": "json",
+        }
+
+        data = _request_json(url, params)
+
+        if not data:
+            raise DataUnavailableError(
+                f"No daily historical data returned for {ticker}"
+            )
+
+        return [
+            {
+                "date": row["date"],
+                "adjusted_close": float(row["adjusted_close"]),
+            }
+            for row in data
+            if row.get("adjusted_close") is not None
+        ]
+
+    @_RETRY
     def search_by_isin(self, isin: str) -> list[dict]:
         """Search the EOD catalogue by ISIN. Returns ALL listings found."""
         url = f"{self.BASE_URL}/search/{isin}"
