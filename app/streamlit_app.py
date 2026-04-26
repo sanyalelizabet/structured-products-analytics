@@ -127,10 +127,10 @@ if fetch_error:
 analytics, df        = build_product_analytics(portfolio, db)
 corr_df              = build_corr_matrix(portfolio)
 beta_map             = build_beta_map(portfolio)
-print(beta_map)
+
 vol_map_implied      = fetch_implied_vols(portfolio)
 vol_map_realised     = fetch_realised_vols(portfolio)
-print(vol_map_realised)
+
 vol_map              = vol_map_implied
 fv_df               = compute_fair_values(portfolio, corr_df, vol_map, risk_free_rates)
 greeks_df, pf_delta = compute_greeks(portfolio, corr_df, vol_map, risk_free_rates)

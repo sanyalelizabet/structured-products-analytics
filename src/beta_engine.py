@@ -27,7 +27,7 @@ class BetaEngine:
         self,
         isin_ticker_map: dict,
         years: int = 3,
-        force_refresh: bool = False,
+        force_refresh: bool = True,
     ) -> dict:
         """
         Compute beta for every ISIN in isin_ticker_map.

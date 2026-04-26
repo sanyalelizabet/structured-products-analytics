@@ -1,4 +1,5 @@
 import numpy as np
+import pandas as pd
 
 
 class CorrelationEngine:
@@ -34,7 +35,8 @@ class CorrelationEngine:
                 "Insufficient price history for %s — treating as uncorrelated",
                 nan_isins,
             )
-            corr = corr.fillna(0.0)
-            np.fill_diagonal(corr.values, 1.0)
+            corr = corr.fillna(0.0).to_numpy(copy=True)
+            np.fill_diagonal(corr, 1.0)
+            corr = pd.DataFrame(corr, index=log_returns.columns, columns=log_returns.columns)
 
         return corr

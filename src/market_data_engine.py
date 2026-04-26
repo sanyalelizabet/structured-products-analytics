@@ -167,7 +167,7 @@ class MarketDataEngine:
 
         return db
 
-    def fetch_daily_prices(self, isin_ticker_map, years=6, force_refresh=False):
+    def fetch_daily_prices(self, isin_ticker_map, years=6, force_refresh=True):
         """
         Download daily adjusted-close prices and append to prices.csv.
 
