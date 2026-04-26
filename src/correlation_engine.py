@@ -35,8 +35,8 @@ class CorrelationEngine:
                 "Insufficient price history for %s — treating as uncorrelated",
                 nan_isins,
             )
-            corr = corr.fillna(0.0).to_numpy(copy=True)
-            np.fill_diagonal(corr, 1.0)
-            corr = pd.DataFrame(corr, index=log_returns.columns, columns=log_returns.columns)
+            arr = np.array(corr.fillna(0.0).values, dtype=float, copy=True)
+            np.fill_diagonal(arr, 1.0)
+            corr = pd.DataFrame(arr, index=corr.index, columns=corr.columns)
 
         return corr
