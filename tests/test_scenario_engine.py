@@ -1,10 +1,22 @@
+"""Tests for the multi-path ``ScenarioEngine`` (single-factor MC + CRN).
+
+Covers:
+
+* Getters (β, σ defaults)
+* Correlation submatrix extraction
+* ``build_shock_paths`` — vectorised path tensor shape, finite values,
+  shock direction, drift effect
+* ``run_path_scenario`` — output schema, currency aggregation,
+  determinism via cached ``NoiseSampler``, multi-path statistics
 """
-Tests for ScenarioEngine (correlated GBM path-based engine).
-"""
+from __future__ import annotations
+
 import numpy as np
 import pandas as pd
 import pytest
+
 from src.scenario_engine import ScenarioEngine
+from src.noise_sampler import NoiseSampler
 from tests.conftest import (
     make_portfolio, make_brc_row, make_mbrc_row,
     BETA_MAP, VOL_MAP, SCENARIOS,
@@ -15,12 +27,16 @@ from tests.conftest import (
 # Helpers
 # ─────────────────────────────────────────
 
-def make_engine(portfolio=None, beta_map=None, vol_map=None, scenarios=None):
+def make_engine(
+    portfolio=None, beta_map=None, vol_map=None,
+    n_paths=20, mean_reversion_kappa=0.5,
+):
     return ScenarioEngine(
         portfolio=portfolio if portfolio is not None else make_portfolio(),
         beta_map=beta_map or BETA_MAP,
         vol_map=vol_map or VOL_MAP,
-        scenarios=scenarios,
+        n_paths=n_paths,
+        mean_reversion_kappa=mean_reversion_kappa,
     )
 
 
@@ -37,8 +53,20 @@ def flat_scenario(**kw):
     return base
 
 
+def _build_sampler_for(engine):
+    """Construct a fresh sampler that matches the engine's portfolio."""
+    today              = pd.Timestamp.today().normalize()
+    portfolio_maturity = pd.to_datetime(engine.portfolio["maturity_date"]).max()
+    n_days             = len(pd.bdate_range(start=today, end=portfolio_maturity))
+    isins = sorted({isin for _, r in engine.portfolio.iterrows() for isin in r["underlying_isins"]})
+    return NoiseSampler(
+        n_paths=engine.n_paths, n_days=n_days,
+        factor_codes=[], isins=isins,
+    )
+
+
 # ─────────────────────────────────────────
-# get_beta / get_vol
+# Getters
 # ─────────────────────────────────────────
 
 class TestGetters:
@@ -60,276 +88,230 @@ class TestGetters:
 
 
 # ─────────────────────────────────────────
-# _get_isin_rng_map  ← same ISIN = same path
-# ─────────────────────────────────────────
-
-class TestIsinRngMap:
-    def test_each_isin_has_own_rng(self):
-        e = make_engine()
-        rng_map = e._get_isin_rng_map(["CH0012221716", "CH0012221717"])
-        assert set(rng_map.keys()) == {"CH0012221716", "CH0012221717"}
-
-    def test_same_isin_produces_same_sequence(self):
-        """Same ISIN → same MD5 seed → identical draws every time."""
-        e = make_engine()
-        rng_a = e._get_isin_rng_map(["CH0012221716"])["CH0012221716"]
-        rng_b = e._get_isin_rng_map(["CH0012221716"])["CH0012221716"]
-        draws_a = rng_a.standard_normal(100)
-        draws_b = rng_b.standard_normal(100)
-        np.testing.assert_array_equal(draws_a, draws_b)
-
-    def test_different_isins_produce_different_sequences(self):
-        e = make_engine()
-        rng_map = e._get_isin_rng_map(["CH0012221716", "CH0012221717"])
-        draws_nesn = rng_map["CH0012221716"].standard_normal(100)
-        draws_novn = rng_map["CH0012221717"].standard_normal(100)
-        assert not np.array_equal(draws_nesn, draws_novn)
-
-    def test_portfolio_shared_isin_gets_same_path(self):
-        """
-        Two products sharing an ISIN must receive the same simulated path.
-        This is the core portfolio consistency guarantee.
-        """
-        # BRC and MBRC both contain NESN (CH0012221716)
-        e = make_engine()
-        brc = make_brc_row()
-        mbrc = make_mbrc_row()
-
-        scenario = flat_scenario()
-        _, final_brc, _, _, paths_brc   = e.build_shock_paths(brc,  scenario)
-        _, final_mbrc, _, _, paths_mbrc = e.build_shock_paths(mbrc, scenario)
-
-        nesn_isin = "CH0012221716"
-        path_from_brc  = paths_brc[nesn_isin]["price"].values
-        path_from_mbrc = paths_mbrc[nesn_isin]["price"].values
-
-        np.testing.assert_array_almost_equal(
-            path_from_brc, path_from_mbrc,
-            err_msg="NESN path must be identical across both products"
-        )
-
-
-# ─────────────────────────────────────────
-# build_shock_paths
-# ─────────────────────────────────────────
-
-class TestBuildShockPaths:
-    def test_returns_five_values(self):
-        e = make_engine()
-        result = e.build_shock_paths(make_brc_row(), flat_scenario())
-        assert len(result) == 5  # shocks, final_spots, T_remaining, path_summary, paths
-
-    def test_shocks_length_matches_underlyings(self):
-        e = make_engine()
-        shocks, _, _, _, _ = e.build_shock_paths(make_brc_row(), flat_scenario())
-        assert len(shocks) == 1
-
-    def test_mbrc_shocks_length(self):
-        e = make_engine()
-        shocks, _, _, _, _ = e.build_shock_paths(make_mbrc_row(), flat_scenario())
-        assert len(shocks) == 2
-
-    def test_final_spots_length_matches_underlyings(self):
-        e = make_engine()
-        _, final_spots, _, _, _ = e.build_shock_paths(make_brc_row(), flat_scenario())
-        assert len(final_spots) == 1
-
-    def test_t_remaining_positive(self):
-        e = make_engine()
-        _, _, T_rem, _, _ = e.build_shock_paths(make_brc_row(), flat_scenario())
-        assert T_rem > 0
-
-    def test_paths_dict_keyed_by_isin(self):
-        e = make_engine()
-        _, _, _, _, paths = e.build_shock_paths(make_brc_row(), flat_scenario())
-        assert "CH0012221716" in paths
-
-    def test_path_df_has_date_and_price(self):
-        e = make_engine()
-        _, _, _, _, paths = e.build_shock_paths(make_brc_row(), flat_scenario())
-        df = paths["CH0012221716"]
-        assert "date" in df.columns
-        assert "price" in df.columns
-
-    def test_path_prices_positive(self):
-        """GBM prices must stay positive throughout the path."""
-        e = make_engine()
-        _, _, _, _, paths = e.build_shock_paths(make_brc_row(), flat_scenario())
-        assert (paths["CH0012221716"]["price"] > 0).all()
-
-    def test_negative_shock_lowers_final_spot(self):
-        e = make_engine()
-        brc = make_brc_row(current_spot=100.0)
-        _, final_no_shock, _, _, _ = e.build_shock_paths(brc, flat_scenario(market_shock=0))
-        _, final_with_shock, _, _, _ = e.build_shock_paths(brc, flat_scenario(market_shock=-30))
-        assert final_with_shock[0] < final_no_shock[0]
-
-    def test_recovery_drift_raises_final_above_permanent(self):
-        e = make_engine()
-        brc = make_brc_row()
-        perm    = flat_scenario(market_shock=-20, post_shock_drift_pa=0.0)
-        recover = flat_scenario(market_shock=-20, post_shock_drift_pa=0.10)
-        _, spots_perm,    _, _, _ = e.build_shock_paths(brc, perm)
-        _, spots_recover, _, _, _ = e.build_shock_paths(brc, recover)
-        assert spots_recover[0] > spots_perm[0]
-
-    def test_path_summary_contains_required_keys(self):
-        e = make_engine()
-        _, _, _, summary, _ = e.build_shock_paths(make_brc_row(), flat_scenario())
-        for key in ["maturity_date", "T_remaining_years", "market_shock_pct"]:
-            assert key in summary
-
-    def test_identity_corr_matrix_accepted(self):
-        e = make_engine()
-        corr = np.eye(2)
-        shocks, _, _, _, _ = e.build_shock_paths(make_mbrc_row(), flat_scenario(), corr_matrix=corr)
-        assert len(shocks) == 2
-
-    def test_correlated_matrix_accepted(self):
-        e = make_engine()
-        corr = np.array([[1.0, 0.8], [0.8, 1.0]])
-        shocks, _, _, _, _ = e.build_shock_paths(make_mbrc_row(), flat_scenario(), corr_matrix=corr)
-        assert len(shocks) == 2
-
-
-# ─────────────────────────────────────────
-# get_corr_subset
+# Correlation submatrix
 # ─────────────────────────────────────────
 
 class TestGetCorrSubset:
-    def _corr_df(self):
-        isins = ["CH0012221716", "CH0012221717", "CH0012221718"]
-        data = np.array([
-            [1.0, 0.7, 0.5],
-            [0.7, 1.0, 0.6],
-            [0.5, 0.6, 1.0],
-        ])
-        return pd.DataFrame(data, index=isins, columns=isins)
+    @pytest.fixture
+    def engine(self):
+        return make_engine()
 
-    def test_none_returns_identity(self):
-        e = make_engine()
-        row = make_brc_row()
-        result = e.get_corr_subset(row, None)
-        np.testing.assert_array_equal(result, np.eye(1))
+    @pytest.fixture
+    def corr_df(self):
+        return pd.DataFrame(
+            {"CH0012221716": [1.0, 0.5, 0.2],
+             "CH0012221717": [0.5, 1.0, 0.4],
+             "CH0099999999": [0.2, 0.4, 1.0]},
+            index=["CH0012221716", "CH0012221717", "CH0099999999"],
+        )
 
-    def test_extracts_correct_subset(self):
-        e = make_engine()
+    def test_none_returns_identity(self, engine):
         row = make_mbrc_row()
-        corr_df = self._corr_df()
-        result = e.get_corr_subset(row, corr_df)
-        assert result.shape == (2, 2)
-        assert abs(result[0, 1] - 0.7) < 1e-9
+        m = engine.get_corr_subset(row, None)
+        np.testing.assert_array_equal(m, np.eye(2))
 
-    def test_preserves_isin_order(self):
-        """Subset must follow the order in row["underlying_isins"], not corr_df order."""
-        e = make_engine()
+    def test_extracts_correct_subset(self, engine, corr_df):
         row = make_mbrc_row()
-        corr_df = self._corr_df()
-        result = e.get_corr_subset(row, corr_df)
-        # row isins: [CH0012221716, CH0012221717] — off-diagonal should be 0.7
-        assert abs(result[0, 1] - 0.7) < 1e-9
-        assert abs(result[1, 0] - 0.7) < 1e-9
+        m = engine.get_corr_subset(row, corr_df)
+        assert m.shape == (2, 2)
+        assert m[0, 1] == pytest.approx(0.5)
 
-    def test_missing_isin_raises(self):
-        e = make_engine()
-        row = make_brc_row()
-        # corr_df missing CH0012221716
-        corr_df = pd.DataFrame(
-            [[1.0]], index=["OTHER_ISIN"], columns=["OTHER_ISIN"]
+    def test_preserves_isin_order(self, engine, corr_df):
+        row = make_mbrc_row()
+        # underlying_isins = ["CH0012221716", "CH0012221717"]
+        m = engine.get_corr_subset(row, corr_df)
+        assert m[0, 0] == 1.0 and m[1, 1] == 1.0
+        assert m[0, 1] == m[1, 0] == pytest.approx(0.5)
+
+    def test_missing_isin_raises(self, engine):
+        row = make_mbrc_row()
+        bad = pd.DataFrame(
+            {"CH0099999999": [1.0]},
+            index=["CH0099999999"],
         )
         with pytest.raises(KeyError, match="Missing ISIN"):
-            e.get_corr_subset(row, corr_df)
+            engine.get_corr_subset(row, bad)
 
 
 # ─────────────────────────────────────────
-# run_product_path_scenario
+# build_shock_paths — vectorised tensor
 # ─────────────────────────────────────────
 
-class TestRunProductPathScenario:
-    def test_returns_required_keys(self):
-        e = make_engine()
-        result = e.run_product_path_scenario(make_brc_row(), flat_scenario())
-        for key in ["product_id", "total_payoff", "pnl", "settlement_type",
-                    "barrier_breached", "worst_underlying", "final_spots"]:
-            assert key in result
+class TestBuildShockPaths:
+    @pytest.fixture
+    def engine(self):
+        return make_engine(n_paths=20)
 
-    def test_cash_settlement_above_strike(self):
-        """No shock → spot above strike → cash settlement."""
-        e = make_engine()
-        # With zero shock and current spot already above the scenario floor,
-        # outcome depends on GBM path — use a positive shock to force cash
-        row = make_brc_row(current_spot=100.0, strike=50.0)
-        result = e.run_product_path_scenario(row, flat_scenario(market_shock=0))
-        assert result["settlement_type"] == "cash"
-        assert result["delivered_shares"] == 0
+    @pytest.fixture
+    def sampler(self, engine):
+        return _build_sampler_for(engine)
 
-    def test_physical_settlement_below_strike(self):
-        """Large negative shock → final below strike → physical delivery."""
-        e = make_engine()
-        row = make_brc_row(current_spot=100.0, strike=200.0)  # strike >> spot
-        result = e.run_product_path_scenario(row, flat_scenario(market_shock=-50))
-        assert result["settlement_type"] == "physical"
-        assert result["delivered_shares"] > 0
+    def test_returns_tensor_and_grid(self, engine, sampler):
+        row = make_mbrc_row()
+        price_paths, date_range, path_summary = engine.build_shock_paths(
+            row, flat_scenario(), sampler,
+        )
+        N, n_days, n_assets = price_paths.shape
+        assert N == engine.n_paths
+        assert n_assets == 2                      # MBRC has two underlyings
+        assert len(date_range) == n_days
+        assert isinstance(path_summary, dict)
 
-    def test_product_id_preserved(self):
-        e = make_engine()
-        result = e.run_product_path_scenario(make_brc_row(), flat_scenario())
-        assert result["product_id"] == "BRC001"
+    def test_brc_single_asset_shape(self, engine, sampler):
+        row = make_brc_row()
+        price_paths, _, _ = engine.build_shock_paths(row, flat_scenario(), sampler)
+        assert price_paths.shape[2] == 1          # BRC has one underlying
 
-    def test_final_spots_count_matches_underlyings(self):
-        e = make_engine()
-        result = e.run_product_path_scenario(make_mbrc_row(), flat_scenario())
-        assert len(result["final_spots"]) == 2
+    def test_path_prices_positive_and_finite(self, engine, sampler):
+        price_paths, _, _ = engine.build_shock_paths(
+            make_mbrc_row(), flat_scenario(market_shock=-30), sampler,
+        )
+        assert np.isfinite(price_paths).all()
+        assert (price_paths > 0).all()
+
+    def test_negative_shock_lowers_terminal(self, engine, sampler):
+        row = make_mbrc_row()
+        no_shock = engine.build_shock_paths(row, flat_scenario(),                     sampler)[0]
+        sampler.regenerate(seed=42)
+        big_shock = engine.build_shock_paths(row, flat_scenario(market_shock=-40), sampler)[0]
+        # Re-seeded — but on the *same* sampler the noise is fixed; we restore it
+        # before comparing so the only difference is the shock magnitude.
+        # Median terminal of shocked must be below median terminal of unshocked.
+        assert np.median(big_shock[:, -1, :]) < np.median(no_shock[:, -1, :])
+
+    def test_recovery_drift_raises_terminal(self, engine, sampler):
+        row = make_mbrc_row()
+        a = engine.build_shock_paths(
+            row,
+            flat_scenario(market_shock=-20, post_shock_drift_pa=0.0,
+                          pre_shock_drift_pa=0.0),
+            sampler,
+        )[0]
+        sampler.regenerate(seed=42)
+        b = engine.build_shock_paths(
+            row,
+            flat_scenario(market_shock=-20, post_shock_drift_pa=0.30,
+                          pre_shock_drift_pa=0.0),
+            sampler,
+        )[0]
+        # Higher post-shock drift → higher median terminal price.
+        assert np.median(b[:, -1, :]) > np.median(a[:, -1, :])
+
+    def test_path_summary_required_keys(self, engine, sampler):
+        _, _, summary = engine.build_shock_paths(
+            make_mbrc_row(), flat_scenario(), sampler,
+        )
+        for k in ("maturity_date", "T_remaining_years", "T_first_shock_years",
+                  "T_post_shock_years", "effective_n_shocks", "market_shock_pct",
+                  "pre_shock_drift_pa", "post_shock_drift_pa", "correlation_used"):
+            assert k in summary
 
 
 # ─────────────────────────────────────────
-# run_path_scenario
+# run_path_scenario — portfolio run
 # ─────────────────────────────────────────
 
 class TestRunPathScenario:
-    def test_returns_required_keys(self):
-        e = make_engine()
-        result = e.run_path_scenario(flat_scenario())
-        for key in ["product_df", "pf_scenario_per_ccy", "cash_positions",
-                    "delivered_stocks", "paths"]:
-            assert key in result
+    @pytest.fixture
+    def engine(self):
+        return make_engine(n_paths=20)
 
-    def test_product_df_one_row_per_product(self):
-        e = make_engine()
-        result = e.run_path_scenario(flat_scenario())
-        assert len(result["product_df"]) == len(make_portfolio())
+    def test_required_keys(self, engine):
+        res = engine.run_path_scenario(SCENARIOS["down_10"])
+        for k in ("product_df", "pf_scenario_per_ccy", "cash_positions",
+                  "delivered_stocks", "asset_paths", "pnl_samples_by_ccy",
+                  "n_paths"):
+            assert k in res
+        assert res["n_paths"] == engine.n_paths
 
-    def test_paths_dict_contains_all_unique_isins(self):
-        """all_paths must include every unique ISIN across the portfolio."""
-        e = make_engine()
-        result = e.run_path_scenario(flat_scenario())
-        # Portfolio has NESN (BRC) and NESN+NOVN (MBRC)
-        assert "CH0012221716" in result["paths"]
-        assert "CH0012221717" in result["paths"]
+    def test_product_df_one_row_per_product(self, engine):
+        res = engine.run_path_scenario(SCENARIOS["down_10"])
+        assert len(res["product_df"]) == len(make_portfolio())
 
-    def test_portfolio_run_is_deterministic(self):
-        """
-        Calling run_path_scenario twice with the same scenario must produce
-        bit-identical paths — the scenario seed is derived from the scenario dict.
-        """
-        e = make_engine()
-        scenario = flat_scenario()
-        result_1 = e.run_path_scenario(scenario)
-        result_2 = e.run_path_scenario(scenario)
+    def test_asset_paths_have_summary_columns(self, engine):
+        res = engine.run_path_scenario(SCENARIOS["down_10"])
+        for isin, df in res["asset_paths"].items():
+            for col in ("date", "mean", "median", "p5", "p95"):
+                assert col in df.columns
+            assert np.isfinite(df["median"].to_numpy()).all()
 
+    def test_pnl_percentiles_ordered(self, engine):
+        res = engine.run_path_scenario(SCENARIOS["down_30"])
+        for _, row in res["product_df"].iterrows():
+            assert row["pnl_p5"] <= row["pnl_median"] <= row["pnl_p95"]
+
+    def test_currency_pnl_aggregates_per_path(self, engine):
+        res = engine.run_path_scenario(SCENARIOS["down_10"])
+        for ccy, samples in res["pnl_samples_by_ccy"].items():
+            assert samples.shape == (engine.n_paths,)
+
+    def test_portfolio_return_columns_present(self, engine):
+        res = engine.run_path_scenario(SCENARIOS["down_10"])
+        cols = res["pf_scenario_per_ccy"].columns
+        for c in ("portfolio_return_mean_pct", "portfolio_return_p5_pct",
+                  "portfolio_return_p95_pct"):
+            assert c in cols
+
+
+# ─────────────────────────────────────────
+# Determinism via cached NoiseSampler
+# ─────────────────────────────────────────
+
+class TestDeterminism:
+    def test_same_engine_same_results(self):
+        e = make_engine(n_paths=15)
+        a = e.run_path_scenario(SCENARIOS["down_10"])
+        b = e.run_path_scenario(SCENARIOS["down_10"])
+        # Same sampler is reused → identical samples.
         np.testing.assert_array_equal(
-            result_1["paths"]["CH0012221716"]["price"].values,
-            result_2["paths"]["CH0012221716"]["price"].values,
+            a["product_df"]["pnl_samples"].iloc[0],
+            b["product_df"]["pnl_samples"].iloc[0],
         )
 
-    def test_cash_positions_has_currency_and_total_cash(self):
-        e = make_engine()
-        result = e.run_path_scenario(flat_scenario())
-        cash = result["cash_positions"]
-        assert "currency" in cash.columns
-        assert "total_cash" in cash.columns
+    def test_shared_sampler_links_two_engines(self):
+        portfolio = make_portfolio()
+        sampler = NoiseSampler(
+            n_paths=15,
+            n_days=len(pd.bdate_range(
+                start=pd.Timestamp.today().normalize(),
+                end=pd.to_datetime(portfolio["maturity_date"]).max(),
+            )),
+            factor_codes=[],
+            isins=sorted({isin for _, r in portfolio.iterrows() for isin in r["underlying_isins"]}),
+        )
+        e1 = ScenarioEngine(portfolio=portfolio, beta_map=BETA_MAP, vol_map=VOL_MAP,
+                            n_paths=15, noise_sampler=sampler)
+        e2 = ScenarioEngine(portfolio=portfolio, beta_map=BETA_MAP, vol_map=VOL_MAP,
+                            n_paths=15, noise_sampler=sampler)
+        a = e1.run_path_scenario(SCENARIOS["down_10"])
+        b = e2.run_path_scenario(SCENARIOS["down_10"])
+        np.testing.assert_array_equal(
+            a["product_df"]["pnl_samples"].iloc[0],
+            b["product_df"]["pnl_samples"].iloc[0],
+        )
 
-    def test_portfolio_return_pct_column_present(self):
-        e = make_engine()
-        result = e.run_path_scenario(flat_scenario())
-        assert "portfolio_return_pct" in result["pf_scenario_per_ccy"].columns
+
+# ─────────────────────────────────────────
+# Multi-path statistics
+# ─────────────────────────────────────────
+
+class TestMultiPathStatistics:
+    def test_pnl_samples_shape(self):
+        e = make_engine(n_paths=25)
+        res = e.run_path_scenario(SCENARIOS["down_10"])
+        for samples in res["product_df"]["pnl_samples"]:
+            assert samples.shape == (e.n_paths,)
+
+    def test_n_paths_one_collapses_summary(self):
+        e = make_engine(n_paths=1)
+        res = e.run_path_scenario(SCENARIOS["down_10"])
+        for _, df in res["asset_paths"].items():
+            np.testing.assert_array_equal(df["median"].to_numpy(), df["mean"].to_numpy())
+            np.testing.assert_array_equal(df["median"].to_numpy(), df["p5"].to_numpy())
+            np.testing.assert_array_equal(df["median"].to_numpy(), df["p95"].to_numpy())
+
+    def test_more_paths_finite(self):
+        e = make_engine(n_paths=80)
+        res = e.run_path_scenario(SCENARIOS["down_10"])
+        for samples in res["product_df"]["pnl_samples"]:
+            assert np.isfinite(samples).all()

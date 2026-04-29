@@ -14,11 +14,13 @@ from src.eod_client import EODClient
 from src.market_data_engine import MarketDataEngine
 from src.correlation_engine import CorrelationEngine
 from src.beta_engine import BetaEngine
+from src.factor_engine import FactorEngine
+from src.factor_loadings_engine import FactorLoadingsEngine
 from data.reference_data import beta_map as beta_map_static, risk_free_rates
 from src.yahoo_client import YahooClient
 from src.pricing.monte_carlo import MonteCarloPricer
 from data.portfolio import portfolio
-from app.views import product, portfolio as portfolio_view, stress_testing
+from app.views import product, portfolio as portfolio_view, stress_testing, factor_stress
 
 
 @st.cache_resource
@@ -98,6 +100,39 @@ def build_beta_map(_portfolio):
         st.warning(f"Could not compute dynamic betas, falling back to static. {e}")
         return beta_map_static
 
+@st.cache_resource
+def get_factor_engine():
+    return FactorEngine(get_market_engine())
+
+@st.cache_data(ttl=3600)
+def build_factor_loadings(_portfolio):
+    """Multivariate OLS loadings against the full factor universe.
+
+    Returns ``{isin: {betas, alpha, idio_vol, r_squared, n_obs}}``.
+    Falls back to defaults per ISIN if data is unavailable.
+    """
+    mde = get_market_engine()
+    fe  = get_factor_engine()
+    fle = FactorLoadingsEngine(mde, fe)
+
+    isins = list({isin for _, row in _portfolio.iterrows() for isin in row["underlying_isins"]})
+    isin_ticker_map = mde.build_isin_ticker_map(isins)
+    try:
+        return fle.build_loadings(isin_ticker_map, years=3)
+    except Exception as e:
+        st.warning(f"Factor loadings unavailable, using safe defaults. {e}")
+        from src.factor_engine import FACTORS
+        return {
+            isin: {
+                "betas":     {f: (1.0 if f == "MKT" else 0.0) for f in FACTORS},
+                "alpha":     0.0,
+                "idio_vol":  0.15,
+                "r_squared": 0.0,
+                "n_obs":     0,
+            }
+            for isin in isins
+        }
+
 @st.cache_data(ttl=3600)
 def compute_fair_values(_portfolio, _corr_df, vol_map, risk_free_rates):
     pricer = MonteCarloPricer(n_paths=10_000, seed=42)
@@ -115,7 +150,10 @@ def compute_greeks(_portfolio, _corr_df, vol_map, risk_free_rates):
 st.set_page_config(page_title="Structured Products Dashboard", layout="wide")
 st.title("Structured Products Analytics")
 st.sidebar.image(str(logo_path), width=160)
-view = st.sidebar.radio("View", ["Product", "Portfolio", "Stress Testing"])
+view = st.sidebar.radio(
+    "View",
+    ["Product", "Portfolio", "Stress Testing", "Factor Stress"],
+)
 
 # =========================
 # Shared data
@@ -149,3 +187,8 @@ elif view == "Portfolio":
 
 elif view == "Stress Testing":
     stress_testing.render(portfolio, corr_df, beta_map, vol_map_implied, vol_map_realised, risk_free_rates)
+
+elif view == "Factor Stress":
+    loadings      = build_factor_loadings(portfolio)
+    factor_engine = get_factor_engine()
+    factor_stress.render(portfolio, loadings, factor_engine, risk_free_rates)

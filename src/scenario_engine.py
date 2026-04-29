@@ -1,73 +1,106 @@
-from src.reverse_convertible import ReverseConvertible
-import pandas as pd
-import numpy as np
+"""Single-factor mean-reverting GBM scenario engine, vectorised across paths.
+
+Pipeline
+--------
+1. For each product, simulate ``n_paths`` correlated GBM paths over its
+   underlyings using a Schwartz-style mean-reverting drift in log-prices:
+
+       d log S_i = [(μ_i − ½σ_i²) + κ(θ_i − log S_i)] dt + σ_i dW_i
+
+   with CAPM-style drift  μ_i = r_f + β_i (μ_m − r_f) and per-asset
+   correlation imposed via Cholesky on the (asset × asset) correlation
+   submatrix for that product.
+
+2. Apply β-scaled discrete shocks on shock dates; both actual log-S and
+   the OU target θ are repriced.
+
+3. For each product, run the reverse-convertible payoff once *per path*,
+   then aggregate (mean, median, 5/95-percentile, ES, std).
+
+Common Random Numbers
+---------------------
+A :class:`NoiseSampler` (cached at the session level) supplies per-ISIN
+standard-normal noise.  Re-using the sampler across scenarios keeps the
+underlying random realisation identical so scenario-to-scenario
+differences reflect only the scenario change — the basis of clean
+sensitivity work.
+
+Output schema (``run_path_scenario``)
+-------------------------------------
+Identical to ``FactorScenarioEngine.run_path_scenario`` so the two
+stress views can share rendering helpers.
+"""
+from __future__ import annotations
+
 import hashlib
+
+import numpy as np
+import pandas as pd
+
+from src.noise_sampler import NoiseSampler
+from src.reverse_convertible import ReverseConvertible
+
+
+_PERCENTILES = [5, 95]
+
 
 class ScenarioEngine:
 
-    def __init__(self, portfolio, beta_map, vol_map, risk_free_rates=None, scenarios=None, mean_reversion_kappa=0.5):
-        self.portfolio = portfolio
-        self.beta_map = beta_map
-        self.scenarios = scenarios
-        self.vol = vol_map
+    def __init__(
+        self,
+        portfolio,
+        beta_map,
+        vol_map,
+        risk_free_rates=None,
+        scenarios=None,
+        mean_reversion_kappa: float = 0.5,
+        n_paths: int = 1,
+        noise_sampler: NoiseSampler | None = None,
+    ):
+        self.portfolio       = portfolio
+        self.beta_map        = beta_map
+        self.scenarios       = scenarios
+        self.vol             = vol_map
         self.risk_free_rates = risk_free_rates or {}
-        # Speed of mean reversion (per year) — Schwartz-style OU pull on log-prices.
-        # 0.0 → pure GBM. 0.5 ≈ ~1.4y half-life. Unconditional log-spread σ/√(2κ).
-        # Higher κ = tighter paths, especially for high-vol single stocks.
-        self.kappa = mean_reversion_kappa
-        
+        # Speed of mean reversion (per year). 0.0 → pure GBM.
+        # 0.5 ≈ ~1.4y half-life. Unconditional log-spread σ/√(2κ).
+        self.kappa     = float(mean_reversion_kappa)
+        self.n_paths   = int(n_paths)
+        self.noise_sampler = noise_sampler
+
+    # ────────────────────────────────────────────────────────────── helpers
+
     def get_beta(self, isin):
         return self.beta_map.get(isin, 1.0)
-    
+
     def get_vol(self, isin):
         return self.vol.get(isin, 0.15)
 
+    def _ensure_sampler(self, n_days: int, all_isins: list[str]) -> NoiseSampler:
+        """Return a noise sampler matching the requested dimensions; create
+        one if missing or incompatible."""
+        # ScenarioEngine doesn't use factors → empty factor universe in the sampler.
+        if (
+            self.noise_sampler is None
+            or not self.noise_sampler.matches(self.n_paths, n_days, [], all_isins)
+        ):
+            self.noise_sampler = NoiseSampler(
+                n_paths=self.n_paths, n_days=n_days,
+                factor_codes=[], isins=all_isins,
+            )
+        return self.noise_sampler
 
-    def build_shock_paths(self, row, scenario, corr_matrix=None, scenario_seed=0):
-        """
-        Day-by-day correlated GBM simulation from today to maturity.
+    # ───────────────────────────────────────────────────── path simulation
 
-        Each business day, all underlyings are stepped jointly using a single
-        Cholesky-correlated draw — so co-movement between assets is preserved
-        throughout the path, not just at the terminal date.
-
-        Each business day:
-          1. Identify drift phase (pre-shock / between shocks / post-shock)
-          2. Advance a deterministic fair-value target θ_t at CAPM drift
-          3. Apply correlated mean-reverting GBM step in log-prices:
-               d(log S) = [(μ - 0.5σ²) + κ(θ - log S)] dt + σ dW
-             κ = self.kappa pulls log-prices back toward θ — bounding long-horizon
-             explosion while preserving GBM-like behaviour at short horizons.
-          4. Apply β-scaled discrete shock on shock dates; both S and θ are
-             repriced so reversion does not fight a fundamental shock.
-
-        Parameters
-        ----------
-        scenario : dict
-            market_shock        : float — % index move per shock (e.g. -20)
-            n_shocks            : int   — number of shock events (default 1)
-            shock_in_days       : int   — calendar days from today to first shock
-            shock_spacing_days  : int   — calendar days between consecutive shocks
-            pre_shock_drift_pa  : float — annualised drift before first shock
-            post_shock_drift_pa : float — annualised drift after last shock to maturity
-                                          0.0  → permanent shock (conservative)
-                                          0.05 → ERP recovery
-                                         -0.10 → bear market continuation
-
-        corr_matrix : np.ndarray of shape (n_assets, n_assets), optional
-            Correlation matrix for the underlyings. Must be positive-definite.
-            Defaults to the identity matrix (independent assets).
-
-        Volatility is sourced from self.vol (isin-keyed dict, annualised).
-        Beta    is sourced from self.beta_map (isin-keyed dict).
+    def build_shock_paths(self, row, scenario, sampler: NoiseSampler,
+                          corr_matrix=None):
+        """Simulate ``n_paths`` correlated GBM paths for one product.
 
         Returns
         -------
-        shocks      : list[float]   % change current→terminal per underlying
-        final_spots : list[float]   terminal spot per underlying at maturity
-        T_remaining : float         years from today to maturity
-        path_summary: dict          human-readable audit trail
-        paths       : dict[isin → pd.DataFrame(date, price)]
+        price_paths : np.ndarray, shape (n_paths, n_days, n_assets)
+        date_range  : pd.DatetimeIndex
+        path_summary: dict
         """
         today              = pd.Timestamp.today().normalize()
         portfolio_maturity = pd.to_datetime(self.portfolio["maturity_date"]).max()
@@ -76,293 +109,304 @@ class ScenarioEngine:
         T_remaining = (maturity - today).days / 360
         T_total     = (portfolio_maturity - today).days / 360
 
-        # Scenario parameters
         market_shock       = scenario.get("market_shock", 0)
-        n_shocks           = scenario.get("n_shocks", 1)
-        shock_in_days      = scenario.get("shock_in_days", 0)
-        shock_spacing_days = scenario.get("shock_spacing_days", 0)
-        pre_shock_drift    = scenario.get("pre_shock_drift_pa", 0.05)
-        post_shock_drift   = scenario.get("post_shock_drift_pa", 0.05)
+        n_shocks           = int(scenario.get("n_shocks", 1))
+        shock_in_days      = int(scenario.get("shock_in_days", 0))
+        shock_spacing_days = int(scenario.get("shock_spacing_days", 0))
+        pre_shock_drift    = float(scenario.get("pre_shock_drift_pa", 0.05))
+        post_shock_drift   = float(scenario.get("post_shock_drift_pa", 0.05))
 
         isins    = list(row["underlying_isins"])
         spots    = np.array([float(s) for s in row["current_spots"]])
         n_assets = len(isins)
+        N        = self.n_paths
 
-        vols  = np.array([self.get_vol(isin)  for isin in isins])   # (n_assets,)
-        betas = np.array([self.get_beta(isin) for isin in isins])   # (n_assets,)
+        vols  = np.array([self.get_vol(isin)  for isin in isins])
+        betas = np.array([self.get_beta(isin) for isin in isins])
+        r_f   = float(self.risk_free_rates.get(row["currency"], 0.0))
 
-        # Risk-free rate of the product currency — anchor for CAPM drift
-        r_f = float(self.risk_free_rates.get(row["currency"], 0.0))
-
-        # ── Correlation & Cholesky ────────────────────────────────────────────
         if corr_matrix is None:
             corr_matrix = np.eye(n_assets)
-            
-        L = np.linalg.cholesky(corr_matrix)   # lower-triangular, (n_assets, n_assets)
+        # Repair tiny-negative eigenvalues from sample noise so Cholesky succeeds.
+        eigvals = np.linalg.eigvalsh(corr_matrix)
+        if eigvals.min() < 1e-8:
+            corr_matrix = corr_matrix + np.eye(n_assets) * (1e-8 - eigvals.min())
+        L = np.linalg.cholesky(corr_matrix)
 
-        # ── Business-day grid ────────────────────────────────────────────────
         date_range = pd.bdate_range(start=today, end=portfolio_maturity)
         n_days     = len(date_range)
 
-        # ── Shock offsets → nearest business day ─────────────────────────────
         shock_day_offsets = sorted(
             shock_in_days + i * shock_spacing_days
             for i in range(n_shocks)
             if (shock_in_days + i * shock_spacing_days) / 360 <= T_total
         )
-
         shock_dates = set()
         for d in shock_day_offsets:
-            target      = today + pd.Timedelta(days=d)
-            nearest_idx = np.argmin(np.abs(date_range - target))
+            target = today + pd.Timedelta(days=d)
+            nearest_idx = int(np.argmin(np.abs(date_range - target)))
             shock_dates.add(date_range[nearest_idx])
 
         T_first_shock = shock_day_offsets[0]  / 360 if shock_day_offsets else T_total
         T_last_shock  = shock_day_offsets[-1] / 360 if shock_day_offsets else 0.0
         T_post_shock  = max(T_total - T_last_shock, 0.0)
 
-        rng_map = self._get_isin_rng_map(isins, scenario_seed=scenario_seed)
-       
+        # CRN noise: per-isin draws; correlate across the asset axis with L.
+        Z_raw  = sampler.idio_noise_for(isins)         # (N, n_days, n_assets)
+        Z_corr = Z_raw @ L.T                            # (N, n_days, n_assets)
 
-        Z_raw = np.column_stack([
-                rng_map[isin].standard_normal(n_days)
-                for isin in isins
-            ])  # (n_days, n_assets)
-
-            # apply correlation
-        Z_corr = Z_raw @ L.T
-
-        # ── Simulate all assets jointly day-by-day ───────────────────────────
-        # Schwartz-style mean-reverting GBM in log-prices:
-        #   d(log S) = [(μ - ½σ²) + κ(θ - log S)] dt + σ dW
-        # where θ is a deterministic "fair value" trajectory that grows at CAPM
-        # drift and absorbs discrete shocks (so reversion does not fight a
-        # fundamental repricing).
-        prices               = spots.copy()                        # (n_assets,)
-        log_prices           = np.log(prices)
-        log_theta            = np.log(spots.copy())                # fair-value target
-        price_paths          = np.zeros((n_days, n_assets))
-        product_final_prices = np.full(n_assets, np.nan)
-        prev_date            = today
-        kappa                = self.kappa
+        # Vectorised state across paths
+        log_S     = np.broadcast_to(np.log(spots), (N, n_assets)).copy()
+        log_theta = np.broadcast_to(np.log(spots), (N, n_assets)).copy()
+        log_paths = np.zeros((N, n_days, n_assets))
+        prev_date = today
 
         for t_idx, bday in enumerate(date_range):
             dt      = (bday - prev_date).days / 360 if t_idx > 0 else 0.0
             t_years = (bday - today).days / 360
 
-            # Drift phase — CAPM: μ_i = r_f + β_i × (μ_m - r_f)
-            # pre/post_shock_drift are scenario assumptions for the *market* return.
             if t_years <= T_first_shock:
-                mu_m = pre_shock_drift   # before any shock
+                mu_m = pre_shock_drift
             elif t_years > T_last_shock:
-                mu_m = post_shock_drift  # after final shock
+                mu_m = post_shock_drift
             else:
-                mu_m = pre_shock_drift   # during shock window — continuous drift continues at pre-shock rate, discrete shocks layer on top
+                mu_m = pre_shock_drift   # discrete shocks layer on top during window
 
-            drift = r_f + betas * (mu_m - r_f)   # (n_assets,)
+            drift = r_f + betas * (mu_m - r_f)             # (n_assets,)
+            drift_corr = (drift - 0.5 * vols ** 2) * dt    # (n_assets,)
 
-            # OU + GBM step (vectorised across assets)
             if dt > 0:
-                # Target trajectory advances deterministically along Itô-corrected drift.
-                log_theta += (drift - 0.5 * vols ** 2) * dt
-                # Actual log-price: GBM diffusion + restoring force toward θ.
-                log_prices += (
-                    (drift - 0.5 * vols ** 2) * dt
-                    + kappa * (log_theta - log_prices) * dt
-                    + vols * np.sqrt(dt) * Z_corr[t_idx]
+                log_theta += drift_corr
+                log_S += (
+                    drift_corr
+                    + self.kappa * (log_theta - log_S) * dt
+                    + vols * np.sqrt(dt) * Z_corr[:, t_idx, :]
                 )
-                prices = np.exp(log_prices)
 
-            # Discrete shock — β-scaled per asset; reprices both actual and target
-            # so mean reversion does not undo a fundamental shock.
             if bday in shock_dates:
-                shock_factor = 1 + market_shock / 100 * betas
-                prices *= shock_factor
-                log_prices = np.log(prices)
-                log_theta += np.log(shock_factor)
+                shock_factor = np.maximum(1 + market_shock / 100 * betas, 1e-8)
+                log_shock    = np.log(shock_factor)
+                log_S     += log_shock
+                log_theta += log_shock
 
-            # Capture each product's terminal price at its own maturity
-            if bday >= maturity:
-                mask = np.isnan(product_final_prices)
-                product_final_prices = np.where(mask, prices, product_final_prices)
-
-            price_paths[t_idx] = prices
+            log_paths[:, t_idx, :] = log_S
             prev_date = bday
 
-        # Safety: if maturity is beyond the grid, use last price
-        #still_nan = np.isnan(product_final_prices)
-       # product_final_prices = np.where(still_nan, price_paths[-1], product_final_prices)
-
-        # ── Outputs ──────────────────────────────────────────────────────────
-        shocks      = [(product_final_prices[i] / spots[i] - 1) * 100 for i in range(n_assets)]
-        final_spots = [round(float(p), 4) for p in product_final_prices]
-
-        paths = {
-            isin: pd.DataFrame({"date": date_range, "price": price_paths[:, i]})
-            for i, isin in enumerate(isins)
-        }
+        price_paths = np.exp(log_paths)
 
         path_summary = {
-            "maturity_date"       : row["maturity_date"],
-            "T_remaining_years"   : round(T_remaining, 3),
-            "T_first_shock_years" : round(T_first_shock, 3),
-            "T_post_shock_years"  : round(T_post_shock, 3),
-            "effective_n_shocks"  : len(shock_day_offsets),
-            "market_shock_pct"    : market_shock,
-            "pre_shock_drift_pa"  : pre_shock_drift,
-            "post_shock_drift_pa" : post_shock_drift,
-            "correlation_used"    : corr_matrix is not None,
+            "maturity_date":       row["maturity_date"],
+            "T_remaining_years":   round(T_remaining, 3),
+            "T_first_shock_years": round(T_first_shock, 3),
+            "T_post_shock_years":  round(T_post_shock, 3),
+            "effective_n_shocks":  len(shock_day_offsets),
+            "market_shock_pct":    market_shock,
+            "pre_shock_drift_pa":  pre_shock_drift,
+            "post_shock_drift_pa": post_shock_drift,
+            "correlation_used":    True,
         }
 
-        return shocks, final_spots, T_remaining, path_summary, paths
+        return price_paths, date_range, path_summary
 
-    def run_product_path_scenario(self, row, scenario, corr_df=None, scenario_seed=0):
+    # ─────────────────────────────────────────────────────── per-product run
 
+    def _run_product(self, row, sampler, scenario, corr_df=None):
         corr_matrix = self.get_corr_subset(row, corr_df)
-
-        shocks, final_spots, T_remaining, path_summary, paths = self.build_shock_paths(
-            row, scenario, corr_matrix=corr_matrix, scenario_seed=scenario_seed
+        price_paths, date_range, path_summary = self.build_shock_paths(
+            row, scenario, sampler, corr_matrix
         )
+        N, n_days, n_assets = price_paths.shape
 
-        rc = ReverseConvertible(row, final_levels=shocks)
-        s = rc.summary()
+        isins    = list(row["underlying_isins"])
+        spots    = np.array([float(s) for s in row["current_spots"]])
+        maturity = pd.Timestamp(row["maturity_date"])
 
-        idx = row["underlyings"].index(s["worst_underlying"])
-        strike = row["strike"][idx]
-        notional = row["notional"]
-
-        total_shares = notional / strike
-        price = final_spots[idx]
-
-        is_physical = price < strike
-
-        if is_physical:
-            delivered_shares     = int(total_shares)
-            fractional_shares    = total_shares - delivered_shares
-            fractional_cash      = fractional_shares * price
-            delivered_underlying = s["worst_underlying"]
-            cash_redemption      = fractional_cash
-            settlement_type      = "physical"
+        mat_mask = np.asarray(date_range >= maturity)
+        if mat_mask.any():
+            t_idx_terminal = int(np.argmax(mat_mask))
         else:
-            delivered_shares     = 0
-            fractional_shares    = 0
-            fractional_cash      = 0
-            delivered_underlying = None
-            cash_redemption      = s["total_payoff"]
-            settlement_type      = "cash"
+            t_idx_terminal = n_days - 1
+
+        final_prices = price_paths[:, t_idx_terminal, :]   # (N, n_assets)
+
+        # Per-path RC payoff
+        pnl              = np.zeros(N)
+        return_pct       = np.zeros(N)
+        cash_redemption  = np.zeros(N)
+        worst_underlying = np.empty(N, dtype=object)
+        settlement_type  = np.empty(N, dtype=object)
+        delivered_under  = np.empty(N, dtype=object)
+        delivered_shares = np.zeros(N)
+        fractional_cash  = np.zeros(N)
+        barrier_breached = np.zeros(N, dtype=bool)
+        strike_used      = np.zeros(N)
+        final_spot_used  = np.zeros(N)
+
+        for p in range(N):
+            shocks = [
+                (final_prices[p, i] / spots[i] - 1) * 100
+                for i in range(n_assets)
+            ]
+            rc = ReverseConvertible(row, final_levels=shocks)
+            s  = rc.summary()
+
+            idx       = row["underlyings"].index(s["worst_underlying"])
+            strike    = row["strike"][idx]
+            notional  = row["notional"]
+            ts        = notional / strike
+            price     = final_prices[p, idx]
+            physical  = price < strike
+
+            if physical:
+                d_shares = int(ts)
+                f_cash   = (ts - d_shares) * price
+                cash_red = f_cash
+                d_under  = s["worst_underlying"]
+                stype    = "physical"
+            else:
+                d_shares = 0
+                f_cash   = 0.0
+                cash_red = s["total_payoff"]
+                d_under  = None
+                stype    = "cash"
+
+            pnl[p]              = s["pnl"]
+            return_pct[p]       = s["return_pct"]
+            cash_redemption[p]  = cash_red
+            worst_underlying[p] = s["worst_underlying"]
+            settlement_type[p]  = stype
+            delivered_under[p]  = d_under
+            delivered_shares[p] = d_shares
+            fractional_cash[p]  = f_cash
+            barrier_breached[p] = bool(s["barrier_breached"])
+            strike_used[p]      = strike
+            final_spot_used[p]  = price
+
+        T_remaining = (maturity - date_range[0]).days / 360
+        total_cost  = float(ReverseConvertible(row, final_levels=[0]*n_assets).summary()["total_cost"])
 
         return {
-            # Product identifiers
-            "product_id"          : row["product_id"],
-            "product_type"        : row["product_type"],
-            "currency"            : row["currency"],
-            "position_units"      : row["position_units"],
-            "notional"            : row["notional"],
-            "maturity_date"       : row["maturity_date"],
+            "product_id":         row["product_id"],
+            "product_type":       row["product_type"],
+            "currency":           row["currency"],
+            "position_units":     row["position_units"],
+            "notional":           row["notional"],
+            "maturity_date":      row["maturity_date"],
+            "T_remaining_years":  round(T_remaining, 2),
+            "total_cost":         total_cost,
 
-            # Path
-            "T_remaining_years"   : round(T_remaining, 2),
-            "final_spots"         : final_spots,
+            "pnl_mean":   float(pnl.mean()),
+            "pnl_median": float(np.median(pnl)),
+            "pnl_p5":     float(np.percentile(pnl, _PERCENTILES[0])),
+            "pnl_p95":    float(np.percentile(pnl, _PERCENTILES[1])),
+            "pnl_es5":    float(pnl[pnl <= np.percentile(pnl, 5)].mean())
+                            if N >= 20 else float(pnl.min()),
+            "pnl_std":    float(pnl.std(ddof=1)) if N > 1 else 0.0,
+            "return_mean_pct":   float(return_pct.mean()  * 100),
+            "return_median_pct": float(np.median(return_pct) * 100),
+            "return_p5_pct":     float(np.percentile(return_pct, 5)  * 100),
+            "return_p95_pct":    float(np.percentile(return_pct, 95) * 100),
 
-            # Scenario inputs
-            "market_shock"        : scenario.get("market_shock", 0),
-            "n_shocks"            : scenario.get("n_shocks", 1),
-            "shock_in_days"       : scenario.get("shock_in_days", 0),
-            "pre_shock_drift_pa"  : scenario.get("pre_shock_drift_pa", 0.0),
-            "post_shock_drift_pa" : scenario.get("post_shock_drift_pa", 0.0),
+            "worst_underlying":    _mode_string(worst_underlying),
+            "settlement_type":     _mode_string(settlement_type),
+            "barrier_breach_freq": float(barrier_breached.mean()),
 
-            # Payoff
-            "total_cost"          : s["total_cost"],
-            "payoff_per_unit"     : s["payoff_per_unit"],
-            "total_payoff"        : s["total_payoff"],
-            "pnl"                 : s["pnl"],
-            "return_pct"          : s["return_pct"],
-            "barrier_breached"    : s["barrier_breached"],
-            "worst_underlying"    : s["worst_underlying"],
+            "mean_cash_redemption":  float(cash_redemption.mean()),
+            "mean_delivered_shares": float(delivered_shares.mean()),
+            "mean_fractional_cash":  float(fractional_cash.mean()),
+            "mean_final_spot":       float(final_spot_used.mean()),
+            "mean_strike":           float(strike_used.mean()),
+            "delivered_underlying":  _mode_string(delivered_under),
 
-            # Settlement
-            "settlement_type"     : settlement_type,
-            "delivered_underlying": delivered_underlying,
-            "delivered_shares"    : delivered_shares,
-            "strike"              : strike,
-            "price"               : price,
-            "fractional_shares"   : fractional_shares,
-            "fractional_cash"     : fractional_cash,
-            "cash_redemption"     : cash_redemption,
+            "pnl_samples":    pnl,
+            "return_samples": return_pct,
 
-            # Full path audit
-            "path_summary"        : path_summary,
-            "paths"               : paths,
+            "_isins":       isins,
+            "_price_paths": price_paths,
+            "path_summary": path_summary,
         }
 
+    # ───────────────────────────────────────────────────────── portfolio run
+
     def run_path_scenario(self, scenario, corr_df=None):
-        """
-        Runs path-based scenario across full portfolio
-        (equivalent to run(), but using correlated path logic).
+        all_isins = sorted({
+            isin for _, r in self.portfolio.iterrows() for isin in r["underlying_isins"]
+        })
+        today              = pd.Timestamp.today().normalize()
+        portfolio_maturity = pd.to_datetime(self.portfolio["maturity_date"]).max()
+        n_days             = len(pd.bdate_range(start=today, end=portfolio_maturity))
+        sampler = self._ensure_sampler(n_days=n_days, all_isins=all_isins)
 
-        Parameters
-        ----------
-        corr_df : pd.DataFrame, optional
-            Full correlation matrix with ISINs as both index and columns.
-            Defaults to identity (independent assets) per product.
-
-        A scenario_seed is derived from the scenario parameters so that
-        different scenarios produce visually distinct path shapes, while
-        all products within one run share the same seed (portfolio consistency).
-        """
-        # Derive a repeatable seed from the scenario so each unique scenario
-        # produces different random draws while remaining deterministic.
-        scenario_seed = int(hashlib.md5(str(sorted(scenario.items())).encode()).hexdigest(), 16) % (2 ** 31)
-
-        results   = []
-        all_paths = {}
-
+        product_results = []
+        asset_paths     = {}
         for _, row in self.portfolio.iterrows():
-            res = self.run_product_path_scenario(row, scenario, corr_df=corr_df,
-                                                  scenario_seed=scenario_seed)
-            for isin, path_df in res.pop("paths", {}).items():
-                all_paths[isin] = path_df
-            results.append(res)
+            res = self._run_product(row, sampler, scenario, corr_df)
+            isins       = res.pop("_isins")
+            price_paths = res.pop("_price_paths")
+            for i, isin in enumerate(isins):
+                if isin not in asset_paths:
+                    asset_paths[isin] = _path_summary_df(date_range_for_n_days(today, n_days),
+                                                         price_paths[:, :, i])
+            product_results.append(res)
 
-        product_df = pd.DataFrame(results)
+        product_df = pd.DataFrame(product_results)
 
-        # =========================
-        # Cash positions
-        # =========================
+        # ── Currency aggregation ────────────────────────────────────────
+        pnl_samples_by_ccy: dict[str, np.ndarray] = {}
+        cost_by_ccy: dict[str, float] = {}
+        for ccy, sub in product_df.groupby("currency"):
+            per_path = np.stack(list(sub["pnl_samples"].values))   # (P, N)
+            pnl_samples_by_ccy[ccy] = per_path.sum(axis=0)
+            cost_by_ccy[ccy] = float(sub["total_cost"].sum())
+
+        pf_rows = []
+        for ccy, samples in pnl_samples_by_ccy.items():
+            cost = cost_by_ccy[ccy]
+            pf_rows.append({
+                "currency":     ccy,
+                "n_products":   int((product_df["currency"] == ccy).sum()),
+                "total_cost":   cost,
+                "underlyings":  sorted(set(
+                    product_df.loc[product_df["currency"] == ccy, "worst_underlying"]
+                )),
+                "pnl_mean":   float(samples.mean()),
+                "pnl_median": float(np.median(samples)),
+                "pnl_p5":     float(np.percentile(samples, 5)),
+                "pnl_p95":    float(np.percentile(samples, 95)),
+                "pnl_es5":    float(samples[samples <= np.percentile(samples, 5)].mean())
+                              if len(samples) >= 20 else float(samples.min()),
+                "pnl_std":    float(samples.std(ddof=1)) if len(samples) > 1 else 0.0,
+                "portfolio_return_mean_pct":   float(samples.mean()  / cost * 100) if cost > 0 else 0.0,
+                "portfolio_return_median_pct": float(np.median(samples) / cost * 100) if cost > 0 else 0.0,
+                "portfolio_return_p5_pct":     float(np.percentile(samples, 5)  / cost * 100) if cost > 0 else 0.0,
+                "portfolio_return_p95_pct":    float(np.percentile(samples, 95) / cost * 100) if cost > 0 else 0.0,
+            })
+        pf_scenario_per_ccy = pd.DataFrame(pf_rows)
+
         cash_positions = (
             product_df.groupby("currency", as_index=False)
-            .agg(
-                total_cash=("cash_redemption", "sum")
-            )
+            .agg(total_cash=("mean_cash_redemption", "sum"))
         )
 
-        # =========================
-        # Delivered stocks
-        # =========================
         delivered_df = product_df[
-            product_df["delivered_underlying"].notna()
+            (product_df["delivered_underlying"].notna())
+            & (product_df["mean_delivered_shares"] > 0)
         ].copy()
-
         if not delivered_df.empty:
             delivered_stocks = (
                 delivered_df.groupby(["currency", "delivered_underlying"], as_index=False)
                 .agg(
-                    total_shares=("delivered_shares", "sum"),
-                    total_fractional_cash=("fractional_cash", "sum"),
-                    strike_x_shares=("strike", lambda x: (x * delivered_df.loc[x.index, "delivered_shares"]).sum()),
-                    price_x_shares=("price", lambda x: (x * delivered_df.loc[x.index, "delivered_shares"]).sum()),
+                    total_shares=("mean_delivered_shares", "sum"),
+                    total_fractional_cash=("mean_fractional_cash", "sum"),
+                    strike=("mean_strike", "mean"),
+                    price=("mean_final_spot", "mean"),
                 )
             )
-
-            delivered_stocks["strike"] = delivered_stocks["strike_x_shares"] / delivered_stocks["total_shares"]
-            delivered_stocks["price"]  = delivered_stocks["price_x_shares"]  / delivered_stocks["total_shares"]
-
             delivered_stocks["market_value"]          = delivered_stocks["total_shares"] * delivered_stocks["price"]
             delivered_stocks["cost"]                  = delivered_stocks["total_shares"] * delivered_stocks["strike"]
             delivered_stocks["total_value_incl_cash"] = delivered_stocks["market_value"] + delivered_stocks["total_fractional_cash"]
             delivered_stocks["pnl"]                   = delivered_stocks["total_value_incl_cash"] - delivered_stocks["cost"]
             delivered_stocks["return_pct"]            = delivered_stocks["pnl"] / delivered_stocks["cost"]
-
             delivered_stocks = delivered_stocks[[
                 "delivered_underlying", "total_shares", "strike", "price", "currency",
                 "market_value", "total_fractional_cash", "total_value_incl_cash",
@@ -371,78 +415,59 @@ class ScenarioEngine:
         else:
             delivered_stocks = pd.DataFrame()
 
-        # =========================
-        # Portfolio aggregation
-        # =========================
-        pf_scenario_per_ccy = (
-            product_df.groupby("currency", as_index=False)
-            .agg(
-                n_products=("product_id", "count"),
-                total_cost=("total_cost", "sum"),
-                total_payoff=("total_payoff", "sum"),
-                total_pnl=("pnl", "sum"),
-                underlyings=("worst_underlying", lambda x: sorted(set(x)))
-            )
-        )
-
-        pf_scenario_per_ccy["portfolio_return_pct"] = (
-            pf_scenario_per_ccy["total_pnl"] /
-            pf_scenario_per_ccy["total_cost"]
-        )
-
         return {
-            "product_df"        : product_df,
+            "product_df":          product_df,
             "pf_scenario_per_ccy": pf_scenario_per_ccy,
-            "cash_positions"    : cash_positions,
-            "delivered_stocks"  : delivered_stocks,
-            "paths"             : all_paths,
+            "cash_positions":      cash_positions,
+            "delivered_stocks":    delivered_stocks,
+            "asset_paths":         asset_paths,
+            "pnl_samples_by_ccy":  pnl_samples_by_ccy,
+            "n_paths":             self.n_paths,
         }
-    
-    
+
+    # ──────────────────────────────────────────────────────── correlation
+
     def get_corr_subset(self, row, corr_df):
-        """
-        Extract product-specific correlation submatrix in the exact order of
-        row["underlying_isins"].
-    
-        Parameters
-        ----------
-        row : pd.Series
-            Portfolio row containing "underlying_isins"
-        corr_df : pd.DataFrame
-            Full correlation matrix with ISINs as both index and columns
-    
-        Returns
-        -------
-        np.ndarray
-            Correlation matrix subset with shape (n_assets, n_assets)
-        """
+        """Extract product-specific correlation submatrix in the order of
+        ``row["underlying_isins"]``."""
         isins = list(row["underlying_isins"])
-    
+
         if corr_df is None:
             return np.eye(len(isins))
-    
+
         missing = [isin for isin in isins if isin not in corr_df.index or isin not in corr_df.columns]
         if missing:
             raise KeyError(f"Missing ISIN(s) in correlation matrix: {missing}")
-    
-        corr_subset = corr_df.loc[isins, isins]
-    
-        return corr_subset.to_numpy(dtype=float)
-    
-    def _get_isin_rng_map(self, isins, scenario_seed=0):
-        """
-        Deterministic RNG per ISIN — same underlying always gets the same path
-        within one portfolio run (portfolio consistency).
 
-        scenario_seed : int
-            XOR'd into every ISIN seed so different scenarios produce different
-            path shapes, not just a scaled version of the same path.
-            Pass the same value for every product in one run_path_scenario call.
-        """
-        return {
-            isin: np.random.default_rng(
-                (int(hashlib.md5(str(isin).encode()).hexdigest(), 16) % (2 ** 31))
-                ^ scenario_seed
-            )
-            for isin in isins
-        }
+        return corr_df.loc[isins, isins].to_numpy(dtype=float)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Helpers (module-private)
+# ──────────────────────────────────────────────────────────────────────────
+
+def _path_summary_df(date_range, paths_2d: np.ndarray) -> pd.DataFrame:
+    """Aggregate a (n_paths, n_days) tensor into per-date summary stats."""
+    return pd.DataFrame({
+        "date":   date_range,
+        "mean":   paths_2d.mean(axis=0),
+        "median": np.median(paths_2d, axis=0),
+        "p5":     np.percentile(paths_2d, 5,  axis=0),
+        "p95":    np.percentile(paths_2d, 95, axis=0),
+    })
+
+
+def _mode_string(arr: np.ndarray) -> str | None:
+    vals, counts = np.unique(
+        np.array([str(x) for x in arr if x is not None]),
+        return_counts=True,
+    )
+    if len(vals) == 0:
+        return None
+    return str(vals[counts.argmax()])
+
+
+def date_range_for_n_days(today: pd.Timestamp, n_days: int) -> pd.DatetimeIndex:
+    """Recover the business-day grid given today and a length — stable inverse."""
+    # Using bdate_range with periods is exactly stable.
+    return pd.bdate_range(start=today, periods=n_days)

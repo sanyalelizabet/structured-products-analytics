@@ -167,7 +167,7 @@ class MarketDataEngine:
 
         return db
 
-    def fetch_daily_prices(self, isin_ticker_map, years=6, force_refresh=True):
+    def fetch_daily_prices(self, isin_ticker_map, years=6, force_refresh=False):
         """
         Download daily adjusted-close prices and append to prices.csv.
 
@@ -183,6 +183,7 @@ class MarketDataEngine:
         """
         db = self.load_db()
         rows = []
+        purged_isins: list[str] = []
 
         for isin, ticker in isin_ticker_map.items():
 
@@ -190,6 +191,20 @@ class MarketDataEngine:
 
             if not existing.empty:
                 existing["date"] = pd.to_datetime(existing["date"])
+
+                # ── Self-heal stale-ticker rows ──────────────────────────────
+                # If the previously stored rows used a *different* ticker
+                # than the one we're now resolving for this ISIN, drop them
+                # before re-fetching.  Mixing prices across listings (e.g.
+                # NOVN.SW in CHF + NVSEF.US in USD) silently corrupts every
+                # downstream regression and stress run.
+                stale_mask = (db["isin"] == isin) & (db["ticker"] != ticker)
+                if stale_mask.any():
+                    db = db[~stale_mask].reset_index(drop=True)
+                    purged_isins.append(isin)
+                    existing = db[db["isin"] == isin].copy()
+                    if not existing.empty:
+                        existing["date"] = pd.to_datetime(existing["date"])
 
             # Skip only if data covers the requested history window adequately.
             # Row-count alone is misleading: sparse daily quotes or old monthly
@@ -215,8 +230,14 @@ class MarketDataEngine:
             except Exception as e:
                 log.warning("Daily fetch failed for %s (%s): %s", ticker, isin, e)
 
-        if rows:
-            new_df = pd.DataFrame(rows)
+        if purged_isins:
+            log.info("Purged stale-ticker rows for %d ISIN(s) before re-fetch: %s",
+                     len(purged_isins), purged_isins)
+
+        if rows or purged_isins:
+            new_df = pd.DataFrame(rows) if rows else pd.DataFrame(
+                columns=["date", "isin", "ticker", "price"]
+            )
 
             db = pd.concat([db, new_df], ignore_index=True)
             db["date"] = pd.to_datetime(db["date"]).dt.normalize()
@@ -272,14 +293,52 @@ class MarketDataEngine:
         if rows:
             new_df = pd.DataFrame(rows)
             master = pd.concat([master, new_df], ignore_index=True)
-            master = master.sort_values(["isin", "exchange"]).reset_index(drop=True)
+            master = (
+                master.drop_duplicates(subset=["isin", "ticker"], keep="last")
+                       .sort_values(["isin", "exchange"])
+                       .reset_index(drop=True)
+            )
             self.master_path.parent.mkdir(parents=True, exist_ok=True)
             master.to_csv(self.master_path, index=False)
 
         return master
 
-    def _resolve_ticker(self, isin):
+    # ── ISIN country-prefix → master ``country`` field synonyms ─────────
+    # Used by ``_resolve_ticker`` to pick the issuer's home-market listing.
+    # Picking a US ADR / OTC pink-sheet for a Swiss-listed stock yields
+    # stale, illiquid prices — see e.g. NVSEF.US for Novartis.
+    _ISIN_COUNTRY_TO_NAMES: dict[str, list[str]] = {
+        "US": ["united states", "usa", "us"],
+        "CH": ["switzerland", "ch"],
+        "DE": ["germany", "de"],
+        "FR": ["france", "fr"],
+        "GB": ["united kingdom", "uk", "gb", "britain"],
+        "NL": ["netherlands", "nl"],
+        "IT": ["italy", "it"],
+        "ES": ["spain", "es"],
+        "BE": ["belgium", "be"],
+        "AT": ["austria", "at"],
+        "DK": ["denmark", "dk"],
+        "SE": ["sweden", "se"],
+        "NO": ["norway", "no"],
+        "FI": ["finland", "fi"],
+        "JP": ["japan", "jp"],
+        "CA": ["canada", "ca"],
+        "AU": ["australia", "au"],
+    }
 
+    def _resolve_ticker(self, isin):
+        """Pick the listing best suited for daily-price fetches.
+
+        Priority order:
+        1. **Issuer's home market** — derived from the first two letters of
+           the ISIN.  CH-ISINs get the Swiss listing, US-ISINs the US
+           listing, etc.  This avoids picking thinly-traded ADRs / OTC
+           pink-sheets when a liquid home-market listing is available.
+        2. US listing — fallback for ISINs whose country prefix isn't in
+           the map.
+        3. Anything in the master row set.
+        """
         if not self.master_path.exists():
             raise ValueError("Security master not initialized")
 
@@ -289,14 +348,22 @@ class MarketDataEngine:
         if matches.empty:
             raise ValueError(f"{isin} not found in master data")
 
-        # Priority: US first
+        # 1. Home market — match by ISIN country prefix
+        country_prefix = (isin[:2].upper() if isinstance(isin, str) and len(isin) >= 2 else "")
+        home_names = self._ISIN_COUNTRY_TO_NAMES.get(country_prefix, [])
+        if home_names:
+            home = matches[matches["country"].str.lower().isin(home_names)]
+            if not home.empty:
+                return home.iloc[0]["ticker"]
+
+        # 2. US fallback for ISINs whose home market isn't in the map
         us = matches[matches["country"].str.lower().isin(
             ["united states", "usa", "us"]
         )]
         if not us.empty:
             return us.iloc[0]["ticker"]
 
-        # fallback
+        # 3. anything
         return matches.iloc[0]["ticker"]
 
     def fetch_options_chain(self, isins, yahoo_client, force_refresh=False):
@@ -472,13 +539,12 @@ class MarketDataEngine:
 
             log_returns = np.log(prices["price"] / prices["price"].shift(1)).dropna()
 
-            realized_var = (log_returns ** 2).mean() * 252
-            realized_vol = np.sqrt(realized_var)
+            realised = float(log_returns.tail(window).std() * np.sqrt(252))
 
-            if realized_vol <= 0 or np.isnan(realized_vol):
+            if realised <= 0 or np.isnan(realised):
                 vol_map[isin] = fallback_vol
             else:
-                vol_map[isin] = round(realized_vol, 4)
+                vol_map[isin] = round(realised, 4)
 
         return vol_map
 

@@ -215,19 +215,26 @@ class TestFetchDailyPrices:
         assert mock_client.get_daily_prices.called
 
     def test_skips_isin_with_enough_daily_data(self, engine, mock_client):
+        """Skip applies when (a) force_refresh=False, (b) date range covers
+        the requested history window, and (c) row density is sufficient."""
+        # Build a long history ending today: years=2 needs ≥400 rows and
+        # min date ≤ today − 2y − 30d.
+        end = pd.Timestamp.today().normalize()
         existing = pd.DataFrame([
             {
-                "date": pd.Timestamp("2024-01-01") + pd.offsets.BDay(d),
+                "date": end - pd.offsets.BDay(d),
                 "isin": "CH001",
                 "ticker": "NESN.SW",
                 "price": 100.0,
             }
-            for d in range(300)
+            for d in range(600)
         ])
 
         engine.save_db(existing)
 
-        engine.fetch_daily_prices({"CH001": "NESN.SW"})
+        engine.fetch_daily_prices(
+            {"CH001": "NESN.SW"}, years=2, force_refresh=False
+        )
 
         mock_client.get_daily_prices.assert_not_called()
 
@@ -361,7 +368,7 @@ class TestBuildCorrMatrix:
         self._make_daily_db(engine, ["CH001", "CH002"])
 
         corr = CorrelationEngine(engine).build_corr_matrix({
-            "CH001": "A.SW", "CH002": "B.SW"
+            "CH001": "CH001.SW", "CH002": "CH002.SW"
         })
 
         assert isinstance(corr, pd.DataFrame)
@@ -372,7 +379,7 @@ class TestBuildCorrMatrix:
         self._make_daily_db(engine, ["CH001", "CH002"])
 
         corr = CorrelationEngine(engine).build_corr_matrix({
-            "CH001": "A.SW", "CH002": "B.SW"
+            "CH001": "CH001.SW", "CH002": "CH002.SW"
         })
 
         assert np.allclose(np.diag(corr.values), 1.0)
@@ -382,7 +389,7 @@ class TestBuildCorrMatrix:
         self._make_daily_db(engine, ["CH001", "CH002"])
 
         corr = CorrelationEngine(engine).build_corr_matrix({
-            "CH001": "A.SW", "CH002": "B.SW"
+            "CH001": "CH001.SW", "CH002": "CH002.SW"
         })
 
         val = corr.loc["CH001", "CH002"]
@@ -436,12 +443,15 @@ class TestBuildCorrMatrix:
         assert abs(corr.loc["CH001", "CH002"] + 1.0) < 1e-3
 
 
-    def test_raises_when_insufficient_observations(self, engine):
-        """Too few daily observations should raise."""
+    def test_falls_back_to_identity_when_insufficient_observations(self, engine):
+        """ISINs with fewer than the min-period overlap (252 days) should be
+        treated as uncorrelated — diagonal 1, off-diagonal 0 — instead of
+        crashing the whole matrix.  This protects the rest of the portfolio
+        when one ticker has thin history."""
         rows = []
 
         for isin in ["CH001", "CH002"]:
-            for d in range(50):  # below threshold (~252)
+            for d in range(50):  # well below the 252-day pairwise threshold
                 rows.append({
                     "date": pd.Timestamp("2024-01-01") + pd.offsets.BDay(d),
                     "isin": isin,
@@ -451,11 +461,16 @@ class TestBuildCorrMatrix:
 
         engine.save_db(pd.DataFrame(rows))
 
-        with pytest.raises(ValueError, match="overlapping"):
-            CorrelationEngine(engine).build_corr_matrix({
-                "CH001": "A.SW",
-                "CH002": "B.SW"
-            })
+        corr = CorrelationEngine(engine).build_corr_matrix({
+            "CH001": "CH001.SW",
+            "CH002": "CH002.SW",
+        })
+
+        # Diagonal exactly 1, off-diagonal exactly 0 (independence fallback)
+        assert corr.loc["CH001", "CH001"] == pytest.approx(1.0)
+        assert corr.loc["CH002", "CH002"] == pytest.approx(1.0)
+        assert corr.loc["CH001", "CH002"] == pytest.approx(0.0)
+        assert corr.loc["CH002", "CH001"] == pytest.approx(0.0)
 
 
     def test_pairwise_correlation_invariant_to_extra_assets(self, engine):
@@ -491,3 +506,165 @@ class TestBuildCorrMatrix:
         corr_ab_full = corr_full.loc["A", "B"]
 
         assert abs(corr_ab_pair - corr_ab_full) < 1e-3
+
+# ─────────────────────────────────────────
+# _resolve_ticker — home-market priority
+# ─────────────────────────────────────────
+
+class TestResolveTicker:
+    """The ticker chosen for daily-price fetches must be the issuer's
+    home-market listing.  Picking a US OTC pink-sheet for a Swiss-listed
+    stock yields stale prices and corrupts every downstream regression.
+    """
+
+    def _master_with(self, tmp_path, rows):
+        pd.DataFrame(rows).to_csv(tmp_path / "securities_master_data.csv", index=False)
+
+    def test_swiss_isin_picks_swiss_listing(self, mock_client, tmp_path):
+        """CH-prefixed ISIN with Swiss + US-OTC listings → Swiss wins."""
+        self._master_with(tmp_path, [
+            {"isin": "CH0012005267", "ticker": "NVSEF.US", "code": "NVSEF",
+             "exchange": "US", "name": "Novartis OTC",
+             "type": "Common Stock", "country": "USA", "currency": "USD"},
+            {"isin": "CH0012005267", "ticker": "NOVN.SW",  "code": "NOVN",
+             "exchange": "SW", "name": "Novartis",
+             "type": "Common Stock", "country": "Switzerland", "currency": "CHF"},
+        ])
+        engine = MarketDataEngine(client=mock_client, db_path=str(tmp_path / "prices.csv"))
+        assert engine._resolve_ticker("CH0012005267") == "NOVN.SW"
+
+    def test_us_isin_picks_us_listing(self, mock_client, tmp_path):
+        self._master_with(tmp_path, [
+            {"isin": "US0079031078", "ticker": "AMD.US", "code": "AMD",
+             "exchange": "US", "name": "AMD",
+             "type": "Common Stock", "country": "USA", "currency": "USD"},
+            {"isin": "US0079031078", "ticker": "0HEL.LSE", "code": "0HEL",
+             "exchange": "LSE", "name": "AMD LSE",
+             "type": "Common Stock", "country": "UK", "currency": "GBP"},
+        ])
+        engine = MarketDataEngine(client=mock_client, db_path=str(tmp_path / "prices.csv"))
+        assert engine._resolve_ticker("US0079031078") == "AMD.US"
+
+    def test_german_isin_picks_german_listing(self, mock_client, tmp_path):
+        self._master_with(tmp_path, [
+            {"isin": "DE000BASF111", "ticker": "BAS.XETRA", "code": "BAS",
+             "exchange": "XETRA", "name": "BASF",
+             "type": "Common Stock", "country": "Germany", "currency": "EUR"},
+            {"isin": "DE000BASF111", "ticker": "BASFY.US", "code": "BASFY",
+             "exchange": "US", "name": "BASF ADR",
+             "type": "Common Stock", "country": "USA", "currency": "USD"},
+        ])
+        engine = MarketDataEngine(client=mock_client, db_path=str(tmp_path / "prices.csv"))
+        assert engine._resolve_ticker("DE000BASF111") == "BAS.XETRA"
+
+    def test_falls_back_to_us_when_home_country_missing(self, mock_client, tmp_path):
+        """Country prefix not in the home-market map → fall back to US listing."""
+        self._master_with(tmp_path, [
+            {"isin": "BR0011112222", "ticker": "VALE.US", "code": "VALE",
+             "exchange": "US", "name": "Vale ADR",
+             "type": "Common Stock", "country": "USA", "currency": "USD"},
+            {"isin": "BR0011112222", "ticker": "0HAH.LSE", "code": "0HAH",
+             "exchange": "LSE", "name": "Vale LSE",
+             "type": "Common Stock", "country": "UK", "currency": "GBP"},
+        ])
+        engine = MarketDataEngine(client=mock_client, db_path=str(tmp_path / "prices.csv"))
+        assert engine._resolve_ticker("BR0011112222") == "VALE.US"
+
+    def test_falls_back_to_first_when_neither_home_nor_us(self, mock_client, tmp_path):
+        self._master_with(tmp_path, [
+            {"isin": "BR0011112222", "ticker": "0HAH.LSE", "code": "0HAH",
+             "exchange": "LSE", "name": "Vale LSE",
+             "type": "Common Stock", "country": "UK", "currency": "GBP"},
+        ])
+        engine = MarketDataEngine(client=mock_client, db_path=str(tmp_path / "prices.csv"))
+        assert engine._resolve_ticker("BR0011112222") == "0HAH.LSE"
+
+    def test_missing_isin_raises(self, mock_client, tmp_path):
+        self._master_with(tmp_path, [
+            {"isin": "CH001", "ticker": "NESN.SW", "code": "NESN",
+             "exchange": "SW", "name": "Nestle",
+             "type": "Common Stock", "country": "Switzerland", "currency": "CHF"},
+        ])
+        engine = MarketDataEngine(client=mock_client, db_path=str(tmp_path / "prices.csv"))
+        with pytest.raises(ValueError, match="not found in master"):
+            engine._resolve_ticker("XX999999")
+
+
+# ─────────────────────────────────────────
+# fetch_securities_master — dedup
+# ─────────────────────────────────────────
+
+class TestFetchSecuritiesMasterDedup:
+    """Repeat fetches must not append duplicate (isin, ticker) rows."""
+
+    def test_repeated_force_refresh_does_not_duplicate(self, mock_client, tmp_path):
+        listings = [{
+            "isin": "CH0012005267", "ticker": "NOVN.SW", "code": "NOVN",
+            "exchange": "SW", "name": "Novartis",
+            "type": "Common Stock", "country": "Switzerland", "currency": "CHF",
+        }]
+        mock_client.search_by_isin.return_value = listings
+        engine = MarketDataEngine(client=mock_client, db_path=str(tmp_path / "prices.csv"))
+
+        # Refresh three times — master should still have exactly one row.
+        for _ in range(3):
+            engine.fetch_securities_master(["CH0012005267"], force_refresh=True)
+
+        master = pd.read_csv(tmp_path / "securities_master_data.csv")
+        assert len(master[master["isin"] == "CH0012005267"]) == 1
+
+
+# ─────────────────────────────────────────
+# fetch_daily_prices — auto-purge stale-ticker rows
+# ─────────────────────────────────────────
+
+class TestFetchDailyPricesAutoPurge:
+    """If existing prices were stored under a *different* ticker than the one
+    now being requested, drop them before re-fetching.  This prevents the
+    silent CHF/USD mixing bug we saw with NVSEF.US polluting NOVN.SW data.
+    """
+
+    def test_stale_ticker_rows_purged_on_refetch(self, engine, mock_client, tmp_path):
+        # Seed with existing rows for CH001 under the WRONG ticker (US OTC).
+        existing = pd.DataFrame([
+            {
+                "date": pd.Timestamp("2024-01-01") + pd.offsets.BDay(d),
+                "isin": "CH001", "ticker": "NESN_US_OTC.US",  # wrong listing
+                "price": 100.0,
+            }
+            for d in range(50)
+        ])
+        engine.save_db(existing)
+
+        # New fetch under the correct ticker.
+        mock_client.get_daily_prices.return_value = [
+            {"date": "2024-06-01", "adjusted_close": 105.0},
+            {"date": "2024-06-02", "adjusted_close": 106.0},
+        ]
+        engine.fetch_daily_prices({"CH001": "NESN.SW"}, force_refresh=True)
+
+        db = engine.load_db()
+        sub = db[db["isin"] == "CH001"]
+        # All remaining rows must be under the new ticker; the 50 stale rows are gone.
+        assert (sub["ticker"] == "NESN.SW").all()
+        assert (sub["ticker"] == "NESN_US_OTC.US").sum() == 0
+
+    def test_matching_ticker_rows_preserved(self, engine, mock_client, tmp_path):
+        existing = pd.DataFrame([
+            {
+                "date": pd.Timestamp("2024-01-01") + pd.offsets.BDay(d),
+                "isin": "CH001", "ticker": "NESN.SW",
+                "price": 100.0,
+            }
+            for d in range(50)
+        ])
+        engine.save_db(existing)
+
+        mock_client.get_daily_prices.return_value = [
+            {"date": "2024-06-01", "adjusted_close": 105.0},
+        ]
+        engine.fetch_daily_prices({"CH001": "NESN.SW"}, force_refresh=True)
+
+        db = engine.load_db()
+        # Original 50 rows still there; one new row appended.
+        assert len(db[db["isin"] == "CH001"]) >= 50
