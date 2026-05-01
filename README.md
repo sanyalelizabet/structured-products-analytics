@@ -1,8 +1,8 @@
 # Structured Products Analytics
 
-A  analytics framework for evaluating, pricing, and risk-managing structured products, with a focus on barrier reverse convertibles (BRC) and multi-asset worst-of structures.
+A Python-based analytics framework for evaluating, monitoring, and stress-testing structured product portfolio (e.g. BRCs and MBRCs.
 
-
+The project is designed from a **buy-side portfolio analytics perspective**: it focuses on portfolio monitoring, payoff transparency, scenario analysis, and risk reporting rather than sell-side issuance pricing.
 
 ---
 
@@ -19,91 +19,165 @@ The project includes an interactive dashboard designed to explore structured pro
 ![Dashboard](figures/dashboard.png)
 
 ---
+
+## Project Overview
+
+Structured products can be difficult to monitor because their payoff depends on several interacting components:
+
+- underlying price performance
+- barrier distance and breach status
+- coupon accrual
+- worst-of logic for multi-asset products
+- remaining time to maturity
+- currency exposure
+- scenario-dependent physical delivery risk
+
+This project provides a modular analytics framework to make these risks more transparent at both **product level** and **portfolio level**.
+
+---
+
 ## Key Features
 
 ### Product-Level Analytics
-- Payoff decomposition (coupon + redemption)
-- Barrier monitoring (distance to barrier, breach detection)
-- Worst-of logic for multi-asset structures
+
+- Payoff decomposition into coupon and redemption components
+- Barrier monitoring and distance-to-barrier calculation
+- Worst-of logic for multi-asset reverse convertibles
+- Current performance versus strike
+- Projected payoff and return if held to maturity
+- Product-level P&L and annualized return metrics
 
 ### Portfolio Analytics
-- Aggregated PnL and return metrics
-- Look-through exposure by underlying
-- Maturity ladder and cash flow profile
+
+- Aggregated portfolio P&L and return metrics
+- Portfolio-level exposure by product, currency, and underlying
+- Look-through analysis of underlying exposure
+- Worst-of concentration analysis
+- Maturity profile and cash-flow overview
+- Multi-currency normalization into a reference currency
 
 ### Market Valuation (Mark-to-Market)
 - Fair value integration via external pricing engine
 - Comparison: projected vs mark-to-market valuation
-- Multi-currency portfolio normalization
 
-### Scenario Engine
-- Correlated Monte Carlo path simulation
-- Beta-adjusted shocks and stress scenarios
-- Path-consistent multi-asset dynamics
 
-### Risk Sensitivities (Greeks)
-- Delta, Vega, Theta, Rho
-- Correlation sensitivity (multi-asset products)
+### Multi-Factor Stress Engine
+
+- Factor-based scenario simulation using systematic market drivers
+- Factor loadings estimated through multivariate regression
+- Correlated factor shocks
+- Idiosyncratic asset-level noise
+- Scenario comparison using Common Random Numbers
+- Mean-reverting log-price dynamics for factor and asset paths
+
+
+### Risk Sensitivities
+
+- Delta
+- Vega
+- Theta
+- Rho
+- Correlation sensitivity for multi-asset products
 - Portfolio aggregation of sensitivities
 
 ### Market Data Integration
-- Live price fetching (EOD API)
-- Historical data storage and reuse
-- FX conversion across currencies
 
----
+- Historical and latest price fetching through EOD Historical Data
+- Local market data storage and reuse
+- Securities master data support
+- FX conversion for multi-currency portfolio reporting
+- Historical correlation estimation from stored price data
+- Implied volatility map support from option-chain data
 
 ## Architecture
 
-The framework is modular and separates concerns across distinct layers:
+The framework is modular and separates product logic, portfolio analytics, market data, scenario simulation, and visualization.
+
+### Core Components
 
 - `ReverseConvertible`  
-  Product-level payoff and risk logic (single-asset and multi-asset worst-of structures)
+  Product-level payoff, barrier, redemption, and return logic for BRC and MBRC structures.
 
 - `PortfolioAnalytics`  
-  Aggregation, reporting, and portfolio-level metrics
+  Portfolio aggregation, look-through exposure, currency conversion, maturity profile, and portfolio metrics.
 
 - `ScenarioEngine`  
-  Correlated path simulation and stress testing
+  Single-factor path-based scenario engine using correlated GBM-style simulations, beta-adjusted shocks, and product-level payoff aggregation.
+
+- `FactorScenarioEngine`  
+  Multi-factor stress engine that simulates correlated factor paths and projects them to asset returns through factor loadings.
 
 - `MarketDataEngine`  
-  Market data retrieval, storage, and preprocessing
+  Market data fetching, storage, refresh logic, securities master data, and historical price handling.
+
+- `CorrelationEngine`  
+  Realized correlation matrix estimation from historical price data.
+
+- `FactorLoadingsEngine`  
+  Multivariate regression engine for estimating asset exposure to systematic factors.
+
+- `MonteCarloPricer`  
+  Fair-value and Greeks calculation using Monte Carlo simulation.
 
 - `Streamlit App`  
-  Interactive visualization and analytics dashboard
-
-This design allows independent extension of pricing models, data sources, and analytics layers.
+  Interactive dashboard for product analytics, portfolio views, stress testing, and visual reporting.
 
 ---
 
 ## Example Analytics
 
 ### Portfolio Overview
-- Projected Value (hold-to-maturity)
-- Mark-to-Market Value (fair value)
-- PnL and return comparison
+
+- Total cost
+- Projected payoff
+- Projected P&L
+- Portfolio return
+- Product weights
+- Currency-level aggregation
+- Reference-currency portfolio value
+
+### Product View
+
+- Product terms
+- Underlying performance
+- Worst underlying
+- Barrier distance
+- Days to expiry
+- Projected payoff
+- Return and annualized return
 
 ### Risk View
-- Portfolio delta by underlying
+
+- Underlying look-through exposure
 - Barrier proximity monitoring
 - Worst-of exposure concentration
+- Product-level and portfolio-level Greeks
+- Correlation sensitivity for multi-asset products
 
 ### Scenario Analysis
-- Correlated equity shocks
-- Path-dependent payoff outcomes
-- Stress testing under different market regimes
+
+- Simulated underlying price paths
+- Mean path with dispersion bands
+- Terminal payoff distribution
+- Probability of physical delivery
+- Scenario P&L distribution
+- Delivered-stock reporting under physical settlement
 
 ---
 
 ## Use Cases
 
-- Structured products portfolio monitoring
-- Risk management for barrier products
-- Scenario analysis and stress testing
-- Educational tool for structured payoff understanding
-- Prototyping structuring ideas and payoff profiles
+- Monitoring structured product portfolios
+- Understanding payoff behavior of barrier reverse convertibles
+- Analyzing worst-of multi-asset structures
+- Stress testing product and portfolio outcomes
+- Estimating downside exposure and physical delivery risk
+- Comparing projected hold-to-maturity value with fair value
+- Building educational tools for structured products and derivatives
+- Prototyping analytics logic for structured product portfolio management
 
 ---
+
 
 ## Installation
 
