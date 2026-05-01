@@ -108,12 +108,17 @@ def render(analytics, df, greeks_df, pf_delta, valuation_date):
     product_table = product_table.merge(fv_cols, on="product_id", how="left")
 
     product_table = product_table[[
-        "product_id", "currency", "total_notional", "maturity_date", "product_type",
-        "underlyings", "cost_ref", "payoff_ref", "pnl_ref", "return_pct",
-        "distance_to_barrier", "fair_value", "fair_value_pct"
+        "product_id", "currency", "current_spot_date", "total_notional",
+        "maturity_date", "product_type",
+        "underlyings", "cost_ref", "weight_pct", "payoff_ref", "pnl_ref",
+        "return_pct", "distance_to_barrier", "fair_value", "fair_value_pct"
     ]].copy()
     product_table["return_pct"]          *= 100
     product_table["distance_to_barrier"] *= 100
+    if "current_spot_date" in product_table.columns:
+        product_table["current_spot_date"] = pd.to_datetime(
+            product_table["current_spot_date"], errors="coerce"
+        ).dt.strftime("%Y-%m-%d")
     product_table = product_table.round(2)
 
     st.dataframe(
@@ -123,11 +128,13 @@ def render(analytics, df, greeks_df, pf_delta, valuation_date):
         column_config={
             "product_id":          "Product ID",
             "currency":            "Original CCY",
+            "current_spot_date":   "Spot Date",
             "total_notional":      st.column_config.NumberColumn("Notional",              format="%.2f"),
             "maturity_date":       "Maturity Date",
             "product_type":        "Product Type",
             "underlyings":         "Underlyings",
             "cost_ref":            st.column_config.NumberColumn(f"Cost ({ref_ccy})",     format="%.2f"),
+            "weight_pct":          st.column_config.NumberColumn("Weight (%)",            format="%.2f"),
             "payoff_ref":          st.column_config.NumberColumn(f"Payoff ({ref_ccy})",   format="%.2f"),
             "pnl_ref":             st.column_config.NumberColumn(f"PnL ({ref_ccy})",      format="%.2f"),
             "return_pct":          st.column_config.NumberColumn("Return (%)",            format="%.2f"),

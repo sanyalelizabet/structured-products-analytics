@@ -1,5 +1,14 @@
 """Multi-factor stress engine — vectorised across paths for Monte Carlo.
 
+Common Random Numbers (CRN) policy
+----------------------------------
+All randomness comes from a :class:`NoiseSampler`.  The engine never
+seeds RNGs itself — there is no scenario-dependent hashing of any kind.
+Sharing one sampler across scenario runs keeps draws identical so
+scenario-to-scenario differences reflect only the scenario parameter
+change.  To request a fresh draw, the caller explicitly calls
+``sampler.regenerate()`` or ``sampler.regenerate(seed=...)``.
+
 Pipeline
 --------
 1. Simulate ``n_paths`` factor paths via correlated mean-reverting GBM:
@@ -39,8 +48,6 @@ Output schema (``run_path_scenario``)
 """
 from __future__ import annotations
 
-import hashlib
-
 import numpy as np
 import pandas as pd
 
@@ -66,6 +73,8 @@ class FactorScenarioEngine:
         n_paths: int = 100,
         noise_sampler: NoiseSampler | None = None,
         years_for_factor_stats: int = 3,
+        fx_rates: dict | None = None,
+        reference_currency: str | None = None,
     ):
         self.portfolio    = portfolio
         self.loadings     = loadings
@@ -74,6 +83,8 @@ class FactorScenarioEngine:
         self.idio_lambda  = float(idio_intensity)
         self.kappa        = float(mean_reversion_kappa)
         self.n_paths      = int(n_paths)
+        self.fx_rates           = fx_rates
+        self.reference_currency = reference_currency
 
         self.factor_codes = list(FACTORS.keys())
 
@@ -102,13 +113,6 @@ class FactorScenarioEngine:
         if isin not in self.loadings:
             return 0.15
         return float(self.loadings[isin]["idio_vol"])
-
-    @staticmethod
-    def _scenario_seed(scenario: dict) -> int:
-        flat = {k: (sorted(v.items()) if isinstance(v, dict) else v)
-                for k, v in scenario.items()}
-        h = hashlib.md5(str(sorted(flat.items())).encode()).hexdigest()
-        return int(h, 16) % (2 ** 31)
 
     def _ensure_sampler(self, n_days: int, all_isins: list[str]) -> NoiseSampler:
         """Return a noise sampler matching the requested dimensions; create
@@ -376,6 +380,10 @@ class FactorScenarioEngine:
             "mean_final_spot":  float(final_spot_used.mean()),
             "mean_strike":      float(strike_used.mean()),
             "delivered_underlying": _mode_string(delivered_under),
+            # Physical-settlement delivery date (item 5).  Equals maturity
+            # when at least one path settles physically; None otherwise.
+            "delivery_date":    (str(row["maturity_date"])
+                                  if (delivered_shares > 0).any() else None),
 
             # raw samples (for distribution plots)
             "pnl_samples":    pnl,
@@ -486,6 +494,7 @@ class FactorScenarioEngine:
                         total_fractional_cash=("mean_fractional_cash", "sum"),
                         strike=("mean_strike", "mean"),
                         price=("mean_final_spot", "mean"),
+                        final_delivery_date=("delivery_date", "max"),
                     )
                 )
                 delivered_stocks["market_value"] = delivered_stocks["total_shares"] * delivered_stocks["price"]
@@ -496,19 +505,31 @@ class FactorScenarioEngine:
                 delivered_stocks = delivered_stocks[[
                     "delivered_underlying", "total_shares", "strike", "price", "currency",
                     "market_value", "total_fractional_cash", "total_value_incl_cash",
-                    "cost", "pnl", "return_pct"
+                    "cost", "pnl", "return_pct", "final_delivery_date",
                 ]]
             else:
                 delivered_stocks = pd.DataFrame()
 
+            # Reference-currency aggregation (item 4)
+            from src.scenario_engine import _aggregate_to_reference
+            pnl_samples_ref, pf_scenario_ref = _aggregate_to_reference(
+                pnl_samples_by_ccy,
+                cost_by_ccy,
+                self.fx_rates,
+                self.reference_currency,
+            )
+
             return {
                 "product_df":          product_df,
                 "pf_scenario_per_ccy": pf_scenario_per_ccy,
+                "pf_scenario_ref":     pf_scenario_ref,
                 "cash_positions":      cash_positions,
                 "delivered_stocks":    delivered_stocks,
                 "asset_paths":         asset_paths,
                 "factor_paths":        factor_paths,
                 "pnl_samples_by_ccy":  pnl_samples_by_ccy,
+                "pnl_samples_ref":     pnl_samples_ref,
+                "reference_currency":  self.reference_currency,
                 "n_paths":             self.n_paths,
             }
         finally:

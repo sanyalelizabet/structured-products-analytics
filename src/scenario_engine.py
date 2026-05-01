@@ -17,13 +17,19 @@ Pipeline
 3. For each product, run the reverse-convertible payoff once *per path*,
    then aggregate (mean, median, 5/95-percentile, ES, std).
 
-Common Random Numbers
----------------------
-A :class:`NoiseSampler` (cached at the session level) supplies per-ISIN
-standard-normal noise.  Re-using the sampler across scenarios keeps the
-underlying random realisation identical so scenario-to-scenario
-differences reflect only the scenario change — the basis of clean
-sensitivity work.
+Common Random Numbers (CRN) policy
+----------------------------------
+All randomness comes from a :class:`NoiseSampler`.  The engine never
+seeds RNGs itself — there is no scenario-dependent hashing of any kind.
+
+* Sharing one ``NoiseSampler`` across scenario runs keeps the underlying
+  Gaussian draws identical, so scenario-to-scenario differences reflect
+  only the scenario parameter change (the foundation of clean
+  sensitivity / what-if analysis).
+* To request a fresh draw, the *caller* explicitly calls
+  ``sampler.regenerate()`` (bumps seed deterministically) or
+  ``sampler.regenerate(seed=...)`` (sets an explicit seed).  The engine
+  itself is a pure consumer of the cached tensors.
 
 Output schema (``run_path_scenario``)
 -------------------------------------
@@ -31,8 +37,6 @@ Identical to ``FactorScenarioEngine.run_path_scenario`` so the two
 stress views can share rendering helpers.
 """
 from __future__ import annotations
-
-import hashlib
 
 import numpy as np
 import pandas as pd
@@ -56,6 +60,8 @@ class ScenarioEngine:
         mean_reversion_kappa: float = 0.5,
         n_paths: int = 1,
         noise_sampler: NoiseSampler | None = None,
+        fx_rates: dict | None = None,
+        reference_currency: str | None = None,
     ):
         self.portfolio       = portfolio
         self.beta_map        = beta_map
@@ -67,6 +73,14 @@ class ScenarioEngine:
         self.kappa     = float(mean_reversion_kappa)
         self.n_paths   = int(n_paths)
         self.noise_sampler = noise_sampler
+
+        # Optional FX context — when both fx_rates and reference_currency are
+        # supplied, run_path_scenario adds `pnl_samples_ref` and
+        # `pf_scenario_ref` to its output (aggregated in ref ccy across all
+        # native currencies).  fx_rates keys are (from_ccy, ref_ccy) tuples
+        # — same convention as PortfolioAnalytics.fx_rates.
+        self.fx_rates           = fx_rates
+        self.reference_currency = reference_currency
 
     # ────────────────────────────────────────────────────────────── helpers
 
@@ -317,6 +331,11 @@ class ScenarioEngine:
             "mean_final_spot":       float(final_spot_used.mean()),
             "mean_strike":           float(strike_used.mean()),
             "delivered_underlying":  _mode_string(delivered_under),
+            # Physical-settlement delivery date — equal to maturity for any
+            # path that settles physically.  None when no path is physical
+            # (purely cash-settled product on this scenario).
+            "delivery_date":         (str(row["maturity_date"])
+                                       if (delivered_shares > 0).any() else None),
 
             "pnl_samples":    pnl,
             "return_samples": return_pct,
@@ -400,6 +419,7 @@ class ScenarioEngine:
                     total_fractional_cash=("mean_fractional_cash", "sum"),
                     strike=("mean_strike", "mean"),
                     price=("mean_final_spot", "mean"),
+                    final_delivery_date=("delivery_date", "max"),
                 )
             )
             delivered_stocks["market_value"]          = delivered_stocks["total_shares"] * delivered_stocks["price"]
@@ -410,18 +430,29 @@ class ScenarioEngine:
             delivered_stocks = delivered_stocks[[
                 "delivered_underlying", "total_shares", "strike", "price", "currency",
                 "market_value", "total_fractional_cash", "total_value_incl_cash",
-                "cost", "pnl", "return_pct"
+                "cost", "pnl", "return_pct", "final_delivery_date",
             ]]
         else:
             delivered_stocks = pd.DataFrame()
 
+        # ── Reference-currency aggregation (item 4) ─────────────────────
+        pnl_samples_ref, pf_scenario_ref = _aggregate_to_reference(
+            pnl_samples_by_ccy,
+            cost_by_ccy,
+            self.fx_rates,
+            self.reference_currency,
+        )
+
         return {
             "product_df":          product_df,
             "pf_scenario_per_ccy": pf_scenario_per_ccy,
+            "pf_scenario_ref":     pf_scenario_ref,
             "cash_positions":      cash_positions,
             "delivered_stocks":    delivered_stocks,
             "asset_paths":         asset_paths,
             "pnl_samples_by_ccy":  pnl_samples_by_ccy,
+            "pnl_samples_ref":     pnl_samples_ref,
+            "reference_currency":  self.reference_currency,
             "n_paths":             self.n_paths,
         }
 
@@ -471,3 +502,65 @@ def date_range_for_n_days(today: pd.Timestamp, n_days: int) -> pd.DatetimeIndex:
     """Recover the business-day grid given today and a length — stable inverse."""
     # Using bdate_range with periods is exactly stable.
     return pd.bdate_range(start=today, periods=n_days)
+
+
+def _aggregate_to_reference(pnl_samples_by_ccy, cost_by_ccy,
+                             fx_rates, reference_currency):
+    """Aggregate per-currency P&L samples into a single reference-currency
+    distribution.
+
+    Returns
+    -------
+    pnl_samples_ref : np.ndarray | None
+        Shape ``(n_paths,)`` — total portfolio P&L per path in ref ccy.
+        ``None`` when ``fx_rates`` or ``reference_currency`` is missing.
+    pf_scenario_ref : pd.DataFrame
+        One-row summary in reference currency (mean / median / p5 / p95 /
+        es5 / std + total_cost_ref + portfolio return percentages).
+        Empty DataFrame when no FX context.
+
+    FX convention matches ``PortfolioAnalytics.fx_rates``:
+    ``fx_rates[(ccy, ref)] = (ccy → ref)`` multiplier.
+    """
+    if not pnl_samples_by_ccy or fx_rates is None or reference_currency is None:
+        return None, pd.DataFrame()
+
+    def _rate(ccy):
+        if ccy == reference_currency:
+            return 1.0
+        rate = fx_rates.get((ccy, reference_currency))
+        if rate is None:
+            raise ValueError(
+                f"Missing FX rate for {ccy} → {reference_currency} in scenario aggregation."
+            )
+        return float(rate)
+
+    # Sum native-ccy per-path P&L vectors after FX conversion.
+    n_paths = next(iter(pnl_samples_by_ccy.values())).shape[0]
+    total_ref = np.zeros(n_paths)
+    cost_ref = 0.0
+    for ccy, samples in pnl_samples_by_ccy.items():
+        r = _rate(ccy)
+        total_ref += samples * r
+        cost_ref  += cost_by_ccy.get(ccy, 0.0) * r
+
+    p5     = float(np.percentile(total_ref, 5))
+    p95    = float(np.percentile(total_ref, 95))
+    es5    = (float(total_ref[total_ref <= p5].mean())
+              if len(total_ref) >= 20 else float(total_ref.min()))
+    pf_row = {
+        "reference_currency": reference_currency,
+        "n_currencies":       len(pnl_samples_by_ccy),
+        "total_cost_ref":     cost_ref,
+        "pnl_mean":   float(total_ref.mean()),
+        "pnl_median": float(np.median(total_ref)),
+        "pnl_p5":     p5,
+        "pnl_p95":    p95,
+        "pnl_es5":    es5,
+        "pnl_std":    float(total_ref.std(ddof=1)) if len(total_ref) > 1 else 0.0,
+        "portfolio_return_mean_pct":   (total_ref.mean()  / cost_ref * 100) if cost_ref else 0.0,
+        "portfolio_return_median_pct": (np.median(total_ref) / cost_ref * 100) if cost_ref else 0.0,
+        "portfolio_return_p5_pct":     (p5  / cost_ref * 100) if cost_ref else 0.0,
+        "portfolio_return_p95_pct":    (p95 / cost_ref * 100) if cost_ref else 0.0,
+    }
+    return total_ref, pd.DataFrame([pf_row])

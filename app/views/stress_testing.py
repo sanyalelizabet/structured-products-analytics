@@ -32,7 +32,7 @@ _SAMPLER_KEY = "single_factor_noise_sampler"
 
 
 def render(portfolio, corr_df, beta_map, vol_map_implied, vol_map_realised,
-           risk_free_rates):
+           risk_free_rates, fx_rates=None, reference_currency=None):
     st.subheader("Stress Testing — Single-Factor Path Engine (multi-path MC)")
     st.caption(
         "Path defined as drift → shock(s) → drift to maturity, vectorised "
@@ -110,6 +110,7 @@ def render(portfolio, corr_df, beta_map, vol_map_implied, vol_map_realised,
         portfolio=portfolio, beta_map=beta_map, vol_map=vol_map,
         risk_free_rates=risk_free_rates,
         n_paths=n_paths, noise_sampler=sampler,
+        fx_rates=fx_rates, reference_currency=reference_currency,
     )
     res = engine.run_path_scenario(scenario, corr_df=corr_df)
     st.session_state[_SAMPLER_KEY] = engine.noise_sampler
@@ -117,6 +118,7 @@ def render(portfolio, corr_df, beta_map, vol_map_implied, vol_map_realised,
     # ── Output ───────────────────────────────────────────────────────────
     st.markdown("---")
     _render_portfolio_summary(res)
+    _render_portfolio_summary_ref(res)
 
     left_col, right_col = st.columns([2, 3])
 
@@ -139,6 +141,7 @@ def render(portfolio, corr_df, beta_map, vol_map_implied, vol_map_realised,
             market_shock=market_shock,
         )
         _render_pnl_distribution(res["pnl_samples_by_ccy"])
+        _render_pnl_distribution_ref(res)
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -392,6 +395,79 @@ def _render_pnl_distribution(samples_by_ccy: dict):
 # Tables
 # ──────────────────────────────────────────────────────────────────────────
 
+def _render_portfolio_summary_ref(res):
+    """Reference-currency portfolio summary (item 4).  Skipped silently
+    when no FX context was passed to the engine."""
+    pf_ref = res.get("pf_scenario_ref")
+    if pf_ref is None or len(pf_ref) == 0:
+        return
+    ccy = res.get("reference_currency", "")
+    st.markdown(f"### Portfolio Stress Summary — {ccy} (reference currency)")
+    st.dataframe(
+        pf_ref.round(2).rename(columns={
+            "reference_currency":           "Reference CCY",
+            "n_currencies":                 "# Currencies",
+            "total_cost_ref":               f"Total Cost ({ccy})",
+            "pnl_mean":                     "PnL Mean",
+            "pnl_median":                   "PnL Median",
+            "pnl_p5":                       "PnL 5%",
+            "pnl_p95":                      "PnL 95%",
+            "pnl_es5":                      "ES (worst 5%)",
+            "portfolio_return_mean_pct":    "Return Mean (%)",
+            "portfolio_return_p5_pct":      "Return 5% (%)",
+        }),
+        width="stretch", hide_index=True,
+    )
+
+
+def _render_pnl_distribution_ref(res):
+    """Histogram + metrics for the per-path total P&L in the reference
+    currency (item 4)."""
+    samples = res.get("pnl_samples_ref")
+    if samples is None or len(samples) == 0:
+        return
+    ccy = res.get("reference_currency", "")
+
+    st.markdown(f"### Portfolio P&L Distribution — {ccy} (reference currency)")
+    mean   = float(samples.mean())
+    median = float(np.median(samples))
+    p5     = float(np.percentile(samples, 5))
+    p95    = float(np.percentile(samples, 95))
+    es5    = (float(samples[samples <= p5].mean())
+              if len(samples) >= 20 else float(samples.min()))
+
+    fig = go.Figure()
+    fig.add_trace(go.Histogram(x=samples, nbinsx=30, marker_color="#76B7B2", opacity=0.85))
+    for label, value, color in [
+        ("Mean",   mean,   "#EDC948"),
+        ("Median", median, "#4E79A7"),
+        ("5%",     p5,     _SHOCK_COLOR),
+        ("95%",    p95,    "#59A14F"),
+    ]:
+        fig.add_vline(
+            x=value,
+            line=dict(color=color, width=1.5, dash="dash"),
+            annotation_text=f"{label}: {value:,.0f}",
+            annotation_position="top",
+            annotation_font=dict(color=color, size=10),
+        )
+    fig.update_layout(
+        template="plotly_dark", height=320,
+        margin=dict(t=50, b=40, l=40, r=20),
+        xaxis_title=f"Portfolio P&L ({ccy})",
+        yaxis_title="Number of paths",
+        showlegend=False,
+    )
+    st.plotly_chart(fig, width="stretch")
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Mean P&L",       f"{mean:,.0f}")
+    c2.metric("Median P&L",     f"{median:,.0f}")
+    c3.metric("5% P&L",         f"{p5:,.0f}")
+    c4.metric("95% P&L",        f"{p95:,.0f}")
+    c5.metric("ES (worst 5%)",  f"{es5:,.0f}")
+
+
 def _render_portfolio_summary(res):
     st.markdown("### Portfolio Stress Summary")
     pf = res["pf_scenario_per_ccy"].copy().round(2)
@@ -451,6 +527,11 @@ def _render_delivered_stocks(res):
         return
     df = delivered.copy()
     df["return_pct"] = df["return_pct"] * 100
+    # Format delivery date for readability
+    if "final_delivery_date" in df.columns:
+        df["final_delivery_date"] = pd.to_datetime(
+            df["final_delivery_date"], errors="coerce"
+        ).dt.strftime("%Y-%m-%d")
     df = df.round(2)
     st.dataframe(
         df.rename(columns={
@@ -465,6 +546,7 @@ def _render_delivered_stocks(res):
             "cost":                  "Cost",
             "pnl":                   "PnL",
             "return_pct":            "Return (%)",
+            "final_delivery_date":   "Final Delivery Date",
         }),
         width="stretch", hide_index=True,
     )

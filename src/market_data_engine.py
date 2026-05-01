@@ -100,23 +100,38 @@ class MarketDataEngine:
         return db
 
     def update_spots(self, portfolio):
+        """Refresh ``current_spots`` from the local price DB.
+
+        Also writes ``current_spot_dates`` — one date per underlying, taken
+        from the same row that produced the spot.  Existing portfolios that
+        do not carry ``current_spot_dates`` get the column added on the fly.
+        """
         portfolio = portfolio.copy()
         db = self.load_db()
-    
+
+        if "current_spot_dates" not in portfolio.columns:
+            portfolio["current_spot_dates"] = [
+                [None] * len(row["underlying_isins"])
+                for _, row in portfolio.iterrows()
+            ]
+
         for i, row in portfolio.iterrows():
-            new_spots = []
-    
+            new_spots: list[float] = []
+            new_dates: list = []
+
             for isin in row["underlying_isins"]:
                 prices = db[db["isin"] == isin].sort_values("date")
-    
+
                 if prices.empty:
                     raise ValueError(f"No stored price found for ISIN {isin}")
-    
-                latest_price = prices.iloc[-1]["price"]
-                new_spots.append(latest_price)
-    
-            portfolio.at[i, "current_spots"] = new_spots
-    
+
+                latest = prices.iloc[-1]
+                new_spots.append(float(latest["price"]))
+                new_dates.append(pd.Timestamp(latest["date"]).normalize())
+
+            portfolio.at[i, "current_spots"]      = new_spots
+            portfolio.at[i, "current_spot_dates"] = new_dates
+
         return portfolio
 
     def fetch_monthly_prices(self, isin_ticker_map, years=6, force_refresh=False):

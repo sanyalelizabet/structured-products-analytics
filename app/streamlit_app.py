@@ -186,9 +186,18 @@ elif view == "Portfolio":
     portfolio_view.render(analytics, df, greeks_df, pf_delta, valuation_date)
 
 elif view == "Stress Testing":
-    stress_testing.render(portfolio, corr_df, beta_map, vol_map_implied, vol_map_realised, risk_free_rates)
+    stress_testing.render(
+        portfolio, corr_df, beta_map, vol_map_implied, vol_map_realised,
+        risk_free_rates,
+        fx_rates=analytics.fx_rates,
+        reference_currency=analytics.reference_currency,
+    )
 
 elif view == "Factor Stress":
     loadings      = build_factor_loadings(portfolio)
     factor_engine = get_factor_engine()
-    factor_stress.render(portfolio, loadings, factor_engine, risk_free_rates)
+    factor_stress.render(
+        portfolio, loadings, factor_engine, risk_free_rates,
+        fx_rates=analytics.fx_rates,
+        reference_currency=analytics.reference_currency,
+    )

@@ -25,6 +25,8 @@ class PortfolioAnalytics:
             rc = ReverseConvertible(row, price_db=self.price_db)
             s = rc.summary()
 
+            spot_date = _latest_spot_date(row)
+
             rows.append({
                 "product_id": row["product_id"],
                 "product_type": row["product_type"],
@@ -41,6 +43,7 @@ class PortfolioAnalytics:
                 "n_underlyings": len(row["underlyings"]),
                 "initial_fixing_date": row["initial_fixing_date"],
                 "maturity_date": row["maturity_date"],
+                "current_spot_date": spot_date,
 
                 "performance": s["performance"],
                 "barrier_breached": s["barrier_breached"],
@@ -60,7 +63,20 @@ class PortfolioAnalytics:
                 "break_even": s["break_even"]
             })
 
-        self.product_df = pd.DataFrame(rows)
+        product_df = pd.DataFrame(rows)
+
+        # Reference-currency cost & weight (item 3)
+        product_df["total_cost_ref"] = product_df.apply(
+            lambda r: self.convert_to_reference(r["total_cost"], r["currency"]),
+            axis=1,
+        )
+        total_ref = product_df["total_cost_ref"].sum()
+        product_df["weight_pct"] = (
+            product_df["total_cost_ref"] / total_ref * 100.0
+            if total_ref else np.nan
+        )
+
+        self.product_df = product_df
         return self.product_df
     def _get_fx_rates(self):
         url = f"https://api.frankfurter.app/latest?from={self.reference_currency}"
@@ -449,5 +465,20 @@ class PortfolioAnalytics:
         if self.product_df is None:
             raise ValueError("Run build_product_analytics() first.")
         return self.product_df
-    
-    
+
+
+def _latest_spot_date(row):
+    """Return the latest non-null `current_spot_dates` entry for a portfolio
+    row, or None if the column is missing / all entries are null.
+
+    Backward-compatible: portfolios without the column return None.
+    """
+    if "current_spot_dates" not in row.index:
+        return None
+    dates = row["current_spot_dates"]
+    if dates is None:
+        return None
+    valid = [pd.Timestamp(d) for d in dates if d is not None and not pd.isna(d)]
+    if not valid:
+        return None
+    return max(valid)
