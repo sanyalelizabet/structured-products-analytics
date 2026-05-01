@@ -159,7 +159,6 @@ The framework is modular and separates product logic, portfolio analytics, marke
 - Simulated underlying price paths
 - Mean path with dispersion bands
 - Terminal payoff distribution
-- Probability of physical delivery
 - Scenario P&L distribution
 - Delivered-stock reporting under physical settlement
 
