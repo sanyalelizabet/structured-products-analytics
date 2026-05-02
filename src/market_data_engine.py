@@ -15,11 +15,38 @@ class MarketDataEngine:
                        "strike", "last_price", "bid", "ask", "iv",
                        "volume", "open_interest"]
 
+    RATES_COLUMNS = ["date", "currency", "tenor", "ticker",
+                     "yield_pct", "yield"]
+
+    # Default GBOND ticker per (currency, tenor).  Extend by inserting
+    # additional tenors as needed.
+    #
+    # CHF uses the 10Y Confederation bond because EOD's GBOND virtual
+    # exchange does not carry CH3M (returns 404 on history, all-"NA" on
+    # real-time).  CH10Y is the only reliable point on the Swiss curve
+    # available through this feed.
+    GBOND_TICKERS = {
+        ("USD", "3M"):  "US3M.GBOND",
+        ("CHF", "10Y"): "CH10Y.GBOND",
+        ("EUR", "3M"):  "EU3M.GBOND",
+        ("GBP", "3M"):  "GB3M.GBOND",
+    }
+
+    # Per-currency preferred tenor — used when a caller doesn't pin one
+    # explicitly.  Keep this aligned with GBOND_TICKERS.
+    DEFAULT_TENORS = {
+        "USD": "3M",
+        "CHF": "10Y",
+        "EUR": "3M",
+        "GBP": "3M",
+    }
+
     def __init__(self, client, db_path="data/prices.csv"):
         self.client = client
         self.db_path = Path(db_path)
-        self.master_path = self.db_path.parent / "securities_master_data.csv"
+        self.master_path  = self.db_path.parent / "securities_master_data.csv"
         self.options_path = self.db_path.parent / "options.csv"
+        self.rates_path   = self.db_path.parent / "risk_free_rates.csv"
 
 
 
@@ -133,6 +160,121 @@ class MarketDataEngine:
             portfolio.at[i, "current_spot_dates"] = new_dates
 
         return portfolio
+
+    # ─────────────────────────────────────────
+    # Risk-free rates (GBOND)
+    # ─────────────────────────────────────────
+
+    def load_rates_db(self) -> pd.DataFrame:
+        """Load the persisted risk-free-rates DB. Empty frame if absent."""
+        if self.rates_path.exists():
+            return pd.read_csv(self.rates_path, parse_dates=["date"])
+        return pd.DataFrame(columns=self.RATES_COLUMNS)
+
+    def save_rates_db(self, df: pd.DataFrame) -> None:
+        self.rates_path.parent.mkdir(parents=True, exist_ok=True)
+        df.to_csv(self.rates_path, index=False)
+
+    def fetch_latest_rates(self, currencies, tenor: str | None = None) -> pd.DataFrame:
+        """Refresh latest GBOND yields for ``currencies``.
+
+        ``tenor`` is the point on the curve to fetch.  When ``None``
+        (default) each currency uses its preferred tenor from
+        :attr:`DEFAULT_TENORS` — which is "3M" for USD/EUR/GBP and
+        "10Y" for CHF, since EOD does not carry CH3M.
+
+        Behaviour mirrors :meth:`fetch_latest_prices`:
+        * Skip the API call when the previous business day is already in
+          the DB for that (ccy, tenor).
+        * Skip when EOD's quote date is already in the DB.
+        * On any API failure, log and continue — the DB itself is the
+          fallback (last available row remains the active rate).
+
+        Returns the full rates DB (after any append), in long form:
+        ``date, currency, tenor, ticker, yield_pct, yield``.
+        """
+        db = self.load_rates_db()
+        prev_trading_day = (pd.Timestamp.today() - BDay(1)).normalize()
+
+        rows = []
+        for ccy in currencies:
+            ccy_tenor = tenor or self.DEFAULT_TENORS.get(ccy, "3M")
+            ticker = self.GBOND_TICKERS.get((ccy, ccy_tenor))
+            if ticker is None:
+                log.warning("No GBOND ticker mapped for %s %s — skipping",
+                            ccy, ccy_tenor)
+                continue
+
+            already_recent = (
+                (db["currency"] == ccy)
+                & (db["tenor"] == ccy_tenor)
+                & (db["date"] == prev_trading_day)
+            ).any()
+            if already_recent:
+                continue
+
+            try:
+                quote = self.client.get_bond_yield(ticker)
+                quote_date = pd.to_datetime(quote["date"]).normalize()
+
+                exists_today = (
+                    (db["currency"] == ccy)
+                    & (db["tenor"] == ccy_tenor)
+                    & (db["date"] == quote_date)
+                ).any()
+                if exists_today:
+                    continue
+
+                yield_pct = float(quote["yield_pct"])
+                rows.append({
+                    "date":      quote_date,
+                    "currency":  ccy,
+                    "tenor":     ccy_tenor,
+                    "ticker":    ticker,
+                    "yield_pct": yield_pct,
+                    "yield":     yield_pct / 100.0,
+                })
+            except Exception as e:
+                log.warning("Bond yield fetch failed for %s (%s): %s",
+                            ticker, ccy, e)
+                continue
+
+        if rows:
+            new_df = pd.DataFrame(rows)
+            db = pd.concat([db, new_df], ignore_index=True)
+            db = db.drop_duplicates(subset=["currency", "tenor", "date"], keep="last")
+            db = db.sort_values(["currency", "tenor", "date"]).reset_index(drop=True)
+            self.save_rates_db(db)
+
+        return db
+
+    def build_risk_free_rate_map(
+        self, currencies, tenor: str | None = None,
+    ) -> dict[str, float]:
+        """Build the ``{currency: rate}`` map consumed by pricers/engines.
+
+        Reads the rates DB and picks the latest row per requested
+        currency.  When ``tenor`` is ``None``, the per-currency default
+        from :attr:`DEFAULT_TENORS` is used (3M for most majors, 10Y for
+        CHF since EOD doesn't carry CH3M).
+
+        Yields are returned as **decimals** (e.g. ``0.0435``) — same
+        convention as the legacy static dict.  Currencies with no rows
+        in the DB are simply omitted.
+        """
+        db = self.load_rates_db()
+        if db.empty:
+            return {}
+
+        result: dict[str, float] = {}
+        for ccy in currencies:
+            ccy_tenor = tenor or self.DEFAULT_TENORS.get(ccy, "3M")
+            sub = db[(db["currency"] == ccy) & (db["tenor"] == ccy_tenor)]
+            if sub.empty:
+                continue
+            latest = sub.sort_values("date").iloc[-1]
+            result[ccy] = float(latest["yield"])
+        return result
 
     def fetch_monthly_prices(self, isin_ticker_map, years=6, force_refresh=False):
         """

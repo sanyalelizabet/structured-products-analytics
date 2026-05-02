@@ -291,17 +291,17 @@ def _hex_to_rgba(hex_color: str, alpha: float) -> str:
 
 
 def _fan_band_traces(df: pd.DataFrame, color: str, name: str):
-    """Two transparent traces forming a 5-95 percentile band.  Both share
+    """Two transparent traces forming a median ± 1σ band.  Both share
     ``legendgroup=name`` with the median trace so legend clicks toggle the
     whole asset (median + band)."""
     return [
         go.Scatter(
-            x=df["date"], y=df["p95"],
+            x=df["date"], y=df["upper_1sd"],
             mode="lines", line=dict(width=0),
             legendgroup=name, showlegend=False, hoverinfo="skip",
         ),
         go.Scatter(
-            x=df["date"], y=df["p5"],
+            x=df["date"], y=df["lower_1sd"],
             mode="lines", line=dict(width=0),
             fill="tonexty", fillcolor=_hex_to_rgba(color, 0.18),
             legendgroup=name, showlegend=False, hoverinfo="skip",
@@ -337,9 +337,9 @@ def _add_shock_markers(fig: go.Figure, shock_dates):
 
 
 def _plot_factor_paths(factor_paths: dict, shock_dates):
-    """Median + 5-95 percentile fan for each factor index.  Two-pass draw:
-    all bands first, then all median lines on top, so no asset's median
-    gets visually buried under another asset's band."""
+    """Median ± 1σ fan for each factor index.  Two-pass draw: all bands
+    first, then all median lines on top, so no asset's median gets
+    visually buried under another asset's band."""
     fig = go.Figure()
     items = list(factor_paths.items())
     # Pass 1: bands
@@ -356,7 +356,7 @@ def _plot_factor_paths(factor_paths: dict, shock_dates):
         template="plotly_dark", height=480,
         margin=dict(t=40, b=40, l=40, r=20),
         xaxis_title="Date",
-        yaxis_title="Factor Index (base 100, median + 5-95%)",
+        yaxis_title="Factor Index (base 100, median ± 1σ)",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
         hovermode="x unified",
     )
@@ -382,10 +382,12 @@ def _plot_asset_paths(asset_paths: dict, portfolio: pd.DataFrame, shock_dates):
         color = _ASSET_PALETTE[idx % len(_ASSET_PALETTE)]
         spot0 = float(df["mean"].iloc[0])
         norm = pd.DataFrame({
-            "date":   df["date"],
-            "median": df["median"] / spot0 * 100,
-            "p5":     df["p5"]     / spot0 * 100,
-            "p95":    df["p95"]    / spot0 * 100,
+            "date":      df["date"],
+            "median":    df["median"]    / spot0 * 100,
+            "p5":        df["p5"]        / spot0 * 100,
+            "p95":       df["p95"]       / spot0 * 100,
+            "lower_1sd": df["lower_1sd"] / spot0 * 100,
+            "upper_1sd": df["upper_1sd"] / spot0 * 100,
         })
         norm_assets.append((isin, name, color, norm, spot0))
 
@@ -416,7 +418,7 @@ def _plot_asset_paths(asset_paths: dict, portfolio: pd.DataFrame, shock_dates):
         template="plotly_dark", height=520,
         margin=dict(t=40, b=40, l=40, r=120),
         xaxis_title="Date",
-        yaxis_title="Normalised Price (base 100, median + 5-95%)",
+        yaxis_title="Normalised Price (base 100, median ± 1σ)",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
         hovermode="x unified",
     )

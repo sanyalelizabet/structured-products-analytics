@@ -544,16 +544,22 @@ class FactorScenarioEngine:
 def _path_summary_df(date_range, paths_2d: np.ndarray) -> pd.DataFrame:
     """Aggregate a (n_paths, n_days) tensor into a per-date summary DataFrame.
 
-    Columns: ``date, mean, median, p5, p95``.  When n_paths == 1, all four
-    statistics collapse to the single path so downstream code can treat
-    single-path and multi-path results uniformly.
+    Columns: ``date, mean, median, p5, p95, std, lower_1sd, upper_1sd``.
+    When n_paths == 1, all stats collapse to the single path (std = 0)
+    so downstream code can treat single-path and multi-path results
+    uniformly.
     """
+    median = np.median(paths_2d, axis=0)
+    std = paths_2d.std(axis=0, ddof=0)
     return pd.DataFrame({
-        "date":   date_range,
-        "mean":   paths_2d.mean(axis=0),
-        "median": np.median(paths_2d, axis=0),
-        "p5":     np.percentile(paths_2d, 5,  axis=0),
-        "p95":    np.percentile(paths_2d, 95, axis=0),
+        "date":      date_range,
+        "mean":      paths_2d.mean(axis=0),
+        "median":    median,
+        "p5":        np.percentile(paths_2d, 5,  axis=0),
+        "p95":       np.percentile(paths_2d, 95, axis=0),
+        "std":       std,
+        "lower_1sd": median - std,
+        "upper_1sd": median + std,
     })
 
 

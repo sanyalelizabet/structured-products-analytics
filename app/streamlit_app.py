@@ -16,7 +16,8 @@ from src.correlation_engine import CorrelationEngine
 from src.beta_engine import BetaEngine
 from src.factor_engine import FactorEngine
 from src.factor_loadings_engine import FactorLoadingsEngine
-from data.reference_data import beta_map as beta_map_static, risk_free_rates
+from data.reference_data import beta_map as beta_map_static
+from data.reference_data import risk_free_rates as risk_free_rates_static
 from src.yahoo_client import YahooClient
 from src.pricing.monte_carlo import MonteCarloPricer
 from data.portfolio import portfolio
@@ -61,6 +62,30 @@ def fetch_implied_vols(_portfolio):
         st.warning(f"Could not build implied vol map, falling back to static vols. {e}")
         from data.reference_data import vol_map as vol_map_static
         return vol_map_static
+
+@st.cache_data(ttl=3600)
+def fetch_risk_free_rates(_portfolio, currencies=("CHF", "USD", "EUR", "GBP"),
+                          tenor: str = "3M"):
+    """Refresh GBOND yields and return a {currency: rate} map.
+
+    The rates DB on disk is the authoritative source: any successful API
+    pull appends a fresh row, and ``build_risk_free_rate_map`` always
+    reads the most recent stored value per currency.  When the API call
+    fails we silently fall back to the previous CSV row.  As a final
+    safety net (e.g. first run with no DB and no network), the static
+    dict in ``data/reference_data.py`` is layered underneath.
+    """
+    engine = get_market_engine()
+    try:
+        engine.fetch_latest_rates(list(currencies), tenor=tenor)
+    except Exception as e:
+        st.warning(f"Could not refresh risk-free rates from EOD. {e}")
+
+    dynamic = engine.build_risk_free_rate_map(list(currencies), tenor=tenor)
+    # Layer onto the static dict for any currency missing from the DB.
+    rates = {**risk_free_rates_static, **dynamic}
+    return rates
+
 
 @st.cache_data(ttl=3600)
 def fetch_realised_vols(_portfolio):
@@ -168,6 +193,8 @@ beta_map             = build_beta_map(portfolio)
 
 vol_map_implied      = fetch_implied_vols(portfolio)
 vol_map_realised     = fetch_realised_vols(portfolio)
+
+risk_free_rates      = fetch_risk_free_rates(portfolio)
 
 vol_map              = vol_map_implied
 fv_df               = compute_fair_values(portfolio, corr_df, vol_map, risk_free_rates)

@@ -478,13 +478,24 @@ class ScenarioEngine:
 # ──────────────────────────────────────────────────────────────────────────
 
 def _path_summary_df(date_range, paths_2d: np.ndarray) -> pd.DataFrame:
-    """Aggregate a (n_paths, n_days) tensor into per-date summary stats."""
+    """Aggregate a (n_paths, n_days) tensor into per-date summary stats.
+
+    Includes both percentile (p5/p95) and ±1σ band columns so plot
+    helpers can render either confidence-band style.  ``ddof=0`` is used
+    for the std so a single path collapses to a degenerate band on the
+    median (matching the existing single-path collapse for percentiles).
+    """
+    median = np.median(paths_2d, axis=0)
+    std = paths_2d.std(axis=0, ddof=0)
     return pd.DataFrame({
-        "date":   date_range,
-        "mean":   paths_2d.mean(axis=0),
-        "median": np.median(paths_2d, axis=0),
-        "p5":     np.percentile(paths_2d, 5,  axis=0),
-        "p95":    np.percentile(paths_2d, 95, axis=0),
+        "date":      date_range,
+        "mean":      paths_2d.mean(axis=0),
+        "median":    median,
+        "p5":        np.percentile(paths_2d, 5,  axis=0),
+        "p95":       np.percentile(paths_2d, 95, axis=0),
+        "std":       std,
+        "lower_1sd": median - std,
+        "upper_1sd": median + std,
     })
 
 

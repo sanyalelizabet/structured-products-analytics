@@ -39,6 +39,48 @@ _RETRY = retry(
 )
 
 
+def _numeric_or_none(value) -> float | None:
+    """Return ``float(value)`` when meaningful, else ``None``.
+
+    EOD frequently returns the literal string ``"NA"`` (or a NaN float)
+    for fields that aren't quoting yet — both must coerce to ``None``
+    rather than blowing up the caller.
+    """
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    if f != f:  # NaN
+        return None
+    return f
+
+
+def _parse_eod_date(data: dict) -> datetime | None:
+    """Extract a timezone-naive ``datetime`` from an EOD real-time payload.
+
+    EOD's real-time endpoint returns ``timestamp`` as a unix epoch — but
+    for some virtual exchanges (notably GBOND) the field is a *string*,
+    which crashes :func:`datetime.utcfromtimestamp`.  We accept either,
+    and fall back to the ``date`` string if no usable timestamp is
+    present, returning ``None`` only when the payload has neither.
+    """
+    ts = data.get("timestamp")
+    if ts is not None:
+        try:
+            return datetime.utcfromtimestamp(int(float(ts)))
+        except (TypeError, ValueError):
+            pass
+
+    date_str = data.get("date")
+    if date_str:
+        try:
+            return datetime.strptime(str(date_str)[:10], "%Y-%m-%d")
+        except ValueError:
+            pass
+
+    return None
+
+
 def _request_json(url: str, params: dict) -> object:
     """GET ``url`` and return parsed JSON, translating failures to typed errors.
 
@@ -92,13 +134,10 @@ class EODClient:
                 f"No price returned for {ticker}: {data}"
             )
 
-        ts = data.get("timestamp")
-        market_timestamp = datetime.utcfromtimestamp(ts) if ts else None
-
         return {
             "ticker": ticker,
             "price": float(data["close"]),
-            "date": market_timestamp,
+            "date": _parse_eod_date(data),
             "source": "EOD",
         }
 
@@ -169,6 +208,108 @@ class EODClient:
                 "date": row["date"],
                 "adjusted_close": float(row["adjusted_close"]),
             }
+            for row in data
+            if row.get("adjusted_close") is not None
+        ]
+
+    @_RETRY
+    def get_bond_yield(self, ticker: str) -> dict:
+        """Latest government-bond yield for a ``.GBOND`` ticker.
+
+        EOD exposes sovereign yields under the GBOND virtual exchange,
+        e.g. ``US3M.GBOND``, ``CH3M.GBOND``, ``EU3M.GBOND``, ``GB3M.GBOND``.
+        The ``close`` field is the yield in **percent** (e.g. ``4.35`` for
+        4.35%).
+
+        The real-time endpoint frequently returns ``"close": "NA"`` for
+        GBOND tickers outside main quote windows.  When that happens we
+        fall back to the historical (EOD) endpoint and return the most
+        recent valid daily close — equivalent in meaning, just one day
+        delayed.
+
+        Returns
+        -------
+        dict
+            ``{"ticker": str, "yield_pct": float, "date": datetime, "source": "EOD"}``
+        """
+        url = f"{self.BASE_URL}/real-time/{ticker}"
+        params = {"api_token": self.api_key, "fmt": "json"}
+
+        data = _request_json(url, params)
+
+        # Step 1 — current "close" if numeric.
+        close = data.get("close") if isinstance(data, dict) else None
+        yield_pct = _numeric_or_none(close)
+        if yield_pct is not None:
+            return {
+                "ticker":    ticker,
+                "yield_pct": yield_pct,
+                "date":      _parse_eod_date(data),
+                "source":    "EOD",
+            }
+
+        # Step 2 — fall back to the same payload's "previousClose".  Saves
+        # an API call when only `close` is "NA" (typical outside quote
+        # windows for GBOND virtual exchange).
+        prev_close = data.get("previousClose") if isinstance(data, dict) else None
+        prev_yield = _numeric_or_none(prev_close)
+        if prev_yield is not None:
+            log.info("Real-time %s close was %r — using previousClose %.4f",
+                     ticker, close, prev_yield)
+            return {
+                "ticker":    ticker,
+                "yield_pct": prev_yield,
+                "date":      _parse_eod_date(data),
+                "source":    "EOD (previousClose)",
+            }
+
+        # Step 3 — historical endpoint.  Most reliable path when the
+        # virtual exchange is quiet; raises DataUnavailableError if the
+        # ticker isn't carried at all (HTTP 404 from /eod/...).
+        log.info("Real-time %s had no usable yield — falling back to history",
+                 ticker)
+        history = self.get_bond_yield_history(ticker, years=1)
+        if not history:
+            raise DataUnavailableError(
+                f"No real-time or historical yield available for {ticker}"
+            )
+
+        latest = history[-1]
+        return {
+            "ticker":    ticker,
+            "yield_pct": float(latest["yield_pct"]),
+            "date":      datetime.strptime(latest["date"][:10], "%Y-%m-%d"),
+            "source":    "EOD (history)",
+        }
+
+    @_RETRY
+    def get_bond_yield_history(self, ticker: str, years: int = 6) -> list[dict]:
+        """Daily history of the GBOND yield for ``ticker``.
+
+        Returns a list of ``{"date": "YYYY-MM-DD", "yield_pct": float}``,
+        with yield in percent (EOD convention).
+        """
+        to_date = datetime.today()
+        from_date = to_date - timedelta(days=int(years * 365.25))
+
+        url = f"{self.BASE_URL}/eod/{ticker}"
+        params = {
+            "api_token": self.api_key,
+            "period": "d",
+            "from": from_date.strftime("%Y-%m-%d"),
+            "to": to_date.strftime("%Y-%m-%d"),
+            "fmt": "json",
+        }
+
+        data = _request_json(url, params)
+
+        if not data:
+            raise DataUnavailableError(
+                f"No bond yield history for {ticker}"
+            )
+
+        return [
+            {"date": row["date"], "yield_pct": float(row["adjusted_close"])}
             for row in data
             if row.get("adjusted_close") is not None
         ]

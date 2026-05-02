@@ -102,6 +102,7 @@ def render(portfolio, corr_df, beta_map, vol_map_implied, vol_map_realised,
         "post_shock_drift_pa": float(post_shock_drift),
     }
 
+
     # ── Session-level NoiseSampler (CRN) ─────────────────────────────────
     sampler = _get_or_make_sampler(portfolio, n_paths, regen_clicked)
 
@@ -178,16 +179,16 @@ def _hex_to_rgba(hex_color: str, alpha: float) -> str:
 
 
 def _fan_band_traces(df, color, name):
-    """Two transparent traces forming a 5-95 percentile band, both grouped
+    """Two transparent traces forming a median ± 1σ band, both grouped
     with the asset's median line so legend clicks toggle the whole asset."""
     return [
         go.Scatter(
-            x=df["date"], y=df["p95"],
+            x=df["date"], y=df["upper_1sd"],
             mode="lines", line=dict(width=0),
             legendgroup=name, showlegend=False, hoverinfo="skip",
         ),
         go.Scatter(
-            x=df["date"], y=df["p5"],
+            x=df["date"], y=df["lower_1sd"],
             mode="lines", line=dict(width=0),
             fill="tonexty", fillcolor=_hex_to_rgba(color, 0.18),
             legendgroup=name, showlegend=False, hoverinfo="skip",
@@ -209,7 +210,7 @@ def _fan_median_trace(df, color, name):
 
 
 def _render_asset_paths_fan(asset_paths: dict, portfolio, scenario):
-    st.markdown("### Underlying Scenario Paths (median + 5–95%)")
+    st.markdown("### Underlying Scenario Paths (median ± 1σ)")
 
     isin_to_name   = {}
     isin_to_strike = {}
@@ -233,10 +234,12 @@ def _render_asset_paths_fan(asset_paths: dict, portfolio, scenario):
         color = _ASSET_PALETTE[idx % len(_ASSET_PALETTE)]
         spot0 = float(df["mean"].iloc[0])
         norm = pd.DataFrame({
-            "date":   df["date"],
-            "median": df["median"] / spot0 * 100,
-            "p5":     df["p5"]     / spot0 * 100,
-            "p95":    df["p95"]    / spot0 * 100,
+            "date":      df["date"],
+            "median":    df["median"]    / spot0 * 100,
+            "p5":        df["p5"]        / spot0 * 100,
+            "p95":       df["p95"]       / spot0 * 100,
+            "lower_1sd": df["lower_1sd"] / spot0 * 100,
+            "upper_1sd": df["upper_1sd"] / spot0 * 100,
         })
         assets.append((isin, name, color, norm, spot0))
 
