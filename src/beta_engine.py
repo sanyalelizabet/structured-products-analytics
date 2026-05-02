@@ -39,7 +39,7 @@ class BetaEngine:
         self,
         isin_ticker_map: dict,
         years: int = 3,
-        force_refresh: bool = True,
+        force_refresh: bool = False,
     ) -> dict[str, float]:
         """Return ``{isin: β_MKT}``. Defaults to 1.0 on insufficient data."""
         # Local import keeps the module-level dependency graph cycle-free

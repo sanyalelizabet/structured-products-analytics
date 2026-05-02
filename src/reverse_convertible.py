@@ -1,9 +1,96 @@
 from datetime import datetime
+from typing import TYPE_CHECKING
+
 import numpy as np
 import pandas as pd
 from scipy.optimize import brentq
 
 from src.coupon_schedule import CouponSchedule
+
+
+def vectorised_european_rc_summary(row, final_prices: np.ndarray) -> dict:
+    """Vectorised per-path summary for European reverse convertibles.
+
+    Replaces the per-path Python loop in the scenario engines:
+
+        for p in range(N):
+            rc = ReverseConvertible(row, final_levels=...)
+            s  = rc.summary()
+
+    Computes everything the scenario engines consume in pure numpy on a
+    ``(N, n_assets)`` terminal-price tensor — orders of magnitude faster
+    than the loop for non-trivial ``n_paths``.
+
+    Parameters
+    ----------
+    row : pd.Series
+        Portfolio row.  Must carry ``notional``, ``strike``, ``underlyings``,
+        and the fields needed by :class:`ReverseConvertible` to compute
+        ``total_cost`` and ``coupon_payment`` (constants of the product).
+    final_prices : np.ndarray
+        Terminal underlying prices, shape ``(n_paths, n_assets)``.
+
+    Returns
+    -------
+    dict
+        Per-path arrays and scalars that mirror the keys consumed by the
+        scenario engines from ``ReverseConvertible.summary()``.
+    """
+    final_prices = np.asarray(final_prices, dtype=float)
+    N, n_assets = final_prices.shape
+
+    notional    = float(row["notional"])
+    strikes     = np.array([float(k) for k in row["strike"]])  # (n_assets,)
+    underlyings = list(row["underlyings"])
+
+    # Constants — computed once via a prototype RC instance.
+    rc_proto       = ReverseConvertible(row, final_levels=[0.0] * n_assets)
+    coupon_payment = rc_proto.coupon_payment()
+    total_cost     = rc_proto.total_cost()
+
+    perfs       = final_prices / strikes[None, :]                     # (N, n_assets)
+    worst_idx   = np.argmin(perfs, axis=1)                            # (N,)
+    worst_perf  = perfs[np.arange(N), worst_idx]                      # (N,)
+    breached    = (final_prices <= strikes[None, :]).any(axis=1)      # (N,)
+
+    # European RC redemption: notional if worst-of stayed above all strikes,
+    # else notional × worst_perf.
+    redemption    = np.where(breached, notional * worst_perf, notional)
+    total_payoff  = redemption + coupon_payment
+    pnl           = total_payoff - total_cost
+    return_pct    = (pnl / total_cost) if total_cost else np.full(N, np.nan)
+
+    worst_underlying = np.array([underlyings[i] for i in worst_idx], dtype=object)
+
+    strike_used     = strikes[worst_idx]                              # (N,)
+    final_spot_used = final_prices[np.arange(N), worst_idx]           # (N,)
+    physical        = final_spot_used < strike_used
+
+    total_shares     = notional / strike_used                         # (N,)
+    delivered_shares = np.where(physical, np.floor(total_shares), 0).astype(int)
+    fractional_cash  = np.where(
+        physical, (total_shares - delivered_shares) * final_spot_used, 0.0,
+    )
+    cash_redemption  = np.where(physical, fractional_cash, total_payoff)
+    settlement_type  = np.where(physical, "physical", "cash").astype(object)
+    delivered_under  = np.where(physical, worst_underlying, None)
+
+    return {
+        "pnl":                  pnl,
+        "return_pct":           return_pct,
+        "total_payoff":         total_payoff,
+        "barrier_breached":     breached,
+        "worst_idx":            worst_idx,
+        "worst_underlying":     worst_underlying,
+        "strike_used":          strike_used,
+        "final_spot_used":      final_spot_used,
+        "settlement_type":      settlement_type,
+        "delivered_underlying": delivered_under,
+        "delivered_shares":     delivered_shares,
+        "fractional_cash":      fractional_cash,
+        "cash_redemption":      cash_redemption,
+        "total_cost":           float(total_cost),
+    }
 
 
 class ReverseConvertible:
@@ -143,23 +230,36 @@ class ReverseConvertible:
 
         return prev_spots
 
-    def _build_previous_rc(self):
+    def _redemption_for(self, spots) -> float:
+        """Closed-form redemption when ``spots`` are treated as terminal levels.
+
+        Mirrors :meth:`redemption` exactly but takes spots as an argument
+        instead of using ``self.final_levels``.  Used by :meth:`summary`
+        to compute yesterday's hypothetical PnL without instantiating a
+        whole second :class:`ReverseConvertible` (which is expensive —
+        rebuilds the coupon schedule, parses dates, etc.).
         """
-        Build a ReverseConvertible using yesterday's spots as current_spots.
-        Reuses all existing methods — performances, barrier, payoff etc.
-        price_db passed as None to avoid recursion.
-        """
-        prev_spots = self._get_previous_spots()
+        breached = any(s <= k for s, k in zip(spots, self.strike_levels))
+        if not breached:
+            return self.notional
+        worst_perf = min(s / k for s, k in zip(spots, self.strike_levels))
+        return self.notional * worst_perf
 
-        if prev_spots == self.current_spots:
-            return None  # no history, no delta
+    def _pnl_for(self, spots) -> float:
+        """PnL if ``spots`` were the terminal levels — total_cost / coupon
+        are constants of the product."""
+        return (
+            self._redemption_for(spots)
+            + self.coupon_payment()
+            - self.total_cost()
+        )
 
-        prev_row = self.row.copy()
-        prev_row["current_spots"] = prev_spots
+    def _min_distance_for(self, spots) -> float:
+        """Distance-to-barrier for a hypothetical spot vector."""
+        distances = [(s - k) / s for s, k in zip(spots, self.strike_levels)]
+        return min(distances) if self.is_multi() else distances[0]
 
-        return ReverseConvertible(prev_row, price_db=None)
-    
-        
+
     def is_multi(self):
         return len(self.initial_levels) > 1
     
@@ -372,11 +472,16 @@ class ReverseConvertible:
         today = datetime.today()
         days_to_expiry = (maturity - today).days
 
-        # Yesterday's RC — reuses every method identically
-        prev_rc = self._build_previous_rc()
-
-        pnl_delta = (self.pnl() - prev_rc.pnl()) if prev_rc else None
-        distance_delta = (self.distance_to_barrier() - prev_rc.distance_to_barrier()) if prev_rc else None
+        # Yesterday's hypothetical PnL / distance — computed in closed
+        # form against prev spots instead of building a second RC
+        # (avoids re-parsing dates / re-building the coupon schedule).
+        prev_spots = self._get_previous_spots()
+        if prev_spots == self.current_spots:
+            pnl_delta      = None
+            distance_delta = None
+        else:
+            pnl_delta      = self.pnl() - self._pnl_for(prev_spots)
+            distance_delta = self.distance_to_barrier() - self._min_distance_for(prev_spots)
 
         return {
             "product_type": self.product_type,

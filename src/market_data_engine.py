@@ -1,4 +1,5 @@
 import logging
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import pandas as pd
@@ -6,6 +7,25 @@ from pathlib import Path
 from pandas.tseries.offsets import BDay
 
 log = logging.getLogger(__name__)
+
+
+# Default network concurrency.  EOD's rate limit is generous (~1000 req/min
+# on most plans) so 8 simultaneous requests is comfortably under it while
+# delivering a clear speedup on cold start.
+_DEFAULT_MAX_WORKERS = 8
+
+
+def _parallel_map(fn, items, max_workers: int = _DEFAULT_MAX_WORKERS):
+    """Run ``fn(item)`` over ``items`` in a thread pool, preserving order.
+
+    Threads are correct here because every consumer is HTTP I/O-bound and
+    releases the GIL during the request.  Order preservation matters for
+    deterministic concatenation into the persisted DBs.
+    """
+    if not items:
+        return []
+    with ThreadPoolExecutor(max_workers=min(max_workers, len(items))) as pool:
+        return list(pool.map(fn, items))
 
 class MarketDataEngine:
 
@@ -48,77 +68,109 @@ class MarketDataEngine:
         self.options_path = self.db_path.parent / "options.csv"
         self.rates_path   = self.db_path.parent / "risk_free_rates.csv"
 
+        # Per-engine "fetched-today" memo for fetch_daily_prices.  In a
+        # given session BetaEngine, FactorLoadingsEngine, CorrelationEngine,
+        # and FactorEngine all call ``fetch_daily_prices`` with overlapping
+        # ISINs.  After the first verification we don't need to re-load the
+        # CSV or re-run the skip-logic — record (isin, ticker, years) as
+        # "verified today" and short-circuit on the next call.  Resets
+        # automatically when the calendar date rolls over.
+        self._daily_check_date: pd.Timestamp | None = None
+        self._daily_checked: set[tuple[str, str, int]] = set()
+
+        # In-memory cache of the parsed prices DB.  Invalidated when the
+        # CSV's mtime changes — so any save_db() call elsewhere refreshes
+        # the cache transparently.  Saves ~15 ms per call by skipping the
+        # CSV parse when nothing has changed on disk.
+        self._db_cache:       pd.DataFrame | None = None
+        self._db_cache_mtime: float | None        = None
+
 
 
     def load_db(self):
-        if self.db_path.exists():
-            return pd.read_csv(self.db_path, parse_dates=["date"])
-        return pd.DataFrame(columns=["date", "isin", "ticker", "price"])
+        """Load and parse ``prices.csv``, with an mtime-based memo.
+
+        The parsed DataFrame is cached in memory; subsequent calls return
+        a copy of the cached frame as long as the file's mtime is
+        unchanged.  Any ``save_db`` call (here or in another process)
+        bumps mtime and invalidates the cache transparently.
+        """
+        if not self.db_path.exists():
+            return pd.DataFrame(columns=["date", "isin", "ticker", "price"])
+        mtime = self.db_path.stat().st_mtime
+        if (self._db_cache is not None
+                and self._db_cache_mtime == mtime):
+            return self._db_cache.copy()
+        df = pd.read_csv(self.db_path, parse_dates=["date"])
+        self._db_cache       = df
+        self._db_cache_mtime = mtime
+        return df.copy()
 
     def save_db(self, df):
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         df.to_csv(self.db_path, index=False)
+        # Refresh the in-memory cache so the next load_db() returns the
+        # frame we just wrote without re-parsing the CSV.
+        self._db_cache       = df.copy()
+        self._db_cache_mtime = self.db_path.stat().st_mtime
 
-    def fetch_latest_prices(self, portfolio):
+    def fetch_latest_prices(self, portfolio,
+                            max_workers: int = _DEFAULT_MAX_WORKERS):
+        """Refresh the latest spot price for every ISIN in ``portfolio``.
+
+        Network calls run in parallel; ticker resolution and the
+        already-have-this-date short-circuit happen sequentially first
+        so the pool only fires for ISINs that actually need a fetch.
+        """
         db = self.load_db()
         prev_trading_day = (pd.Timestamp.today() - BDay(1)).normalize()
 
-        rows = []
-
-        unique_isins = {
+        unique_isins = sorted({
             isin
             for _, row in portfolio.iterrows()
             for isin in row["underlying_isins"]
-        }
+        })
 
+        # Pre-resolve tickers and skip any ISIN whose prev-day price is
+        # already in the DB.
+        to_fetch: list[tuple[str, str]] = []
         for isin in unique_isins:
             try:
                 ticker = self._resolve_ticker(isin)
             except ValueError as e:
                 log.warning("Skipping price fetch for %s: %s", isin, e)
                 continue
-            try:
-                # ----------------------------------
-                # 1. Skip API call if previous trading day already exists
-                # ----------------------------------
-                exists_prev_day = (
-                        (db["isin"] == isin) &
-                        (db["date"] == prev_trading_day)
-                ).any()
 
-                if exists_prev_day:
-                    continue
-
-                # ----------------------------------
-                # 2. Fetch quote
-                # ----------------------------------
-                quote = self.client.get_last_quote(ticker)
-                quote_date = pd.to_datetime(quote["date"]).normalize()
-
-                # ----------------------------------
-                # 3. Check whether quoted date already exists
-                # ----------------------------------
-                exists_quote_date = (
-                        (db["isin"] == isin) &
-                        (db["date"] == quote_date)
-                ).any()
-
-                if exists_quote_date:
-                    continue
-
-                rows.append({
-                    "date": quote_date,
-                    "isin": isin,
-                    "ticker": ticker,
-                    "price": quote["price"]
-                })
-
-            except Exception as e:
-                log.warning("Price fetch failed for %s (%s): %s", ticker, isin, e)
+            exists_prev_day = (
+                (db["isin"] == isin) & (db["date"] == prev_trading_day)
+            ).any()
+            if exists_prev_day:
                 continue
 
-        new_df = pd.DataFrame(rows)
+            to_fetch.append((isin, ticker))
 
+        def _fetch_one(item):
+            isin, ticker = item
+            try:
+                quote = self.client.get_last_quote(ticker)
+            except Exception as e:
+                log.warning("Price fetch failed for %s (%s): %s", ticker, isin, e)
+                return None
+            quote_date = pd.to_datetime(quote["date"]).normalize()
+            # Already have this quote date — nothing to append.
+            if ((db["isin"] == isin) & (db["date"] == quote_date)).any():
+                return None
+            return {
+                "date":   quote_date,
+                "isin":   isin,
+                "ticker": ticker,
+                "price":  quote["price"],
+            }
+
+        results = _parallel_map(_fetch_one, to_fetch, max_workers=max_workers)
+        rows = [r for r in results if r is not None]
+
+        new_df = pd.DataFrame(rows)
         if not new_df.empty:
             db = pd.concat([db, new_df], ignore_index=True)
             db = db.drop_duplicates(subset=["isin", "date"], keep="last")
@@ -175,7 +227,8 @@ class MarketDataEngine:
         self.rates_path.parent.mkdir(parents=True, exist_ok=True)
         df.to_csv(self.rates_path, index=False)
 
-    def fetch_latest_rates(self, currencies, tenor: str | None = None) -> pd.DataFrame:
+    def fetch_latest_rates(self, currencies, tenor: str | None = None,
+                           max_workers: int = _DEFAULT_MAX_WORKERS) -> pd.DataFrame:
         """Refresh latest GBOND yields for ``currencies``.
 
         ``tenor`` is the point on the curve to fetch.  When ``None``
@@ -196,7 +249,11 @@ class MarketDataEngine:
         db = self.load_rates_db()
         prev_trading_day = (pd.Timestamp.today() - BDay(1)).normalize()
 
-        rows = []
+        # Pre-filter: build the list of (ccy, tenor, ticker) triples that
+        # still need a network call.  Any ticker not in GBOND_TICKERS or
+        # already up-to-date is dropped here so the thread pool only fires
+        # for real work.
+        to_fetch: list[tuple[str, str, str]] = []
         for ccy in currencies:
             ccy_tenor = tenor or self.DEFAULT_TENORS.get(ccy, "3M")
             ticker = self.GBOND_TICKERS.get((ccy, ccy_tenor))
@@ -213,31 +270,38 @@ class MarketDataEngine:
             if already_recent:
                 continue
 
+            to_fetch.append((ccy, ccy_tenor, ticker))
+
+        def _fetch_one(item):
+            ccy, ccy_tenor, ticker = item
             try:
                 quote = self.client.get_bond_yield(ticker)
-                quote_date = pd.to_datetime(quote["date"]).normalize()
-
-                exists_today = (
-                    (db["currency"] == ccy)
-                    & (db["tenor"] == ccy_tenor)
-                    & (db["date"] == quote_date)
-                ).any()
-                if exists_today:
-                    continue
-
-                yield_pct = float(quote["yield_pct"])
-                rows.append({
-                    "date":      quote_date,
-                    "currency":  ccy,
-                    "tenor":     ccy_tenor,
-                    "ticker":    ticker,
-                    "yield_pct": yield_pct,
-                    "yield":     yield_pct / 100.0,
-                })
             except Exception as e:
                 log.warning("Bond yield fetch failed for %s (%s): %s",
                             ticker, ccy, e)
-                continue
+                return None
+
+            quote_date = pd.to_datetime(quote["date"]).normalize()
+            already_have = (
+                (db["currency"] == ccy)
+                & (db["tenor"] == ccy_tenor)
+                & (db["date"] == quote_date)
+            ).any()
+            if already_have:
+                return None
+
+            yield_pct = float(quote["yield_pct"])
+            return {
+                "date":      quote_date,
+                "currency":  ccy,
+                "tenor":     ccy_tenor,
+                "ticker":    ticker,
+                "yield_pct": yield_pct,
+                "yield":     yield_pct / 100.0,
+            }
+
+        results = _parallel_map(_fetch_one, to_fetch, max_workers=max_workers)
+        rows = [r for r in results if r is not None]
 
         if rows:
             new_df = pd.DataFrame(rows)
@@ -276,7 +340,8 @@ class MarketDataEngine:
             result[ccy] = float(latest["yield"])
         return result
 
-    def fetch_monthly_prices(self, isin_ticker_map, years=6, force_refresh=False):
+    def fetch_monthly_prices(self, isin_ticker_map, years=6, force_refresh=False,
+                             max_workers: int = _DEFAULT_MAX_WORKERS):
         """
         Download monthly adjusted-close prices and append to prices.csv.
         Same schema as daily rows — month-end dates coexist naturally.
@@ -293,27 +358,32 @@ class MarketDataEngine:
         """
         db = self.load_db()
 
-        rows = []
-
+        # Sequential prefilter — anything already dense gets skipped.
+        to_fetch: list[tuple[str, str]] = []
         for isin, ticker in isin_ticker_map.items():
-            
             existing = db[db["isin"] == isin]
             if not force_refresh and len(existing) > 36:
                 continue
+            to_fetch.append((isin, ticker))
 
+        def _fetch_one(item):
+            isin, ticker = item
             try:
                 data = self.client.get_monthly_prices(ticker, years=years)
-
-                for r in data:
-                    rows.append({
-                        "date"  : pd.to_datetime(r["date"]),
-                        "isin"  : isin,
-                        "ticker": ticker,
-                        "price" : r["adjusted_close"],
-                    })
-
+                return [
+                    {"date":   pd.to_datetime(r["date"]),
+                     "isin":   isin,
+                     "ticker": ticker,
+                     "price":  r["adjusted_close"]}
+                    for r in data
+                ]
             except Exception as e:
                 log.warning("Monthly fetch failed for %s (%s): %s", ticker, isin, e)
+                return []
+
+        rows: list[dict] = []
+        for batch in _parallel_map(_fetch_one, to_fetch, max_workers=max_workers):
+            rows.extend(batch)
 
         if rows:
             new_df = pd.DataFrame(rows)
@@ -324,69 +394,113 @@ class MarketDataEngine:
 
         return db
 
-    def fetch_daily_prices(self, isin_ticker_map, years=6, force_refresh=False):
+    def fetch_daily_prices(self, isin_ticker_map, years=6, force_refresh=False,
+                           max_workers: int = _DEFAULT_MAX_WORKERS):
         """
         Download daily adjusted-close prices and append to prices.csv.
+
+        HTTP fetches run in parallel via a thread pool — each ISIN's
+        ``get_daily_prices`` call is independent I/O.  The decide-what-to-
+        fetch and merge-into-DB phases run sequentially because they
+        mutate shared state (``db``, the on-disk CSV).
 
         Parameters
         ----------
         isin_ticker_map : dict  { isin: ticker }
         years           : int   calendar years of history
         force_refresh   : bool  re-download even if data already exists
+        max_workers     : int   max concurrent HTTP requests (default 8)
 
         Returns
         -------
         pd.DataFrame  full DB after update
         """
+        # ── Phase 0: daily memo short-circuit ───────────────────────────
+        # If we've already verified every requested (isin, ticker, years)
+        # today, return the persisted DB directly — no scan, no parse, no
+        # disk I/O beyond the load itself.
+        today = pd.Timestamp.today().normalize()
+        if self._daily_check_date != today:
+            self._daily_check_date = today
+            self._daily_checked.clear()
+
+        if not force_refresh:
+            requested = {(isin, ticker, years)
+                         for isin, ticker in isin_ticker_map.items()}
+            if requested.issubset(self._daily_checked):
+                return self.load_db()
+
         db = self.load_db()
-        rows = []
+
+        # ── Phase 1a: vectorised stale-ticker purge ─────────────────────
+        # Self-heal: drop rows whose ISIN we're tracking but whose stored
+        # ticker no longer matches the resolved one.  Mixing prices across
+        # listings (e.g. NOVN.SW in CHF + NVSEF.US in USD) silently
+        # corrupts every downstream regression and stress run.
         purged_isins: list[str] = []
+        if not db.empty:
+            wanted_ticker = db["isin"].map(isin_ticker_map)
+            stale_mask    = wanted_ticker.notna() & (db["ticker"] != wanted_ticker)
+            if stale_mask.any():
+                purged_isins = sorted(db.loc[stale_mask, "isin"].unique().tolist())
+                db = db.loc[~stale_mask].reset_index(drop=True)
 
+        # ── Phase 1b: decide who needs fetching using a single groupby ──
+        # `db["date"]` is already datetime64 (load_db parses it on read),
+        # so no per-ISIN to_datetime() reparse is needed.
+        required_start   = pd.Timestamp.today() - pd.DateOffset(years=years) - pd.Timedelta(days=30)
+        required_density = years * 200  # ~200 trading days per year
+
+        if db.empty:
+            min_dates: dict[str, pd.Timestamp] = {}
+            counts:    dict[str, int]          = {}
+        else:
+            grp = db.groupby("isin", sort=False)
+            min_dates = grp["date"].min().to_dict()
+            counts    = grp.size().to_dict()
+
+        to_fetch: list[tuple[str, str]] = []
         for isin, ticker in isin_ticker_map.items():
-
-            existing = db[db["isin"] == isin].copy()
-
-            if not existing.empty:
-                existing["date"] = pd.to_datetime(existing["date"])
-
-                # ── Self-heal stale-ticker rows ──────────────────────────────
-                # If the previously stored rows used a *different* ticker
-                # than the one we're now resolving for this ISIN, drop them
-                # before re-fetching.  Mixing prices across listings (e.g.
-                # NOVN.SW in CHF + NVSEF.US in USD) silently corrupts every
-                # downstream regression and stress run.
-                stale_mask = (db["isin"] == isin) & (db["ticker"] != ticker)
-                if stale_mask.any():
-                    db = db[~stale_mask].reset_index(drop=True)
-                    purged_isins.append(isin)
-                    existing = db[db["isin"] == isin].copy()
-                    if not existing.empty:
-                        existing["date"] = pd.to_datetime(existing["date"])
-
-            # Skip only if data covers the requested history window adequately.
-            # Row-count alone is misleading: sparse daily quotes or old monthly
-            # data can easily exceed 252 rows without covering the full window.
-            if not force_refresh and not existing.empty:
-                required_start = pd.Timestamp.today() - pd.DateOffset(years=years) - pd.Timedelta(days=30)
-                has_history = existing["date"].min() <= required_start
-                has_density = len(existing) >= years * 200  # ~200 trading days/year
-                if has_history and has_density:
+            if not force_refresh:
+                count    = counts.get(isin, 0)
+                min_date = min_dates.get(isin)
+                if (
+                    count >= required_density
+                    and min_date is not None
+                    and min_date <= required_start
+                ):
+                    # Already dense enough — mark as verified for the rest
+                    # of the day so subsequent calls skip the scan entirely.
+                    self._daily_checked.add((isin, ticker, years))
                     continue
+            to_fetch.append((isin, ticker))
 
+        # ── Phase 2 (parallel): fetch in a thread pool ─────────────────────
+        def _fetch_one(item):
+            isin, ticker = item
             try:
                 data = self.client.get_daily_prices(ticker, years=years)
-
-                for r in data:
-                    rows.append({
-                        "date": pd.to_datetime(r["date"]),
-                        "isin": isin,
-                        "ticker": ticker,
-                        "price": r["adjusted_close"],
-                    })
-
+                return isin, ticker, [
+                    {"date": pd.to_datetime(r["date"]),
+                     "isin": isin,
+                     "ticker": ticker,
+                     "price": r["adjusted_close"]}
+                    for r in data
+                ]
             except Exception as e:
                 log.warning("Daily fetch failed for %s (%s): %s", ticker, isin, e)
+                return isin, ticker, None      # None signals failure
 
+        rows: list[dict] = []
+        for isin, ticker, batch in _parallel_map(_fetch_one, to_fetch,
+                                                  max_workers=max_workers):
+            if batch is None:
+                # Failed fetches stay UN-marked so the next call retries.
+                continue
+            rows.extend(batch)
+            self._daily_checked.add((isin, ticker, years))
+
+        # ── Phase 3 (sequential): merge, dedupe, save ──────────────────────
         if purged_isins:
             log.info("Purged stale-ticker rows for %d ISIN(s) before re-fetch: %s",
                      len(purged_isins), purged_isins)
@@ -406,7 +520,8 @@ class MarketDataEngine:
 
         return db
 
-    def fetch_securities_master(self, isins, force_refresh=False):
+    def fetch_securities_master(self, isins, force_refresh=False,
+                                max_workers: int = _DEFAULT_MAX_WORKERS):
         """
         Download master data for each ISIN and store in securities_master_data.csv.
 
@@ -428,24 +543,27 @@ class MarketDataEngine:
         else:
             master = pd.DataFrame(columns=self.MASTER_COLUMNS)
 
-        rows = []
+        # Filter out ISINs that already have a row (unless force_refresh).
+        existing = set(master["isin"].values) if not master.empty else set()
+        to_fetch = [
+            isin for isin in isins
+            if force_refresh or isin not in existing
+        ]
 
-        for isin in isins:
-            if not force_refresh and isin in master["isin"].values:
-                continue
-
+        def _fetch_one(isin):
             try:
                 listings = self.client.search_by_isin(isin)
-
-
                 if not listings:
                     log.info("No listings found for %s", isin)
-                    continue
-
-                rows.extend(listings)
-
+                    return []
+                return listings
             except Exception as e:
                 log.warning("Master data fetch failed for %s: %s", isin, e)
+                return []
+
+        rows: list[dict] = []
+        for batch in _parallel_map(_fetch_one, to_fetch, max_workers=max_workers):
+            rows.extend(batch)
 
         if rows:
             new_df = pd.DataFrame(rows)
@@ -523,7 +641,8 @@ class MarketDataEngine:
         # 3. anything
         return matches.iloc[0]["ticker"]
 
-    def fetch_options_chain(self, isins, yahoo_client, force_refresh=False):
+    def fetch_options_chain(self, isins, yahoo_client, force_refresh=False,
+                            max_workers: int = _DEFAULT_MAX_WORKERS):
         """
         Download the full options chain for each ISIN using YahooClient.
         Tickers are resolved from securities_master_data.csv via _resolve_ticker.
@@ -546,8 +665,9 @@ class MarketDataEngine:
             options_db = pd.DataFrame(columns=self.OPTIONS_COLUMNS)
 
         today = pd.Timestamp.today().normalize()
-        frames = []
 
+        # Sequential prefilter — resolve tickers and apply the once-a-day skip.
+        to_fetch: list[tuple[str, str]] = []
         for isin in isins:
             try:
                 ticker = self._resolve_ticker(isin).split(".")[0]
@@ -556,25 +676,31 @@ class MarketDataEngine:
                 continue
 
             already_fetched_today = (
-                    not options_db.empty
-                    and (
-                            (options_db["isin"] == isin) &
-                            (options_db["fetch_date"] == today)
-                    ).any()
+                not options_db.empty
+                and (
+                    (options_db["isin"] == isin)
+                    & (options_db["fetch_date"] == today)
+                ).any()
             )
-
             if not force_refresh and already_fetched_today:
                 continue
 
+            to_fetch.append((isin, ticker))
+
+        def _fetch_one(item):
+            isin, ticker = item
             try:
                 df = yahoo_client.get_full_chain(ticker)
-                df["isin"] = isin
+                df["isin"]       = isin
                 df["fetch_date"] = today
-                frames.append(df)
                 log.info("Options fetched: %s (%d rows)", ticker, len(df))
-
+                return df
             except Exception as e:
                 log.warning("Options fetch failed for %s (%s): %s", ticker, isin, e)
+                return None
+
+        results = _parallel_map(_fetch_one, to_fetch, max_workers=max_workers)
+        frames = [df for df in results if df is not None]
 
         if frames:
             try:

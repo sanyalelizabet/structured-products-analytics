@@ -74,7 +74,7 @@ class FactorLoadingsEngine:
         isin_ticker_map: dict,
         factors: Iterable[str] | None = None,
         years: int = 3,
-        force_refresh: bool = True,
+        force_refresh: bool = False,
         min_obs: int = 252,
     ) -> dict[str, dict]:
         """Fit OLS loadings for every ISIN in ``isin_ticker_map``.

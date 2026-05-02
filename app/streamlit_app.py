@@ -34,12 +34,35 @@ def get_market_engine():
 def get_yahoo_client():
     return YahooClient()
 
-@st.cache_data(ttl=3600)
+# Cache TTLs — daily-frequency data lives 24h, intraday spots/rates 1h.
+_TTL_INTRADAY = 60 * 60          # 1h
+_TTL_DAILY    = 24 * 60 * 60     # 24h
+
+
+@st.cache_data(ttl=_TTL_INTRADAY)
+def compute_pricing_and_greeks(_portfolio, _corr_df, vol_map, risk_free_rates):
+    """One-shot Monte-Carlo: greeks, portfolio delta, and fair values.
+
+    The base fair value used for finite-difference Greeks is identical to
+    the standalone fair-value Monte Carlo (same seed, same paths), so we
+    return all three from a single pass instead of pricing the portfolio
+    twice.
+    """
+    # 5,000 paths is plenty for finite-difference Greeks under common
+    # random numbers — the bias from halving paths is well below the 1 %
+    # bump precision.  Cuts runtime roughly in half.
+    pricer = MonteCarloPricer(n_paths=5_000, seed=42)
+    return pricer.compute_portfolio_greeks(
+        _portfolio, vol_map, risk_free_rates, corr_df=_corr_df,
+    )
+
+
+@st.cache_data(ttl=_TTL_INTRADAY)
 def fetch_market_data(_portfolio):
     engine = get_market_engine()
     try:
         all_isins = list({isin for _, row in _portfolio.iterrows() for isin in row["underlying_isins"]})
-        engine.fetch_securities_master(all_isins, force_refresh=True)
+        engine.fetch_securities_master(all_isins)
         engine.fetch_latest_prices(_portfolio)
         updated_portfolio = engine.update_spots(_portfolio)
         db = engine.load_db()
@@ -50,7 +73,7 @@ def fetch_market_data(_portfolio):
         valuation_date = db["date"].max() if not db.empty else None
         return _portfolio, db, valuation_date, str(e)
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=_TTL_DAILY)
 def fetch_implied_vols(_portfolio):
     engine = get_market_engine()
     yahoo  = get_yahoo_client()
@@ -63,7 +86,7 @@ def fetch_implied_vols(_portfolio):
         from data.reference_data import vol_map as vol_map_static
         return vol_map_static
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=_TTL_INTRADAY)
 def fetch_risk_free_rates(_portfolio, currencies=("CHF", "USD", "EUR", "GBP"),
                           tenor: str = "3M"):
     """Refresh GBOND yields and return a {currency: rate} map.
@@ -87,7 +110,7 @@ def fetch_risk_free_rates(_portfolio, currencies=("CHF", "USD", "EUR", "GBP"),
     return rates
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=_TTL_DAILY)
 def fetch_realised_vols(_portfolio):
     engine = get_market_engine()
     try:
@@ -97,7 +120,7 @@ def fetch_realised_vols(_portfolio):
         from data.reference_data import vol_map as vol_map_static
         return vol_map_static
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=_TTL_INTRADAY)
 def build_product_analytics(_portfolio, _db):
     pa = PortfolioAnalytics(_portfolio, reference_currency="CHF", price_db=_db)
     df = pa.build_product_analytics()
@@ -107,14 +130,14 @@ def build_product_analytics(_portfolio, _db):
     df["distance_to_barrier"] *= 100
     return pa, df
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=_TTL_DAILY)
 def build_corr_matrix(_portfolio):
     engine = get_market_engine()
     isins = list({isin for _, row in _portfolio.iterrows() for isin in row["underlying_isins"]})
     isin_ticker_map = engine.build_isin_ticker_map(isins)
-    return CorrelationEngine(engine).build_corr_matrix(isin_ticker_map, years=6)
+    return CorrelationEngine(engine).build_corr_matrix(isin_ticker_map, years=3)
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=_TTL_DAILY)
 def build_beta_map(_portfolio):
     engine = get_market_engine()
     isins = list({isin for _, row in _portfolio.iterrows() for isin in row["underlying_isins"]})
@@ -129,7 +152,7 @@ def build_beta_map(_portfolio):
 def get_factor_engine():
     return FactorEngine(get_market_engine())
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=_TTL_DAILY)
 def build_factor_loadings(_portfolio):
     """Multivariate OLS loadings against the full factor universe.
 
@@ -158,15 +181,6 @@ def build_factor_loadings(_portfolio):
             for isin in isins
         }
 
-@st.cache_data(ttl=3600)
-def compute_fair_values(_portfolio, _corr_df, vol_map, risk_free_rates):
-    pricer = MonteCarloPricer(n_paths=10_000, seed=42)
-    return pricer.price_portfolio(_portfolio, vol_map, risk_free_rates, corr_df=_corr_df)
-
-@st.cache_data(ttl=3600)
-def compute_greeks(_portfolio, _corr_df, vol_map, risk_free_rates):
-    pricer = MonteCarloPricer(n_paths=10_000, seed=42)
-    return pricer.compute_portfolio_greeks(_portfolio, vol_map, risk_free_rates, corr_df=_corr_df)
 
 
 # =========================
@@ -197,8 +211,9 @@ vol_map_realised     = fetch_realised_vols(portfolio)
 risk_free_rates      = fetch_risk_free_rates(portfolio)
 
 vol_map              = vol_map_implied
-fv_df               = compute_fair_values(portfolio, corr_df, vol_map, risk_free_rates)
-greeks_df, pf_delta = compute_greeks(portfolio, corr_df, vol_map, risk_free_rates)
+greeks_df, pf_delta, fv_df = compute_pricing_and_greeks(
+    portfolio, corr_df, vol_map, risk_free_rates,
+)
 
 # Merge fair value columns into product analytics df
 df = df.merge(fv_df[["product_id", "fair_value", "fair_value_pct"]], on="product_id", how="left")

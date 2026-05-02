@@ -477,7 +477,7 @@ class TestGreeks:
     def test_portfolio_greeks_output_shape(self):
         pricer    = make_pricer(n_paths=500)
         portfolio = make_portfolio()
-        greeks_df, pf_delta = pricer.compute_portfolio_greeks(
+        greeks_df, pf_delta, _fv_df = pricer.compute_portfolio_greeks(
             portfolio, {**VOL_BRC_G, **VOL_MBRC_G}, {"CHF": R_CHF}
         )
         # One row per product × underlying
@@ -490,7 +490,7 @@ class TestGreeks:
         should equal the sum of its individual product deltas."""
         pricer    = make_pricer(n_paths=2_000, seed=42)
         portfolio = make_portfolio()
-        greeks_df, pf_delta = pricer.compute_portfolio_greeks(
+        greeks_df, pf_delta, _fv_df = pricer.compute_portfolio_greeks(
             portfolio, {**VOL_BRC_G, **VOL_MBRC_G}, {"CHF": R_CHF}
         )
         isin = "CH0012221716"

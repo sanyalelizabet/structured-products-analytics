@@ -287,6 +287,35 @@ class MonteCarloPricer:
         return pd.DataFrame(rows)
 
     # ------------------------------------------------------------------
+    # Apply payoff to a precomputed path tensor
+    # ------------------------------------------------------------------
+    def _fv_from_paths(
+        self,
+        paths: np.ndarray,
+        dates: pd.DatetimeIndex,
+        payoff_fn: Callable,
+        row: pd.Series,
+        risk_free_rate: float,
+        T_remaining: float,
+    ) -> tuple[float, float]:
+        """Apply a payoff function to a precomputed path tensor and discount.
+
+        Used by :meth:`compute_greeks` to avoid re-running ``simulate_paths``
+        when only the *spot* changes (GBM is multiplicative in the starting
+        spot — see the ``compute_greeks`` delta block) or when the time-to-
+        maturity moves by one business day (theta).
+
+        Returns ``(fair_value, std_error)`` so the caller can also expose
+        a fair-value snapshot via ``return_base_price=True``.
+        """
+        payoffs    = payoff_fn(paths, dates, row)
+        discount   = np.exp(-risk_free_rate * T_remaining)
+        pv_paths   = payoffs * discount
+        fair_value = float(np.mean(pv_paths))
+        std_error  = float(np.std(pv_paths) / np.sqrt(self.n_paths))
+        return fair_value, std_error
+
+    # ------------------------------------------------------------------
     # Greeks — bump and reprice
     # ------------------------------------------------------------------
     def compute_greeks(
@@ -300,6 +329,7 @@ class MonteCarloPricer:
         vol_bump: float = 0.01,        # 1 pp vol move
         rate_bump: float = 0.0001,     # 1 bp rate move
         corr_bump: float = 0.01,       # 1 pp correlation move (MBRC)
+        return_base_price: bool = False,
     ) -> dict:
         """
         Per-product Greeks via central finite differences.
@@ -323,7 +353,45 @@ class MonteCarloPricer:
         dict with keys: product_id, isins, underlyings,
                         delta (list), vega (list), theta, rho, corr_sens
         """
-        base_fv = self.price(row, payoff_fn, vol_map, risk_free_rate, corr_matrix)["fair_value"]
+        # If the product has already matured, fall back to the original
+        # price() path which short-circuits on T_remaining <= 0.  No
+        # simulation work to optimise.
+        today    = pd.Timestamp.today().normalize()
+        maturity = pd.Timestamp(row["maturity_date"])
+        T_remaining = max((maturity - today).days / 360, 0.0)
+
+        if T_remaining <= 0:
+            base_result = self.price(row, payoff_fn, vol_map, risk_free_rate, corr_matrix)
+            base_fv = base_result["fair_value"]
+            isins   = list(row["underlying_isins"])
+            names   = list(row["underlyings"])
+            n       = len(isins)
+            zeros   = [0.0] * n
+            result  = {
+                "product_id":  row["product_id"],
+                "isins":       isins,
+                "underlyings": names,
+                "delta":       zeros,
+                "vega":        zeros,
+                "theta":       0.0,
+                "rho":         0.0,
+                "corr_sens":   None,
+            }
+            if return_base_price:
+                result["fair_value"]     = base_fv
+                result["fair_value_pct"] = base_result["fair_value_pct"]
+                result["std_error"]      = base_result["std_error"]
+            return result
+
+        # Simulate the base path tensor ONCE for this product.  Delta and
+        # theta both reuse it without re-running simulate_paths — which
+        # is by far the dominant cost.
+        paths_base, dates_base = self.simulate_paths(
+            row, vol_map, risk_free_rate, corr_matrix,
+        )
+        base_fv, base_se = self._fv_from_paths(
+            paths_base, dates_base, payoff_fn, row, risk_free_rate, T_remaining,
+        )
 
         isins  = list(row["underlying_isins"])
         names  = list(row["underlyings"])
@@ -331,19 +399,24 @@ class MonteCarloPricer:
         n      = len(isins)
 
         # ── Delta ─────────────────────────────────────────────────────────
+        # GBM is multiplicative in the starting spot:
+        #     S_{i,t} = S_{i,0} · exp(drift·t + σ_i·√t·Z)
+        # Therefore bumping S_{i,0} by (1+ε) is identical to scaling the
+        # i-th column of paths by (1+ε).  No re-simulation needed —
+        # the savings are 2N full Monte-Carlo runs per product.
         deltas = []
         for i in range(n):
-            bump = spots[i] * spot_bump_pct
+            paths_up = paths_base.copy()
+            paths_dn = paths_base.copy()
+            paths_up[:, :, i] *= (1.0 + spot_bump_pct)
+            paths_dn[:, :, i] *= (1.0 - spot_bump_pct)
 
-            spots_up = spots.copy(); spots_up[i] += bump
-            spots_dn = spots.copy(); spots_dn[i] -= bump
-
-            row_up = row.copy(); row_up["current_spots"] = spots_up
-            row_dn = row.copy(); row_dn["current_spots"] = spots_dn
-
-            fv_up = self.price(row_up, payoff_fn, vol_map, risk_free_rate, corr_matrix)["fair_value"]
-            fv_dn = self.price(row_dn, payoff_fn, vol_map, risk_free_rate, corr_matrix)["fair_value"]
-
+            fv_up, _ = self._fv_from_paths(
+                paths_up, dates_base, payoff_fn, row, risk_free_rate, T_remaining,
+            )
+            fv_dn, _ = self._fv_from_paths(
+                paths_dn, dates_base, payoff_fn, row, risk_free_rate, T_remaining,
+            )
             # FV change for a 1 % spot move (central diff over ±1 %)
             deltas.append((fv_up - fv_dn) / 2)
 
@@ -367,24 +440,20 @@ class MonteCarloPricer:
         # the path grid changes size, so Monte Carlo noise swamps the tiny
         # signal (~a few CHF per day).
         #
-        # Correct approach: generate paths to full maturity (same grid, CRN
-        # preserved), then evaluate the payoff at the penultimate step and
-        # discount for T_remaining - 1 business day. The coupon is fixed
-        # contractually and is unchanged by 1 day passing.
-        today = pd.Timestamp.today().normalize()
-        mat   = pd.Timestamp(row["maturity_date"])
-
-        paths_full, dates_full = self.simulate_paths(row, vol_map, risk_free_rate, corr_matrix)
-
-        if len(dates_full) >= 2:
-            # Use penultimate step as the terminal value (= 1 business day closer)
-            paths_tm1    = paths_full[:, :-1, :]
-            dates_tm1    = dates_full[:-1]
-            T_tm1        = max((dates_full[-2] - today).days / 360, 0.0)
-
-            payoffs_tm1  = payoff_fn(paths_tm1, dates_tm1, row)   # row dates unchanged → coupon fixed
-            fv_tm1       = float(np.mean(payoffs_tm1)) * np.exp(-risk_free_rate * T_tm1)
-            theta        = fv_tm1 - base_fv
+        # Correct approach: take the *base* path tensor (already simulated
+        # for delta), evaluate the payoff at the penultimate step and
+        # discount for T_remaining - 1 business day.  The coupon is fixed
+        # contractually and is unchanged by 1 day passing.  No extra
+        # simulate_paths call needed — saves one full Monte-Carlo run per
+        # product.
+        if len(dates_base) >= 2:
+            paths_tm1 = paths_base[:, :-1, :]
+            dates_tm1 = dates_base[:-1]
+            T_tm1     = max((dates_base[-2] - today).days / 360, 0.0)
+            fv_tm1, _ = self._fv_from_paths(
+                paths_tm1, dates_tm1, payoff_fn, row, risk_free_rate, T_tm1,
+            )
+            theta     = fv_tm1 - base_fv
         else:
             theta = 0.0
 
@@ -412,7 +481,7 @@ class MonteCarloPricer:
             fv_dn = self.price(row, payoff_fn, vol_map, risk_free_rate, corr_dn)["fair_value"]
             corr_sens = (fv_up - fv_dn) / 2   # per 1 pp correlation move
 
-        return {
+        result = {
             "product_id":  row["product_id"],
             "isins":       isins,
             "underlyings": names,
@@ -422,6 +491,12 @@ class MonteCarloPricer:
             "rho":         rho,       # float
             "corr_sens":   corr_sens, # float | None
         }
+        if return_base_price:
+            notional = float(row["notional"])
+            result["fair_value"]     = base_fv
+            result["fair_value_pct"] = base_fv / notional if notional else float("nan")
+            result["std_error"]      = base_se
+        return result
 
     # ------------------------------------------------------------------
     # Portfolio-level Greeks
@@ -432,7 +507,7 @@ class MonteCarloPricer:
         vol_map: dict,
         risk_free_rates: dict,
         corr_df: pd.DataFrame | None = None,
-    ) -> tuple[pd.DataFrame, pd.DataFrame]:
+    ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         """
         Compute Greeks for every product and aggregate delta to portfolio level.
 
@@ -445,8 +520,15 @@ class MonteCarloPricer:
         portfolio_delta : pd.DataFrame (one row per unique underlying)
             isin, underlying, total_delta_1pct
             Sorted by absolute delta descending — shows largest exposures first.
+
+        fair_values : pd.DataFrame (one row per product)
+            product_id, fair_value, fair_value_pct, std_error.  This is
+            piggy-backed off the same Monte-Carlo base price computed
+            inside ``compute_greeks`` — drop the separate
+            ``price_portfolio`` call to avoid double work.
         """
         greeks_rows = []
+        fv_rows     = []
         delta_agg   = {}   # isin → {"underlying": str, "currency": str, "total": float}
 
         for _, row in portfolio.iterrows():
@@ -454,7 +536,15 @@ class MonteCarloPricer:
             corr_matrix = self._get_corr_subset(row, corr_df)
             payoff_fn   = self._resolve_payoff(row)
 
-            g = self.compute_greeks(row, payoff_fn, vol_map, r, corr_matrix)
+            g = self.compute_greeks(row, payoff_fn, vol_map, r, corr_matrix,
+                                    return_base_price=True)
+
+            fv_rows.append({
+                "product_id":     row["product_id"],
+                "fair_value":     g["fair_value"],
+                "fair_value_pct": g["fair_value_pct"],
+                "std_error":      g["std_error"],
+            })
 
             for isin, name, delta, vega in zip(
                 g["isins"], g["underlyings"], g["delta"], g["vega"]
@@ -494,7 +584,8 @@ class MonteCarloPricer:
             .reset_index(drop=True)
         )
 
-        return greeks_df, portfolio_delta
+        fv_df = pd.DataFrame(fv_rows)
+        return greeks_df, portfolio_delta, fv_df
 
     # ------------------------------------------------------------------
     # Internal helpers

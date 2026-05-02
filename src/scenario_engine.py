@@ -42,7 +42,10 @@ import numpy as np
 import pandas as pd
 
 from src.noise_sampler import NoiseSampler
-from src.reverse_convertible import ReverseConvertible
+from src.reverse_convertible import (
+    ReverseConvertible,
+    vectorised_european_rc_summary,
+)
 
 
 _PERCENTILES = [5, 95]
@@ -243,61 +246,23 @@ class ScenarioEngine:
 
         final_prices = price_paths[:, t_idx_terminal, :]   # (N, n_assets)
 
-        # Per-path RC payoff
-        pnl              = np.zeros(N)
-        return_pct       = np.zeros(N)
-        cash_redemption  = np.zeros(N)
-        worst_underlying = np.empty(N, dtype=object)
-        settlement_type  = np.empty(N, dtype=object)
-        delivered_under  = np.empty(N, dtype=object)
-        delivered_shares = np.zeros(N)
-        fractional_cash  = np.zeros(N)
-        barrier_breached = np.zeros(N, dtype=bool)
-        strike_used      = np.zeros(N)
-        final_spot_used  = np.zeros(N)
-
-        for p in range(N):
-            shocks = [
-                (final_prices[p, i] / spots[i] - 1) * 100
-                for i in range(n_assets)
-            ]
-            rc = ReverseConvertible(row, final_levels=shocks)
-            s  = rc.summary()
-
-            idx       = row["underlyings"].index(s["worst_underlying"])
-            strike    = row["strike"][idx]
-            notional  = row["notional"]
-            ts        = notional / strike
-            price     = final_prices[p, idx]
-            physical  = price < strike
-
-            if physical:
-                d_shares = int(ts)
-                f_cash   = (ts - d_shares) * price
-                cash_red = f_cash
-                d_under  = s["worst_underlying"]
-                stype    = "physical"
-            else:
-                d_shares = 0
-                f_cash   = 0.0
-                cash_red = s["total_payoff"]
-                d_under  = None
-                stype    = "cash"
-
-            pnl[p]              = s["pnl"]
-            return_pct[p]       = s["return_pct"]
-            cash_redemption[p]  = cash_red
-            worst_underlying[p] = s["worst_underlying"]
-            settlement_type[p]  = stype
-            delivered_under[p]  = d_under
-            delivered_shares[p] = d_shares
-            fractional_cash[p]  = f_cash
-            barrier_breached[p] = bool(s["barrier_breached"])
-            strike_used[p]      = strike
-            final_spot_used[p]  = price
+        # Vectorised per-path RC payoff (replaces a Python for-loop that
+        # called ReverseConvertible.summary() once per path).
+        v = vectorised_european_rc_summary(row, final_prices)
+        pnl              = v["pnl"]
+        return_pct       = v["return_pct"]
+        cash_redemption  = v["cash_redemption"]
+        worst_underlying = v["worst_underlying"]
+        settlement_type  = v["settlement_type"]
+        delivered_under  = v["delivered_underlying"]
+        delivered_shares = v["delivered_shares"]
+        fractional_cash  = v["fractional_cash"]
+        barrier_breached = v["barrier_breached"]
+        strike_used      = v["strike_used"]
+        final_spot_used  = v["final_spot_used"]
+        total_cost       = v["total_cost"]
 
         T_remaining = (maturity - date_range[0]).days / 360
-        total_cost  = float(ReverseConvertible(row, final_levels=[0]*n_assets).summary()["total_cost"])
 
         return {
             "product_id":         row["product_id"],

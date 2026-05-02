@@ -313,7 +313,11 @@ class TestPreviousSpots:
         rc = ReverseConvertible(row, price_db=db)
         assert rc._get_previous_spots() == [93.0]
 
-    def test_build_previous_rc_returns_none_without_history(self):
+    def test_summary_pnl_delta_none_without_history(self):
+        """Without a price DB, prev_spots == current_spots so the
+        pnl/distance deltas are reported as None."""
         row = make_brc_row(current_spot=95.0)
         rc = ReverseConvertible(row, price_db=None)
-        assert rc._build_previous_rc() is None
+        s = rc.summary()
+        assert s["pnl_delta"]      is None
+        assert s["distance_delta"] is None

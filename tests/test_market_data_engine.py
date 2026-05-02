@@ -397,14 +397,19 @@ class TestBuildCorrMatrix:
 
 
     def test_identical_series_gives_correlation_one(self, engine):
-        """Same price path → correlation ≈ 1"""
-        rows = []
+        """Same price path → correlation ≈ 1.
 
+        Daily log-returns of a strictly geometric series are constant,
+        which makes Pearson correlation undefined (0/0).  Use a small
+        random walk instead so the returns have non-zero variance — the
+        two series remain identical so corr must still be 1.
+        """
+        rng = np.random.default_rng(0)
+        rows = []
         price = 100.0
         for d in range(500):
-            price *= 1.001
+            price *= (1 + rng.normal(0, 0.005))
             date = pd.Timestamp("2020-01-01") + pd.offsets.BDay(d)
-
             rows.append({"date": date, "isin": "CH001", "ticker": "A", "price": price})
             rows.append({"date": date, "isin": "CH002", "ticker": "B", "price": price})
 

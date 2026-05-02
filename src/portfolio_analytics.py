@@ -1,9 +1,25 @@
+import functools
 import pandas as pd
 import numpy as np
 import requests
 from datetime import datetime
 from scipy.optimize import brentq
 from src.reverse_convertible import ReverseConvertible
+
+
+@functools.lru_cache(maxsize=8)
+def _fetch_fx_rates(reference_currency: str) -> dict:
+    """Fetch FX rates against ``reference_currency`` from Frankfurter.
+
+    Cached at the module level so repeated :class:`PortfolioAnalytics`
+    instantiations within the same process don't re-hit the network.
+    Keys are ``(from_ccy, reference_currency)`` tuples mapping to the
+    multiplier that converts from-ccy → ref ccy.
+    """
+    url = f"https://api.frankfurter.app/latest?from={reference_currency}"
+    response = requests.get(url, timeout=10)
+    rates = response.json()["rates"]
+    return {(ccy, reference_currency): 1 / rate for ccy, rate in rates.items()}
 
 
 class PortfolioAnalytics:
@@ -79,19 +95,8 @@ class PortfolioAnalytics:
         self.product_df = product_df
         return self.product_df
     def _get_fx_rates(self):
-        url = f"https://api.frankfurter.app/latest?from={self.reference_currency}"
-        response = requests.get(url)
-        data = response.json()
-    
-        rates = data["rates"]
-    
-        fx_dict = {}
-
-        for ccy, rate in rates.items():
-            # invert to get ccy → reference_currency
-            fx_dict[(ccy, self.reference_currency)] = 1 / rate
-    
-        return fx_dict
+        """Module-level LRU cache prevents re-hitting the network."""
+        return _fetch_fx_rates(self.reference_currency)
     
     def convert_to_reference(self, value, from_currency):
         if from_currency == self.reference_currency:
@@ -368,16 +373,20 @@ class PortfolioAnalytics:
         labels = ["<=1M", "1-3M", "3-6M", "6-12M", "1-2Y", ">2Y"]
         
         df["maturity_bucket"] = pd.cut(df["days_to_maturity"], bins=bins, labels=labels)
-  
-        df["total_cost_ref"] = df.apply(
-             lambda row: self.convert_to_reference(row["total_cost"], row["currency"]), axis=1
-         )
-        df["total_payoff_ref"] = df.apply(
-             lambda row: self.convert_to_reference(row["total_payoff"], row["currency"]), axis=1
-         )
-        df["pnl_ref"] = df.apply(
-             lambda row: self.convert_to_reference(row["pnl"], row["currency"]), axis=1
-         )
+
+        # Vectorised FX conversion — build a per-row rate vector once,
+        # then multiply, instead of N row-by-row Python lambdas.
+        ref = self.reference_currency
+        rate = df["currency"].map(
+            lambda c: 1.0 if c == ref
+            else self.fx_rates.get((c, ref))
+        )
+        if rate.isna().any():
+            missing = df.loc[rate.isna(), "currency"].unique().tolist()
+            raise ValueError(f"Missing FX rate(s): {missing}")
+        df["total_cost_ref"]   = df["total_cost"]   * rate
+        df["total_payoff_ref"] = df["total_payoff"] * rate
+        df["pnl_ref"]          = df["pnl"]          * rate
   
         return (
              df.groupby("maturity_bucket", as_index=False, observed=False)

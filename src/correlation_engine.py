@@ -7,7 +7,7 @@ class CorrelationEngine:
     def __init__(self, market_data_engine):
         self.mde = market_data_engine
 
-    def build_corr_matrix(self, isin_ticker_map, years=6, force_refresh=False):
+    def build_corr_matrix(self, isin_ticker_map, years=3, force_refresh=False):
         db = self.mde.fetch_daily_prices(
             isin_ticker_map, years=years, force_refresh=force_refresh
         )
