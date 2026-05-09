@@ -1,0 +1,138 @@
+"""Scenario archetypes — user-friendly shorthand for drifts.
+
+The UI lets the user pick an *archetype* (e.g. "Fast recovery"); the engine
+consumes a numerical per-factor drift dict.  Translation happens here so
+the engine stays purely numerical and presets / UI share one vocabulary.
+
+Coupling design
+---------------
+For **events**, the post-event drift is **coupled to the shock magnitude**.
+A −25 % shock + "Fast recovery (~6mo)" produces a much steeper recovery
+slope than a −5 % + "Fast recovery" — that's the V-shape mechanic the user
+asked for.  The post-event drift per factor is::
+
+    drift_i = sign × log(1 + shock_i/100) / horizon
+
+with ``(sign, horizon)`` set by the archetype (see
+:data:`EVENT_RECOVERY_ARCHETYPES`).  ``sign = -1`` means *recovery* (drift
+reverses the shock); ``sign = +1`` means *continuation*; ``sign = 0`` flat.
+
+Concrete examples (per-factor), with shock −25 %:
+
+* Continued bear      → drift = +log(0.75)/1   ≈ −0.288  /y  (continues down)
+* Stable              → drift = 0
+* Slow recovery (2y)  → drift = −log(0.75)/2   ≈ +0.144  /y  (recovers in 2y)
+* Fast recovery (6mo) → drift = −log(0.75)/0.5 ≈ +0.575  /y  (V-shape)
+
+For **initial market state** (before any event), there is no shock to
+couple to, so a simpler vocabulary is used — see
+:data:`INITIAL_MARKET_STATES`.
+"""
+from __future__ import annotations
+
+import math
+from typing import Iterable
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Archetype tables
+# ──────────────────────────────────────────────────────────────────────────
+
+# Event recovery: (sign relative to shock direction, horizon in years).
+# The drift formula is ``sign × log(1 + shock/100) / horizon``.
+EVENT_RECOVERY_ARCHETYPES: dict[str, tuple[int, float]] = {
+    "Continued bear":             (+1, 1.0),
+    "Stable (no drift)":          (0,  1.0),
+    "Slow recovery (~2y)":        (-1, 2.0),
+    "Fast recovery (~6mo)":       (-1, 0.5),
+    "Very fast recovery (~1mo)":  (-1, 1.0 / 12.0),
+}
+
+# Initial market state — no shock to couple to, so plain annualised drifts.
+INITIAL_MARKET_STATES: dict[str, float] = {
+    "Bear market (-7 %/y)":   -0.07,
+    "Stable (0 %)":            0.00,
+    "Bull market (+7 %/y)":   +0.07,
+    "Strong bull (+15 %/y)":  +0.15,
+}
+
+DEFAULT_INITIAL_MARKET_STATE = "Stable (0 %)"
+DEFAULT_RECOVERY_ARCHETYPE   = "Stable (no drift)"
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Translators
+# ──────────────────────────────────────────────────────────────────────────
+
+def event_drift_for_factor(shock_pct: float, archetype: str) -> float:
+    """Per-factor annualised drift given (shock %, recovery archetype)."""
+    if archetype not in EVENT_RECOVERY_ARCHETYPES:
+        raise ValueError(f"Unknown recovery archetype: {archetype}")
+    sign, horizon = EVENT_RECOVERY_ARCHETYPES[archetype]
+    if sign == 0:
+        return 0.0
+    # Guard against pathological shocks that would give log of non-positive.
+    multiplier = max(1.0 + float(shock_pct) / 100.0, 1e-8)
+    log_shock = math.log(multiplier)
+    return float(sign) * log_shock / float(horizon)
+
+
+def event_next_drift_dict(
+    shock_dict: dict,
+    archetype: str,
+    factor_codes: Iterable[str],
+) -> dict[str, float]:
+    """``next_drift_pa`` dict for an event, per factor, from shock + archetype."""
+    return {
+        c: event_drift_for_factor(float(shock_dict.get(c, 0.0)), archetype)
+        for c in factor_codes
+    }
+
+
+def initial_drift_dict(
+    market_state: str,
+    factor_codes: Iterable[str],
+) -> dict[str, float]:
+    """Translate the initial-market-state archetype → uniform drift dict."""
+    if market_state not in INITIAL_MARKET_STATES:
+        raise ValueError(f"Unknown initial market state: {market_state}")
+    drift = INITIAL_MARKET_STATES[market_state]
+    return {c: drift for c in factor_codes}
+
+
+def translate_ui_scenario(ui_scenario: dict, factor_codes: Iterable[str]) -> dict:
+    """Translate a UI/preset scenario (archetype labels) → engine scenario
+    (numerical ``initial_drift_pa`` + per-event ``next_drift_pa``).
+
+    Pass-through keys (``idio_intensity``, ``mean_reversion_kappa``,
+    ``label``, ``description`` …) are preserved.
+    """
+    factor_codes = list(factor_codes)
+
+    initial_state = ui_scenario.get("initial_market_state", DEFAULT_INITIAL_MARKET_STATE)
+    out_events = []
+    for ev in ui_scenario.get("events", []) or []:
+        shock_dict = dict(ev.get("factor_shock", {}) or {})
+        archetype  = ev.get("recovery", DEFAULT_RECOVERY_ARCHETYPE)
+        # Each archetype has a (sign, horizon) pair — the horizon bounds
+        # how long the recovery drift is meant to run.  Past it the
+        # engine reverts to ``initial_drift_pa`` (unless a later event
+        # supersedes earlier).
+        _sign, horizon = EVENT_RECOVERY_ARCHETYPES[archetype]
+        out_events.append({
+            "day":                      int(ev["day"]),
+            "factor_shock":             shock_dict,
+            "next_drift_pa":            event_next_drift_dict(shock_dict, archetype, factor_codes),
+            "next_drift_horizon_years": float(horizon),
+            "recovery":                 archetype,   # kept for UI round-trip
+        })
+
+    passthrough = {
+        k: v for k, v in ui_scenario.items()
+        if k not in {"initial_market_state", "events"}
+    }
+    return {
+        **passthrough,
+        "initial_drift_pa": initial_drift_dict(initial_state, factor_codes),
+        "events":            out_events,
+    }

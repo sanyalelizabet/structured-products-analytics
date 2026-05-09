@@ -154,8 +154,8 @@ p5 = {
     "coupon": 0.14,
     "initial_fixing_date": "2026-04-14",
     "purchase_date": "2026-04-14",
-    "maturity_date": "2028-04-28",
-    "coupon_dates": ["2027-04-28", "2028-04-28"],
+    "maturity_date": "2027-04-27",
+    "coupon_dates": ["2027-04-27", "2028-04-27"],
     "day_count": "ACT/360",
     "barrier_breached": False,
 }

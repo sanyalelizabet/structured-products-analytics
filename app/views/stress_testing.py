@@ -19,26 +19,41 @@ import streamlit as st
 
 from app.config import SCENARIO_PRESETS, SCENARIO_CUSTOM_DEFAULT
 from src.noise_sampler import NoiseSampler
+from src.scenario_archetypes import (
+    DEFAULT_INITIAL_MARKET_STATE,
+    DEFAULT_RECOVERY_ARCHETYPE,
+    EVENT_RECOVERY_ARCHETYPES,
+    INITIAL_MARKET_STATES,
+    event_drift_for_factor,
+    initial_drift_dict,
+)
 from src.scenario_engine import ScenarioEngine
 
 
+# Palette — kept in sync with ``app/views/portfolio.py`` so the whole app
+# speaks one visual language.
+_PRIMARY      = "#4E79A7"
+_POSITIVE     = "#76A65A"
+_NEGATIVE     = "#C0504D"
+_NEUTRAL_GREY = "#7A8797"
+_WARNING      = "#C9A961"
+_ACCENT_DEEP  = "#2A3F5F"
+
 _ASSET_PALETTE = [
-    "#4E79A7", "#F28E2B", "#E15759", "#76B7B2", "#59A14F",
-    "#EDC948", "#B07AA1", "#FF9DA7", "#9C755F", "#BAB0AC", "#86BCB6",
+    _PRIMARY, _POSITIVE, "#9C755F", _WARNING, _ACCENT_DEEP, _NEUTRAL_GREY,
+    "#3FA29E", "#8E7CC3", "#A35F4A", "#5E8A6E", "#7E91AB",
 ]
-_SHOCK_COLOR = "#C0504D"
+_SHOCK_COLOR = _NEGATIVE
 
 _SAMPLER_KEY = "single_factor_noise_sampler"
 
 
 def render(portfolio, corr_df, beta_map, vol_map_implied, vol_map_realised,
            risk_free_rates, fx_rates=None, reference_currency=None):
-    st.subheader("Stress Testing — Single-Factor Path Engine (multi-path MC)")
-    st.caption(
-        "Path defined as drift → shock(s) → drift to maturity, vectorised "
-        "across paths.  A session-cached NoiseSampler keeps the underlying "
-        "noise stable across slider nudges (Common Random Numbers)."
-    )
+    """``fx_rates`` and ``reference_currency`` are accepted for API
+    compatibility with the streamlit_app routing layer."""
+    _ = fx_rates, reference_currency   # reserved for cross-ccy consolidation
+    st.subheader("Stress Testing")
 
     # ── Top control row ──────────────────────────────────────────────────
     col_preset, col_paths, col_regen = st.columns([3, 2, 1])
@@ -69,6 +84,7 @@ def render(portfolio, corr_df, beta_map, vol_map_implied, vol_map_realised,
         market_shock = st.slider(
             "Market Shock per Event (%)", min_value=-25, max_value=2,
             value=int(default["market_shock"]),
+            help="Magnitude of each discrete shock applied to the market index.",
         )
         n_shocks = st.number_input(
             "Number of Shock Events", min_value=1, max_value=3,
@@ -78,30 +94,63 @@ def render(portfolio, corr_df, beta_map, vol_map_implied, vol_map_realised,
             "Days to First Shock", min_value=1, max_value=300,
             value=int(default["shock_in_days"]),
         )
-
-    with col2:
         shock_spacing_days = st.number_input(
             "Days Between Shocks", min_value=0, max_value=365,
             value=int(default["shock_spacing_days"]),
         )
-        pre_shock_drift = st.slider(
-            "Pre-Shock Drift (% p.a.)", min_value=-20.0, max_value=20.0,
-            value=float(default["pre_shock_drift_pa"] * 100),
-        ) / 100
-        post_shock_drift = st.slider(
-            "Post-Shock Drift (% p.a.)", min_value=-20.0, max_value=20.0,
-            value=float(default["post_shock_drift_pa"] * 100),
-        ) / 100
+
+    with col2:
+        # Initial market state — same vocabulary as Factor Stress.
+        init_options = list(INITIAL_MARKET_STATES.keys())
+        init_default = default.get("initial_market_state", DEFAULT_INITIAL_MARKET_STATE)
+        initial_state = st.selectbox(
+            "Initial market state",
+            options=init_options,
+            index=init_options.index(init_default) if init_default in init_options
+                  else init_options.index(DEFAULT_INITIAL_MARKET_STATE),
+            help="Market behaviour BEFORE the first shock.",
+        )
+
+        # Recovery archetype — coupled to the market shock magnitude.
+        rec_options = list(EVENT_RECOVERY_ARCHETYPES.keys())
+        rec_default = default.get("recovery", DEFAULT_RECOVERY_ARCHETYPE)
+        recovery = st.selectbox(
+            "Recovery (after final shock)",
+            options=rec_options,
+            index=rec_options.index(rec_default) if rec_default in rec_options
+                  else rec_options.index(DEFAULT_RECOVERY_ARCHETYPE),
+            help=("How the market behaves AFTER the final shock.  Speed is "
+                  "*coupled* to the shock magnitude — a bigger shock + Fast "
+                  "recovery produces a steeper rebound (V-shape)."),
+        )
+
+    # ── Translate archetypes → numerical drifts the engine expects ────────
+    pre_shock_drift   = initial_drift_dict(initial_state, ["MKT"])["MKT"]
+    post_shock_drift  = event_drift_for_factor(market_shock, recovery)
+    # Recovery archetype carries its own horizon (years).  After that, the
+    # market reverts to the initial market state — preventing the recovery
+    # drift from running forever and producing extreme overshoots.
+    _, recovery_horizon_years = EVENT_RECOVERY_ARCHETYPES[recovery]
+    post_recovery_drift = pre_shock_drift   # back to "normal"
+
+    # Show the user the implied numerical drifts (transparency).
+    st.caption(
+        f"→ Implied drift: pre-shock **{pre_shock_drift*100:+.1f} %/y**, "
+        f"recovery **{post_shock_drift*100:+.1f} %/y** for "
+        f"~{recovery_horizon_years:.2f} y, then back to "
+        f"**{post_recovery_drift*100:+.1f} %/y**."
+    )
 
     scenario = {
-        "market_shock":       market_shock,
-        "n_shocks":           int(n_shocks),
-        "shock_in_days":      int(shock_in_days),
-        "shock_spacing_days": int(shock_spacing_days),
-        "pre_shock_drift_pa": float(pre_shock_drift),
-        "post_shock_drift_pa": float(post_shock_drift),
+        "market_shock":           market_shock,
+        "n_shocks":               int(n_shocks),
+        "shock_in_days":          int(shock_in_days),
+        "shock_spacing_days":     int(shock_spacing_days),
+        "pre_shock_drift_pa":     float(pre_shock_drift),
+        "post_shock_drift_pa":    float(post_shock_drift),
+        "recovery_horizon_years": float(recovery_horizon_years),
+        "post_recovery_drift_pa": float(post_recovery_drift),
     }
-
 
     # ── Session-level NoiseSampler (CRN) ─────────────────────────────────
     sampler = _get_or_make_sampler(portfolio, n_paths, regen_clicked)
@@ -111,7 +160,6 @@ def render(portfolio, corr_df, beta_map, vol_map_implied, vol_map_realised,
         portfolio=portfolio, beta_map=beta_map, vol_map=vol_map,
         risk_free_rates=risk_free_rates,
         n_paths=n_paths, noise_sampler=sampler,
-        fx_rates=fx_rates, reference_currency=reference_currency,
     )
     res = engine.run_path_scenario(scenario, corr_df=corr_df)
     st.session_state[_SAMPLER_KEY] = engine.noise_sampler
@@ -119,7 +167,6 @@ def render(portfolio, corr_df, beta_map, vol_map_implied, vol_map_realised,
     # ── Output ───────────────────────────────────────────────────────────
     st.markdown("---")
     _render_portfolio_summary(res)
-    _render_portfolio_summary_ref(res)
 
     left_col, right_col = st.columns([2, 3])
 
@@ -142,7 +189,6 @@ def render(portfolio, corr_df, beta_map, vol_map_implied, vol_map_realised,
             market_shock=market_shock,
         )
         _render_pnl_distribution(res["pnl_samples_by_ccy"])
-        _render_pnl_distribution_ref(res)
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -179,7 +225,7 @@ def _hex_to_rgba(hex_color: str, alpha: float) -> str:
 
 
 def _fan_band_traces(df, color, name):
-    """Two transparent traces forming a median ± 1σ band, both grouped
+    """Two transparent traces forming a ±1σ band, both grouped
     with the asset's median line so legend clicks toggle the whole asset."""
     return [
         go.Scatter(
@@ -236,8 +282,6 @@ def _render_asset_paths_fan(asset_paths: dict, portfolio, scenario):
         norm = pd.DataFrame({
             "date":      df["date"],
             "median":    df["median"]    / spot0 * 100,
-            "p5":        df["p5"]        / spot0 * 100,
-            "p95":       df["p95"]       / spot0 * 100,
             "lower_1sd": df["lower_1sd"] / spot0 * 100,
             "upper_1sd": df["upper_1sd"] / spot0 * 100,
         })
@@ -398,79 +442,6 @@ def _render_pnl_distribution(samples_by_ccy: dict):
 # Tables
 # ──────────────────────────────────────────────────────────────────────────
 
-def _render_portfolio_summary_ref(res):
-    """Reference-currency portfolio summary (item 4).  Skipped silently
-    when no FX context was passed to the engine."""
-    pf_ref = res.get("pf_scenario_ref")
-    if pf_ref is None or len(pf_ref) == 0:
-        return
-    ccy = res.get("reference_currency", "")
-    st.markdown(f"### Portfolio Stress Summary — {ccy} (reference currency)")
-    st.dataframe(
-        pf_ref.round(2).rename(columns={
-            "reference_currency":           "Reference CCY",
-            "n_currencies":                 "# Currencies",
-            "total_cost_ref":               f"Total Cost ({ccy})",
-            "pnl_mean":                     "PnL Mean",
-            "pnl_median":                   "PnL Median",
-            "pnl_p5":                       "PnL 5%",
-            "pnl_p95":                      "PnL 95%",
-            "pnl_es5":                      "ES (worst 5%)",
-            "portfolio_return_mean_pct":    "Return Mean (%)",
-            "portfolio_return_p5_pct":      "Return 5% (%)",
-        }),
-        width="stretch", hide_index=True,
-    )
-
-
-def _render_pnl_distribution_ref(res):
-    """Histogram + metrics for the per-path total P&L in the reference
-    currency (item 4)."""
-    samples = res.get("pnl_samples_ref")
-    if samples is None or len(samples) == 0:
-        return
-    ccy = res.get("reference_currency", "")
-
-    st.markdown(f"### Portfolio P&L Distribution — {ccy} (reference currency)")
-    mean   = float(samples.mean())
-    median = float(np.median(samples))
-    p5     = float(np.percentile(samples, 5))
-    p95    = float(np.percentile(samples, 95))
-    es5    = (float(samples[samples <= p5].mean())
-              if len(samples) >= 20 else float(samples.min()))
-
-    fig = go.Figure()
-    fig.add_trace(go.Histogram(x=samples, nbinsx=30, marker_color="#76B7B2", opacity=0.85))
-    for label, value, color in [
-        ("Mean",   mean,   "#EDC948"),
-        ("Median", median, "#4E79A7"),
-        ("5%",     p5,     _SHOCK_COLOR),
-        ("95%",    p95,    "#59A14F"),
-    ]:
-        fig.add_vline(
-            x=value,
-            line=dict(color=color, width=1.5, dash="dash"),
-            annotation_text=f"{label}: {value:,.0f}",
-            annotation_position="top",
-            annotation_font=dict(color=color, size=10),
-        )
-    fig.update_layout(
-        template="plotly_dark", height=320,
-        margin=dict(t=50, b=40, l=40, r=20),
-        xaxis_title=f"Portfolio P&L ({ccy})",
-        yaxis_title="Number of paths",
-        showlegend=False,
-    )
-    st.plotly_chart(fig, width="stretch")
-
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Mean P&L",       f"{mean:,.0f}")
-    c2.metric("Median P&L",     f"{median:,.0f}")
-    c3.metric("5% P&L",         f"{p5:,.0f}")
-    c4.metric("95% P&L",        f"{p95:,.0f}")
-    c5.metric("ES (worst 5%)",  f"{es5:,.0f}")
-
-
 def _render_portfolio_summary(res):
     st.markdown("### Portfolio Stress Summary")
     pf = res["pf_scenario_per_ccy"].copy().round(2)
@@ -530,11 +501,6 @@ def _render_delivered_stocks(res):
         return
     df = delivered.copy()
     df["return_pct"] = df["return_pct"] * 100
-    # Format delivery date for readability
-    if "final_delivery_date" in df.columns:
-        df["final_delivery_date"] = pd.to_datetime(
-            df["final_delivery_date"], errors="coerce"
-        ).dt.strftime("%Y-%m-%d")
     df = df.round(2)
     st.dataframe(
         df.rename(columns={
@@ -549,7 +515,6 @@ def _render_delivered_stocks(res):
             "cost":                  "Cost",
             "pnl":                   "PnL",
             "return_pct":            "Return (%)",
-            "final_delivery_date":   "Final Delivery Date",
         }),
         width="stretch", hide_index=True,
     )

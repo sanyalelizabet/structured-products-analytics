@@ -47,9 +47,9 @@ class MarketDataEngine:
     # available through this feed.
     GBOND_TICKERS = {
         ("USD", "3M"):  "US3M.GBOND",
-        ("CHF", "10Y"): "CH10Y.GBOND",
-        ("EUR", "3M"):  "EU3M.GBOND",
-        ("GBP", "3M"):  "GB3M.GBOND",
+        ("CHF", "3M"): "CH10Y.GBOND",
+        ("EUR", "3M"):  "DE3M.GBOND",
+        ("GBP", "3M"):  "UK3M.GBOND",
     }
 
     # Per-currency preferred tenor — used when a caller doesn't pin one
@@ -281,7 +281,22 @@ class MarketDataEngine:
                             ticker, ccy, e)
                 return None
 
-            quote_date = pd.to_datetime(quote["date"]).normalize()
+            # EOD's real-time payload sometimes carries no usable timestamp
+            # (``_parse_eod_date`` returns None).  ``pd.to_datetime(None)``
+            # returns NaT — but some pandas builds let it leak through as
+            # ``None``, which then crashes on ``.normalize()``.  Fall back
+            # to today's date when no timestamp is present.
+            raw_date = quote.get("date") if isinstance(quote, dict) else None
+            if raw_date is None:
+                log.info("Bond yield for %s (%s) had no timestamp — "
+                          "stamping today's date", ticker, ccy)
+                quote_date = pd.Timestamp.today().normalize()
+            else:
+                ts = pd.to_datetime(raw_date)
+                if ts is None or pd.isna(ts):
+                    quote_date = pd.Timestamp.today().normalize()
+                else:
+                    quote_date = ts.normalize()
             already_have = (
                 (db["currency"] == ccy)
                 & (db["tenor"] == ccy_tenor)

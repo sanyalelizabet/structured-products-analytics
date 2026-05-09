@@ -1,14 +1,5 @@
 """Multi-factor stress engine — vectorised across paths for Monte Carlo.
 
-Common Random Numbers (CRN) policy
-----------------------------------
-All randomness comes from a :class:`NoiseSampler`.  The engine never
-seeds RNGs itself — there is no scenario-dependent hashing of any kind.
-Sharing one sampler across scenario runs keeps draws identical so
-scenario-to-scenario differences reflect only the scenario parameter
-change.  To request a fresh draw, the caller explicitly calls
-``sampler.regenerate()`` or ``sampler.regenerate(seed=...)``.
-
 Pipeline
 --------
 1. Simulate ``n_paths`` factor paths via correlated mean-reverting GBM:
@@ -48,15 +39,14 @@ Output schema (``run_path_scenario``)
 """
 from __future__ import annotations
 
+import hashlib
+
 import numpy as np
 import pandas as pd
 
 from src.factor_engine import FACTORS
 from src.noise_sampler import NoiseSampler
-from src.reverse_convertible import (
-    ReverseConvertible,
-    vectorised_european_rc_summary,
-)
+from src.reverse_convertible import ReverseConvertible
 
 
 _PERCENTILES = [5, 95]
@@ -76,8 +66,6 @@ class FactorScenarioEngine:
         n_paths: int = 100,
         noise_sampler: NoiseSampler | None = None,
         years_for_factor_stats: int = 3,
-        fx_rates: dict | None = None,
-        reference_currency: str | None = None,
     ):
         self.portfolio    = portfolio
         self.loadings     = loadings
@@ -86,8 +74,6 @@ class FactorScenarioEngine:
         self.idio_lambda  = float(idio_intensity)
         self.kappa        = float(mean_reversion_kappa)
         self.n_paths      = int(n_paths)
-        self.fx_rates           = fx_rates
-        self.reference_currency = reference_currency
 
         self.factor_codes = list(FACTORS.keys())
 
@@ -117,6 +103,13 @@ class FactorScenarioEngine:
             return 0.15
         return float(self.loadings[isin]["idio_vol"])
 
+    @staticmethod
+    def _scenario_seed(scenario: dict) -> int:
+        flat = {k: (sorted(v.items()) if isinstance(v, dict) else v)
+                for k, v in scenario.items()}
+        h = hashlib.md5(str(sorted(flat.items())).encode()).hexdigest()
+        return int(h, 16) % (2 ** 31)
+
     def _ensure_sampler(self, n_days: int, all_isins: list[str]) -> NoiseSampler:
         """Return a noise sampler matching the requested dimensions; create
         if missing or incompatible."""
@@ -136,9 +129,71 @@ class FactorScenarioEngine:
 
     # ───────────────────────────────────────────────────── factor simulation
 
+    def _normalise_scenario(self, scenario: dict) -> dict:
+        """Translate any of the three accepted scenario schemas into the
+        engine's numerical schema (``initial_drift_pa`` + ``events`` with
+        numerical ``next_drift_pa`` per event):
+
+        1. **UI / preset schema**  — has ``initial_market_state`` and/or
+           per-event ``recovery`` archetype labels.  Translated via
+           :func:`scenario_archetypes.translate_ui_scenario`.
+        2. **Engine schema**       — already numerical (``initial_drift_pa``,
+           per-event ``next_drift_pa``).  Returned as-is.
+        3. **Legacy schema**       — ``factor_shock + n_shocks + …``.
+           Expanded into the equivalent event timeline.
+        """
+        from src.scenario_archetypes import translate_ui_scenario
+
+        # 1. UI form — needs archetype translation
+        events_have_archetypes = (
+            isinstance(scenario.get("events"), list)
+            and any("recovery" in e for e in scenario["events"])
+        )
+        if "initial_market_state" in scenario or events_have_archetypes:
+            return translate_ui_scenario(scenario, self.factor_codes)
+
+        # 2. Already engine-ready
+        if "events" in scenario or "initial_drift_pa" in scenario:
+            return scenario
+
+        # 3. Legacy → events translation
+        n_shocks           = int(scenario.get("n_shocks", 0))
+        shock_in_days      = int(scenario.get("shock_in_days", 0))
+        shock_spacing_days = int(scenario.get("shock_spacing_days", 0))
+        factor_shock       = dict(scenario.get("factor_shock", {}) or {})
+        pre_drift          = dict(scenario.get("factor_drift_pre_pa", {}) or {})
+        post_drift         = dict(scenario.get("factor_drift_post_pa", {}) or {})
+
+        events = []
+        for i in range(n_shocks):
+            day        = shock_in_days + i * shock_spacing_days
+            # Drift switches to the post-shock regime only after the LAST shock.
+            next_drift = post_drift if i == n_shocks - 1 else pre_drift
+            events.append({
+                "day":           day,
+                "factor_shock":  dict(factor_shock),
+                "next_drift_pa": dict(next_drift),
+            })
+
+        passthrough = {
+            k: v for k, v in scenario.items() if k not in {
+                "factor_shock", "n_shocks", "shock_in_days", "shock_spacing_days",
+                "factor_drift_pre_pa", "factor_drift_post_pa",
+            }
+        }
+        return {
+            **passthrough,
+            "initial_drift_pa": dict(pre_drift),
+            "events":           events,
+        }
+
     def _simulate_factor_paths(self, scenario: dict, sampler: NoiseSampler):
         """Run vectorised correlated mean-reverting GBM on the K-dim factor
-        block across all paths simultaneously.
+        block across all paths.  The scenario is an *event timeline*: an
+        initial per-factor drift, followed by a series of dated events.
+        Each event applies a multiplicative factor shock and (optionally)
+        switches the drift to a new per-factor vector for the segment that
+        follows.
 
         Returns
         -------
@@ -146,47 +201,50 @@ class FactorScenarioEngine:
         log_F_paths    : np.ndarray, shape (n_paths, n_days, K)
         factor_returns : np.ndarray, shape (n_paths, n_days, K)
         """
+        scenario = self._normalise_scenario(scenario)
+
         today              = pd.Timestamp.today().normalize()
         portfolio_maturity = pd.to_datetime(self.portfolio["maturity_date"]).max()
-
-        n_shocks           = int(scenario.get("n_shocks", 0))
-        shock_in_days      = int(scenario.get("shock_in_days", 0))
-        shock_spacing_days = int(scenario.get("shock_spacing_days", 0))
-        factor_shock       = scenario.get("factor_shock", {}) or {}
-        drift_pre          = scenario.get("factor_drift_pre_pa", {}) or {}
-        drift_post         = scenario.get("factor_drift_post_pa", {}) or {}
 
         date_range = pd.bdate_range(start=today, end=portfolio_maturity)
         n_days     = len(date_range)
         K          = len(self.factor_codes)
         N          = self.n_paths
+        T_total    = (portfolio_maturity - today).days / 360
 
-        T_total = (portfolio_maturity - today).days / 360
-        shock_offsets = sorted(
-            shock_in_days + i * shock_spacing_days
-            for i in range(n_shocks)
-            if (shock_in_days + i * shock_spacing_days) / 360 <= T_total
+        # ── Initial and current drift vectors ────────────────────────────
+        initial_drift = scenario.get("initial_drift_pa", {}) or {}
+        initial_drift_vec = np.array(
+            [float(initial_drift.get(c, 0.0)) for c in self.factor_codes]
         )
-        shock_dates = set()
-        for d in shock_offsets:
-            target = today + pd.Timedelta(days=d)
-            nearest_idx = int(np.argmin(np.abs(date_range - target)))
-            shock_dates.add(date_range[nearest_idx])
+        current_drift_vec = initial_drift_vec.copy()
+        # Tracks when the currently active recovery drift expires; ``None``
+        # means "no expiry" (legacy behaviour).  When ``t_years`` exceeds
+        # this, the drift reverts to ``initial_drift_vec``.
+        current_drift_expires_at: float | None = None
 
-        T_first_shock = (shock_offsets[0]  / 360) if shock_offsets else T_total
-        T_last_shock  = (shock_offsets[-1] / 360) if shock_offsets else 0.0
+        # ── Resolve events: filter inside-horizon, sort, snap to bdays ──
+        raw_events = list(scenario.get("events", []) or [])
+        # Drop events past portfolio horizon
+        events = [
+            e for e in raw_events
+            if int(e.get("day", 0)) / 360 <= T_total
+        ]
+        events.sort(key=lambda e: int(e["day"]))
 
-        vols       = np.array([float(self.factor_vol_ser.loc[c]) for c in self.factor_codes])
-        mu_pre     = np.array([float(drift_pre.get(c, 0.0))  for c in self.factor_codes])
-        mu_post    = np.array([float(drift_post.get(c, 0.0)) for c in self.factor_codes])
-        shock_vec  = np.array([float(factor_shock.get(c, 0.0)) / 100.0
-                               for c in self.factor_codes])
+        # Map event index → nearest business day in date_range
+        event_by_bday: dict[pd.Timestamp, dict] = {}
+        for e in events:
+            target = today + pd.Timedelta(days=int(e["day"]))
+            idx    = int(np.argmin(np.abs(date_range - target)))
+            event_by_bday[date_range[idx]] = e
 
-        # Cholesky-correlate the cached factor noise: (N, n_days, K) @ (K, K).
+        # ── Volatilities & cached factor noise ───────────────────────────
+        vols   = np.array([float(self.factor_vol_ser.loc[c]) for c in self.factor_codes])
         Z_raw  = sampler.factor_noise()
         Z_corr = Z_raw @ self.L_factor.T
 
-        # Vectorised state across paths
+        # ── Vectorised state across paths ────────────────────────────────
         log_F     = np.zeros((N, K))
         log_theta = np.zeros((N, K))
         log_paths = np.zeros((N, n_days, K))
@@ -196,28 +254,52 @@ class FactorScenarioEngine:
             dt      = (bday - prev_date).days / 360 if t_idx > 0 else 0.0
             t_years = (bday - today).days / 360
 
-            if t_years <= T_first_shock:
-                mu = mu_pre
-            elif t_years > T_last_shock:
-                mu = mu_post
-            else:
-                mu = mu_pre   # during shock window — discrete shocks layer on top
+            # Recovery horizon expiry: revert to initial drift once the
+            # current event's recovery window has elapsed.  This prevents
+            # a Fast/Very-Fast recovery drift from running until maturity.
+            if (
+                current_drift_expires_at is not None
+                and t_years >= current_drift_expires_at
+            ):
+                current_drift_vec = initial_drift_vec.copy()
+                current_drift_expires_at = None
 
+            # Drift step uses the *currently active* segment drift.
             if dt > 0:
-                drift_corr = (mu - 0.5 * vols ** 2) * dt          # (K,)
-                log_theta += drift_corr                           # broadcast (K,)
-                # log_F shape (N, K); each broadcasts cleanly
+                drift_corr = (current_drift_vec - 0.5 * vols ** 2) * dt    # (K,)
+                log_theta += drift_corr
                 log_F += (
                     drift_corr
                     + self.kappa * (log_theta - log_F) * dt
                     + vols * np.sqrt(dt) * Z_corr[:, t_idx, :]
                 )
 
-            if bday in shock_dates:
-                shock_factor = np.maximum(1.0 + shock_vec, 1e-8)  # (K,)
+            # Discrete event: apply shock, then switch the drift segment.
+            if bday in event_by_bday:
+                e = event_by_bday[bday]
+                shock_dict = e.get("factor_shock", {}) or {}
+                shock_vec  = np.array(
+                    [float(shock_dict.get(c, 0.0)) / 100.0 for c in self.factor_codes]
+                )
+                shock_factor = np.maximum(1.0 + shock_vec, 1e-8)
                 log_shock    = np.log(shock_factor)
                 log_F     += log_shock
                 log_theta += log_shock
+
+                # Drift segment switch — partial dicts merge with current
+                # so events can override only the factors they care about.
+                next_drift = e.get("next_drift_pa", None)
+                if next_drift:
+                    for k, c in enumerate(self.factor_codes):
+                        if c in next_drift:
+                            current_drift_vec[k] = float(next_drift[c])
+
+                # Set / clear expiry for the new segment.
+                horizon = e.get("next_drift_horizon_years", None)
+                if horizon is not None and float(horizon) > 0:
+                    current_drift_expires_at = t_years + float(horizon)
+                else:
+                    current_drift_expires_at = None
 
             log_paths[:, t_idx, :] = log_F
             prev_date = bday
@@ -288,21 +370,60 @@ class FactorScenarioEngine:
         # Terminal prices per path: (n_paths, n_assets)
         final_prices = price_paths[:, t_idx_terminal, :]
 
-        # Vectorised per-path RC payoff (replaces a Python for-loop that
-        # called ReverseConvertible.summary() once per path).
-        v = vectorised_european_rc_summary(row, final_prices)
-        pnl              = v["pnl"]
-        return_pct       = v["return_pct"]
-        cash_redemption  = v["cash_redemption"]
-        worst_underlying = v["worst_underlying"]
-        settlement_type  = v["settlement_type"]
-        delivered_under  = v["delivered_underlying"]
-        delivered_shares = v["delivered_shares"]
-        fractional_cash  = v["fractional_cash"]
-        barrier_breached = v["barrier_breached"]
-        strike_used      = v["strike_used"]
-        final_spot_used  = v["final_spot_used"]
-        total_cost       = v["total_cost"]
+        # Run RC payoff per path
+        pnl              = np.zeros(n_paths)
+        return_pct       = np.zeros(n_paths)
+        total_payoff     = np.zeros(n_paths)
+        cash_redemption  = np.zeros(n_paths)
+        worst_underlying = np.empty(n_paths, dtype=object)
+        settlement_type  = np.empty(n_paths, dtype=object)
+        delivered_under  = np.empty(n_paths, dtype=object)
+        delivered_shares = np.zeros(n_paths)
+        fractional_cash  = np.zeros(n_paths)
+        barrier_breached = np.zeros(n_paths, dtype=bool)
+        strike_used      = np.zeros(n_paths)
+        final_spot_used  = np.zeros(n_paths)
+
+        for p in range(n_paths):
+            shocks = [
+                (final_prices[p, i] / spots[i] - 1) * 100
+                for i in range(n_assets)
+            ]
+            rc = ReverseConvertible(row, final_levels=shocks)
+            s  = rc.summary()
+
+            idx       = row["underlyings"].index(s["worst_underlying"])
+            strike    = row["strike"][idx]
+            notional  = row["notional"]
+            ts        = notional / strike
+            price     = final_prices[p, idx]
+            physical  = price < strike
+
+            if physical:
+                d_shares = int(ts)
+                f_cash   = (ts - d_shares) * price
+                cash_red = f_cash
+                d_under  = s["worst_underlying"]
+                stype    = "physical"
+            else:
+                d_shares = 0
+                f_cash   = 0.0
+                cash_red = s["total_payoff"]
+                d_under  = None
+                stype    = "cash"
+
+            pnl[p]              = s["pnl"]
+            return_pct[p]       = s["return_pct"]
+            total_payoff[p]     = s["total_payoff"]
+            cash_redemption[p]  = cash_red
+            worst_underlying[p] = s["worst_underlying"]
+            settlement_type[p]  = stype
+            delivered_under[p]  = d_under
+            delivered_shares[p] = d_shares
+            fractional_cash[p]  = f_cash
+            barrier_breached[p] = bool(s["barrier_breached"])
+            strike_used[p]      = strike
+            final_spot_used[p]  = price
 
         # Aggregations
         T_remaining = (maturity - date_range[0]).days / 360
@@ -318,7 +439,7 @@ class FactorScenarioEngine:
             "T_remaining_years":  round(T_remaining, 2),
 
             # deterministic
-            "total_cost":         total_cost,
+            "total_cost":         float(ReverseConvertible(row, final_levels=[0]*n_assets).summary()["total_cost"]),
 
             # aggregated P&L statistics
             "pnl_mean":   float(pnl.mean()),
@@ -344,10 +465,6 @@ class FactorScenarioEngine:
             "mean_final_spot":  float(final_spot_used.mean()),
             "mean_strike":      float(strike_used.mean()),
             "delivered_underlying": _mode_string(delivered_under),
-            # Physical-settlement delivery date (item 5).  Equals maturity
-            # when at least one path settles physically; None otherwise.
-            "delivery_date":    (str(row["maturity_date"])
-                                  if (delivered_shares > 0).any() else None),
 
             # raw samples (for distribution plots)
             "pnl_samples":    pnl,
@@ -458,7 +575,6 @@ class FactorScenarioEngine:
                         total_fractional_cash=("mean_fractional_cash", "sum"),
                         strike=("mean_strike", "mean"),
                         price=("mean_final_spot", "mean"),
-                        final_delivery_date=("delivery_date", "max"),
                     )
                 )
                 delivered_stocks["market_value"] = delivered_stocks["total_shares"] * delivered_stocks["price"]
@@ -469,31 +585,19 @@ class FactorScenarioEngine:
                 delivered_stocks = delivered_stocks[[
                     "delivered_underlying", "total_shares", "strike", "price", "currency",
                     "market_value", "total_fractional_cash", "total_value_incl_cash",
-                    "cost", "pnl", "return_pct", "final_delivery_date",
+                    "cost", "pnl", "return_pct"
                 ]]
             else:
                 delivered_stocks = pd.DataFrame()
 
-            # Reference-currency aggregation (item 4)
-            from src.scenario_engine import _aggregate_to_reference
-            pnl_samples_ref, pf_scenario_ref = _aggregate_to_reference(
-                pnl_samples_by_ccy,
-                cost_by_ccy,
-                self.fx_rates,
-                self.reference_currency,
-            )
-
             return {
                 "product_df":          product_df,
                 "pf_scenario_per_ccy": pf_scenario_per_ccy,
-                "pf_scenario_ref":     pf_scenario_ref,
                 "cash_positions":      cash_positions,
                 "delivered_stocks":    delivered_stocks,
                 "asset_paths":         asset_paths,
                 "factor_paths":        factor_paths,
                 "pnl_samples_by_ccy":  pnl_samples_by_ccy,
-                "pnl_samples_ref":     pnl_samples_ref,
-                "reference_currency":  self.reference_currency,
                 "n_paths":             self.n_paths,
             }
         finally:
@@ -509,12 +613,11 @@ def _path_summary_df(date_range, paths_2d: np.ndarray) -> pd.DataFrame:
     """Aggregate a (n_paths, n_days) tensor into a per-date summary DataFrame.
 
     Columns: ``date, mean, median, p5, p95, std, lower_1sd, upper_1sd``.
-    When n_paths == 1, all stats collapse to the single path (std = 0)
-    so downstream code can treat single-path and multi-path results
-    uniformly.
+    When n_paths == 1 the band columns collapse to the single path so
+    downstream code can treat single-path and multi-path results uniformly.
     """
     median = np.median(paths_2d, axis=0)
-    std = paths_2d.std(axis=0, ddof=0)
+    std    = paths_2d.std(axis=0, ddof=0)
     return pd.DataFrame({
         "date":      date_range,
         "mean":      paths_2d.mean(axis=0),

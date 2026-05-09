@@ -375,23 +375,13 @@ class TestMultiPathStatistics:
 # ──────────────────────────────────────────────────────────────────────────
 
 class TestScenarioPresets:
-    @staticmethod
-    def _preset_to_scenario(preset: dict) -> dict:
-        return {
-            "factor_shock":         preset["factor_shock"],
-            "n_shocks":             preset["n_shocks"],
-            "shock_in_days":        preset["shock_in_days"],
-            "shock_spacing_days":   preset["shock_spacing_days"],
-            "factor_drift_pre_pa":  preset["factor_drift_pre_pa"],
-            "factor_drift_post_pa": preset["factor_drift_post_pa"],
-            "idio_intensity":       preset["idio_intensity"],
-        }
+    """Presets are now event-timeline shaped — see ``data/factor_scenarios.py``.
+    The engine accepts the UI shape directly via ``_normalise_scenario``."""
 
     def test_all_presets_run_cleanly(self, engine):
         from data.factor_scenarios import FACTOR_SCENARIO_PRESETS
         for name, preset in FACTOR_SCENARIO_PRESETS.items():
-            scenario = self._preset_to_scenario(preset)
-            res = engine.run_path_scenario(scenario)
+            res = engine.run_path_scenario(preset)
 
             for key in ("product_df", "pf_scenario_per_ccy", "cash_positions",
                         "delivered_stocks", "asset_paths", "factor_paths",
@@ -407,12 +397,33 @@ class TestScenarioPresets:
                 arr = fdf["median"].to_numpy()
                 assert np.isfinite(arr).all(), f"[{name}] NaN factor {code}"
 
-    def test_preset_factor_shock_keys_match_factors(self):
+    def test_every_event_uses_known_factor_codes(self):
         from data.factor_scenarios import FACTOR_SCENARIO_PRESETS
         from src.factor_engine import FACTORS as FACTOR_UNIVERSE
         for name, preset in FACTOR_SCENARIO_PRESETS.items():
-            unknown = set(preset["factor_shock"].keys()) - set(FACTOR_UNIVERSE.keys())
-            assert not unknown, f"[{name}] unknown factor keys: {unknown}"
+            for ev in preset.get("events", []):
+                shock_keys = set(ev.get("factor_shock", {}).keys())
+                unknown = shock_keys - set(FACTOR_UNIVERSE.keys())
+                assert not unknown, \
+                    f"[{name}] event day={ev.get('day')} has unknown factor keys: {unknown}"
+
+    def test_every_event_uses_known_recovery_archetype(self):
+        from data.factor_scenarios import FACTOR_SCENARIO_PRESETS
+        from src.scenario_archetypes import EVENT_RECOVERY_ARCHETYPES
+        for name, preset in FACTOR_SCENARIO_PRESETS.items():
+            for ev in preset.get("events", []):
+                if "recovery" in ev:
+                    assert ev["recovery"] in EVENT_RECOVERY_ARCHETYPES, \
+                        f"[{name}] day={ev.get('day')}: unknown archetype {ev['recovery']!r}"
+
+    def test_every_preset_uses_known_initial_market_state(self):
+        from data.factor_scenarios import FACTOR_SCENARIO_PRESETS
+        from src.scenario_archetypes import INITIAL_MARKET_STATES
+        for name, preset in FACTOR_SCENARIO_PRESETS.items():
+            state = preset.get("initial_market_state")
+            if state is not None:
+                assert state in INITIAL_MARKET_STATES, \
+                    f"[{name}] unknown initial_market_state: {state!r}"
 
 
 # ──────────────────────────────────────────────────────────────────────────

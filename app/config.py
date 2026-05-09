@@ -1,9 +1,14 @@
 # =========================
 # UI Configuration
 # =========================
+#
+# Single-factor "Stress Testing" view presets.  The post-shock drift is
+# expressed as a *Recovery archetype* (coupled to the market shock) and
+# the pre-shock state is an Initial market-state archetype, both
+# consistent with the Factor Stress view.  The view translates these
+# labels to numerical drifts via :mod:`src.scenario_archetypes` before
+# passing them to ``ScenarioEngine``.
 
-# Scenario presets for the Stress Testing view.
-# Each preset maps to a dict of scenario parameters, or None for Custom.
 SCENARIO_PRESETS = {
     "Custom": None,
     "Current": {
@@ -11,40 +16,40 @@ SCENARIO_PRESETS = {
         "n_shocks": 1,
         "shock_in_days": 2,
         "shock_spacing_days": 0,
-        "pre_shock_drift_pa": 0.0,
-        "post_shock_drift_pa": 0.0,
+        "initial_market_state": "Stable (0 %)",
+        "recovery":             "Stable (no drift)",
     },
     "Down 5%": {
         "market_shock": -5,
         "n_shocks": 1,
         "shock_in_days": 2,
         "shock_spacing_days": 0,
-        "pre_shock_drift_pa": 0.05,
-        "post_shock_drift_pa": 0.05,
+        "initial_market_state": "Bull market (+7 %/y)",
+        "recovery":             "Slow recovery (~2y)",
     },
     "Down 10%": {
         "market_shock": -10,
         "n_shocks": 1,
         "shock_in_days": 2,
         "shock_spacing_days": 0,
-        "pre_shock_drift_pa": 0.05,
-        "post_shock_drift_pa": 0.05,
+        "initial_market_state": "Bull market (+7 %/y)",
+        "recovery":             "Slow recovery (~2y)",
     },
     "Crash (-20%)": {
         "market_shock": -20,
         "n_shocks": 1,
         "shock_in_days": 1,
         "shock_spacing_days": 0,
-        "pre_shock_drift_pa": 0.05,
-        "post_shock_drift_pa": 0.05,
+        "initial_market_state": "Stable (0 %)",
+        "recovery":             "Continued bear",
     },
-    "Recovery (+10% + ERP)": {
+    "Crash + Fast V-Recovery": {
         "market_shock": -20,
         "n_shocks": 1,
         "shock_in_days": 1,
         "shock_spacing_days": 0,
-        "pre_shock_drift_pa": 0.05,
-        "post_shock_drift_pa": 0.05,
+        "initial_market_state": "Stable (0 %)",
+        "recovery":             "Fast recovery (~6mo)",
     },
 }
 
@@ -54,6 +59,6 @@ SCENARIO_CUSTOM_DEFAULT = {
     "n_shocks": 1,
     "shock_in_days": 15,
     "shock_spacing_days": 0,
-    "pre_shock_drift_pa": 0.05,
-    "post_shock_drift_pa": 0.0,
+    "initial_market_state": "Stable (0 %)",
+    "recovery":             "Slow recovery (~2y)",
 }

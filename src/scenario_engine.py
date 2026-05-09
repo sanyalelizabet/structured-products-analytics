@@ -132,6 +132,13 @@ class ScenarioEngine:
         shock_spacing_days = int(scenario.get("shock_spacing_days", 0))
         pre_shock_drift    = float(scenario.get("pre_shock_drift_pa", 0.05))
         post_shock_drift   = float(scenario.get("post_shock_drift_pa", 0.05))
+        # Optional third regime: after the recovery horizon elapses, drift
+        # reverts to ``post_recovery_drift_pa`` (typically the initial
+        # market state).  If ``recovery_horizon_years`` is None the engine
+        # behaves as before — recovery drift continues until maturity.
+        recovery_horizon_years = scenario.get("recovery_horizon_years", None)
+        post_recovery_drift    = float(scenario.get("post_recovery_drift_pa",
+                                                    pre_shock_drift))
 
         isins    = list(row["underlying_isins"])
         spots    = np.array([float(s) for s in row["current_spots"]])
@@ -185,7 +192,17 @@ class ScenarioEngine:
             if t_years <= T_first_shock:
                 mu_m = pre_shock_drift
             elif t_years > T_last_shock:
-                mu_m = post_shock_drift
+                # Recovery regime — but only for the recovery horizon.  Past
+                # that, drift reverts to the post-recovery rate (normally
+                # the initial market state) so the path doesn't keep
+                # snapping upward at +57 %/y for years.
+                if (
+                    recovery_horizon_years is not None
+                    and (t_years - T_last_shock) > float(recovery_horizon_years)
+                ):
+                    mu_m = post_recovery_drift
+                else:
+                    mu_m = post_shock_drift
             else:
                 mu_m = pre_shock_drift   # discrete shocks layer on top during window
 
