@@ -160,4 +160,55 @@ p5 = {
     "barrier_breached": False,
 }
 
-portfolio = pd.DataFrame([p1, p2, p3, p4, p5])
+# =========================================================================
+# p6 — Autocallable BRC on Coca-Cola (Opus / Vontobel)
+# =========================================================================
+# Term sheet: 5.00 % p.a. Autocallable Reverse Convertible on Coca-Cola
+# Company, ISIN CH1532240566, USD 1'000 denomination.  Coupon paid quarterly
+# (1.25 % per period).  Two early-redemption monitoring dates: 31 Aug 2026
+# and 01 Dec 2026; if KO closes ≥ Autocall Level (USD 81.56 = 100 % of spot
+# reference) on either date, the product is called early on the corresponding
+# Early Payment Date at par + the relevant period coupon.
+#
+# Strike Price = 85 % of Spot Reference (USD 69.33).  No separate barrier —
+# the strike acts as the protection level.  Hence ``barrier_pct = 1.00``
+# (barrier = strike × 1.0).
+#
+# Autocall trigger expressed as a ratio against the strike (per our schema
+# convention): ``autocall_trigger_pct = 81.56 / 69.33 ≈ 1.1764``.
+
+p6 = {
+    "product_id":              "CH1532240566",
+    "product_type":            "AC_BRC",
+    "type_style":              "European",
+    "issuer":                  "Opus (Public) Chartered Issuance SA",
+    "issuer_rating":           "",
+    "issuer_country":          "LU",
+    "underlyings":             ["Coca-Cola"],
+    "underlying_isins":        ["US1912161007"],
+    "currency":                "USD",
+    "denomination":            1000,
+    "position_units":          1,
+    "notional":                1000,
+    "cost_price":              1.00,
+    "initial_levels":          [81.56],   # Spot Reference Price
+    "current_spots":           [81.56],   # placeholder; live feed will refresh
+    "current_spot_dates":      [None],
+    "strike":                  [69.33],   # Strike Price = 85 % × spot ref
+    "barrier_pct":             1.00,      # strike acts as barrier
+    "coupon":                  0.05,      # 5.00 % p.a., paid quarterly
+    "initial_fixing_date":     "2026-02-27",
+    "purchase_date":           "2026-03-06",   # Payment Date
+    "maturity_date":           "2027-03-08",   # Repayment Date
+    "coupon_dates":            ["2026-06-08", "2026-09-08",
+                                 "2026-12-08", "2027-03-08"],
+    "day_count":               "ACT/360",
+    "barrier_breached":        False,
+    # Autocallable-specific fields (consumed by AC_BRC dispatch)
+    "autocall_obs_dates":      ["2026-08-31", "2026-12-01"],
+    "autocall_trigger_pct":    81.56 / 69.33,   # ≈ 1.17643
+    "autocall_coupon_memory":  False,
+}
+
+
+portfolio = pd.DataFrame([p1, p2, p3, p4, p5, p6])

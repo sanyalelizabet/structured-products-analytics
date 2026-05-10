@@ -263,9 +263,17 @@ class ScenarioEngine:
 
         final_prices = price_paths[:, t_idx_terminal, :]   # (N, n_assets)
 
-        # Vectorised per-path RC payoff (replaces a Python for-loop that
-        # called ReverseConvertible.summary() once per path).
-        v = vectorised_european_rc_summary(row, final_prices)
+        # Vectorised per-path payoff (replaces a Python for-loop that
+        # called ReverseConvertible.summary() once per path).  Dispatch on
+        # ``product_type`` — autocallables need the full path to evaluate
+        # their observation dates, while plain BRCs only need the terminal.
+        if str(row.get("product_type", "")).upper() == "AC_BRC":
+            from src.autocallable_reverse_convertible import (
+                vectorised_autocallable_rc_summary,
+            )
+            v = vectorised_autocallable_rc_summary(row, price_paths, date_range)
+        else:
+            v = vectorised_european_rc_summary(row, final_prices)
         pnl              = v["pnl"]
         return_pct       = v["return_pct"]
         cash_redemption  = v["cash_redemption"]

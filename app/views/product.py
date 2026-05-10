@@ -1,6 +1,15 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import plotly.graph_objects as go
+
+
+# Palette — kept in sync with ``app/views/portfolio.py`` so the app speaks
+# one visual language.
+_LINE_PALETTE = [
+    "#4E79A7", "#76A65A", "#9C755F", "#C9A961", "#2A3F5F", "#7A8797",
+    "#3FA29E", "#8E7CC3", "#A35F4A", "#5E8A6E", "#7E91AB",
+]
 
 
 def render(portfolio, df, analytics, valuation_date, vol_map, beta_map):
@@ -112,26 +121,118 @@ def render(portfolio, df, analytics, valuation_date, vol_map, beta_map):
         })
     und_df = pd.DataFrame(und_rows)
 
-    col_detail, col_und = st.columns([1, 2])
+    col_detail, col_chart = st.columns([1, 2])
 
     with col_detail:
+        st.markdown("**Product Detail**")
+        st.caption("Key metrics for the selected product.")
         detail = pd.DataFrame({"Metric": row_selected.index, "Value": row_selected.values})
         detail["Value"] = detail["Value"].apply(
             lambda x: f"{x:.2f}" if isinstance(x, (int, float, np.floating)) else str(x)
         )
         st.dataframe(detail, width="stretch", hide_index=True)
 
-    with col_und:
-        st.caption("Underlying Metrics")
-        st.dataframe(
-            und_df,
-            width="stretch",
-            hide_index=True,
-            column_config={
-                "Spot":    st.column_config.NumberColumn("Spot",    format="%.2f"),
-                "Strike":  st.column_config.NumberColumn("Strike",  format="%.2f"),
-                "Vol (%)": st.column_config.NumberColumn("Vol (%)", format="%.1f"),
-                "Beta":    st.column_config.NumberColumn("Beta",    format="%.2f"),
-                "YTD (%)": st.column_config.NumberColumn("YTD (%)", format="%.2f"),
-            }
+    with col_chart:
+        st.markdown("**Underlying Price History**")
+        st.caption(
+            "Last ~2 years, normalised to base 100. Dashed lines mark each strike."
         )
+        _render_underlying_prices(analytics, prod_row)
+
+    # =========================
+    # Underlying Metrics (full width below)
+    # =========================
+    st.markdown("**Underlying Metrics**")
+    st.caption("Spot, strike, vol, β and YTD per underlying for this product.")
+    st.dataframe(
+        und_df,
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "Spot":    st.column_config.NumberColumn("Spot",    format="%.2f"),
+            "Strike":  st.column_config.NumberColumn("Strike",  format="%.2f"),
+            "Vol (%)": st.column_config.NumberColumn("Vol (%)", format="%.1f"),
+            "Beta":    st.column_config.NumberColumn("Beta",    format="%.2f"),
+            "YTD (%)": st.column_config.NumberColumn("YTD (%)", format="%.2f"),
+        }
+    )
+
+
+def _render_underlying_prices(analytics, prod_row):
+    """Plot historical prices of each underlying for the selected product.
+
+    Lines are normalised to base 100 at the first available date so
+    multiple price scales (e.g. CHF Nestlé vs USD Coca-Cola) can share
+    one chart.  Strike levels are drawn as dashed horizontal lines in
+    the same colour as their underlying, also normalised to base 100.
+    """
+    db = getattr(analytics, "price_db", None)
+    if db is None or db.empty:
+        return
+
+    isins   = list(prod_row["underlying_isins"])
+    names   = list(prod_row["underlyings"])
+    strikes = list(prod_row["strike"])
+    spots   = list(prod_row["current_spots"])
+
+    sub = db[db["isin"].isin(isins)].copy()
+    if sub.empty:
+        return
+    sub["date"] = pd.to_datetime(sub["date"])
+    # Trim to the most recent ~2 years so the chart isn't dominated by old data.
+    cutoff = pd.Timestamp.today() - pd.DateOffset(years=2)
+    sub = sub[sub["date"] >= cutoff]
+    if sub.empty:
+        return
+
+    fig = go.Figure()
+    for idx, (isin, name) in enumerate(zip(isins, names)):
+        series = (
+            sub[sub["isin"] == isin]
+            .sort_values("date")
+            .drop_duplicates(subset=["date"], keep="last")
+        )
+        if series.empty:
+            continue
+        color = _LINE_PALETTE[idx % len(_LINE_PALETTE)]
+        spot0 = float(series["price"].iloc[0])
+        norm  = series["price"] / spot0 * 100.0
+
+        fig.add_trace(go.Scatter(
+            x=series["date"], y=norm,
+            mode="lines", name=name,
+            line=dict(color=color, width=2),
+            customdata=series["price"].values,
+            hovertemplate=(
+                f"<b>{name}</b><br>"
+                "%{x|%d %b %Y}<br>"
+                "Price: %{customdata:.2f}<br>"
+                "Normalised: %{y:.1f}<extra></extra>"
+            ),
+        ))
+
+        # Strike line — normalised to the same base
+        try:
+            strike = float(strikes[idx])
+            fig.add_hline(
+                y=strike / spot0 * 100.0,
+                line=dict(color=color, dash="dash", width=1),
+                opacity=0.45,
+                annotation_text=f"{name} strike",
+                annotation_position="right",
+                annotation_font=dict(color=color, size=9),
+            )
+        except (IndexError, TypeError, ValueError):
+            pass
+
+    fig.add_hline(y=100, line=dict(color="grey", dash="dot", width=1), opacity=0.4)
+    fig.update_layout(
+        template="plotly_dark",
+        height=420,
+        margin=dict(t=30, b=30, l=40, r=110),
+        xaxis_title="Date",
+        yaxis_title="Normalised Price (base 100)",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+        hovermode="x unified",
+    )
+    st.plotly_chart(fig, width="stretch")

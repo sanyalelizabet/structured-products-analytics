@@ -24,9 +24,7 @@ from matplotlib.colors import LinearSegmentedColormap
 # ──────────────────────────────────────────────────────────────────────────
 # Palette — single source of truth for the whole view
 # ──────────────────────────────────────────────────────────────────────────
-# Sober buy-side scheme: brick / sage / amber / slate / navy / steel.
-# Every gradient, every bar colour, every stacked-bar segment is sourced
-# from these constants — no matplotlib defaults, no per-section drift.
+
 
 PRIMARY      = "#4E79A7"   # steel blue
 ACCENT_DEEP  = "#2A3F5F"   # navy
@@ -35,8 +33,7 @@ NEGATIVE     = "#C0504D"   # brick
 NEUTRAL_GREY = "#7A8797"   # slate
 WARNING      = "#C9A961"   # muted gold
 
-# Categorical palette for product-type segments — harmonised with the
-# diverging risk colours so nothing screams against the rest of the page.
+
 PRODUCT_TYPE_PALETTE = [
     PRIMARY,        # steel blue
     POSITIVE,       # sage
@@ -46,8 +43,7 @@ PRODUCT_TYPE_PALETTE = [
     NEUTRAL_GREY,
 ]
 
-# Diverging colourmap used everywhere a Styler needs a gradient
-# (Holdings, Underlying detail, Maturity PnL, Greeks).
+
 DIVERGING_CMAP = LinearSegmentedColormap.from_list(
     "buyside_diverging",
     [
@@ -58,18 +54,13 @@ DIVERGING_CMAP = LinearSegmentedColormap.from_list(
     N=256,
 )
 
-# Same ramp expressed as a Plotly colour-scale (for treemap / continuous
-# bar colouring) — keeps cells, treemap and bars on a single visual axis.
+
 PLOTLY_DIVERGING_SCALE = [
     (0.00, NEGATIVE),
     (0.50, NEUTRAL_GREY),
     (1.00, POSITIVE),
 ]
 
-
-# ──────────────────────────────────────────────────────────────────────────
-# Top-level entry point
-# ──────────────────────────────────────────────────────────────────────────
 
 def render(analytics, df, greeks_df, pf_delta, valuation_date):
     _render_header(analytics, valuation_date)
