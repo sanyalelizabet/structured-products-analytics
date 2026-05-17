@@ -48,15 +48,21 @@ EVENT_RECOVERY_ARCHETYPES: dict[str, tuple[int, float]] = {
     "Very fast recovery (~1mo)":  (-1, 1.0 / 12.0),
 }
 
-# Initial market state — no shock to couple to, so plain annualised drifts.
-INITIAL_MARKET_STATES: dict[str, float] = {
-    "Bear market (-7 %/y)":   -0.07,
-    "Stable (0 %)":            0.00,
-    "Bull market (+7 %/y)":   +0.07,
-    "Strong bull (+15 %/y)":  +0.15,
+# Initial market state — UI label → internal regime key.
+#
+# Drifts are no longer single scalars broadcast across factors.  Each
+# regime carries a **per-factor** drift vector pulled from
+# :mod:`src.factor_premiums`, derived from historical returns conditional
+# on the trailing-12mo MKT return.  The dropdown stays short and
+# regime-flavoured; the engine sees vectors.
+INITIAL_MARKET_STATES: dict[str, str] = {
+    "Bear":          "bear",
+    "Stable":        "stable",
+    "Moderate bull": "moderate_bull",
+    "Strong bull":   "strong_bull",
 }
 
-DEFAULT_INITIAL_MARKET_STATE = "Stable (0 %)"
+DEFAULT_INITIAL_MARKET_STATE = "Stable"
 DEFAULT_RECOVERY_ARCHETYPE   = "Stable (no drift)"
 
 
@@ -110,11 +116,19 @@ def initial_drift_dict(
     market_state: str,
     factor_codes: Iterable[str],
 ) -> dict[str, float]:
-    """Translate the initial-market-state archetype → uniform drift dict."""
+    """Translate the initial-market-state archetype → per-factor drift dict.
+
+    Drifts come from :func:`src.factor_premiums.get_factor_drift`, which
+    loads historically-conditioned premiums from
+    ``data/factor_premiums.csv`` (or falls back to legacy scalar drifts
+    broadcast across factors when the cache is missing or a regime is
+    data-sparse).
+    """
     if market_state not in INITIAL_MARKET_STATES:
         raise ValueError(f"Unknown initial market state: {market_state}")
-    drift = INITIAL_MARKET_STATES[market_state]
-    return {c: drift for c in factor_codes}
+    regime = INITIAL_MARKET_STATES[market_state]
+    from src.factor_premiums import get_factor_drift
+    return get_factor_drift(regime, factor_codes)
 
 
 def translate_ui_scenario(ui_scenario: dict, factor_codes: Iterable[str]) -> dict:

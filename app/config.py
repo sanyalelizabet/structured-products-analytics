@@ -16,7 +16,7 @@ SCENARIO_PRESETS = {
         "n_shocks": 1,
         "shock_in_days": 2,
         "shock_spacing_days": 0,
-        "initial_market_state": "Stable (0 %)",
+        "initial_market_state": "Stable",
         "recovery":             "Stable (no drift)",
     },
     "Down 5%": {
@@ -24,7 +24,7 @@ SCENARIO_PRESETS = {
         "n_shocks": 1,
         "shock_in_days": 2,
         "shock_spacing_days": 0,
-        "initial_market_state": "Bull market (+7 %/y)",
+        "initial_market_state": "Moderate bull",
         "recovery":             "Slow recovery (~2y)",
     },
     "Down 10%": {
@@ -32,7 +32,7 @@ SCENARIO_PRESETS = {
         "n_shocks": 1,
         "shock_in_days": 2,
         "shock_spacing_days": 0,
-        "initial_market_state": "Bull market (+7 %/y)",
+        "initial_market_state": "Moderate bull",
         "recovery":             "Slow recovery (~2y)",
     },
     "Crash (-20%)": {
@@ -40,7 +40,7 @@ SCENARIO_PRESETS = {
         "n_shocks": 1,
         "shock_in_days": 1,
         "shock_spacing_days": 0,
-        "initial_market_state": "Stable (0 %)",
+        "initial_market_state": "Stable",
         "recovery":             "Continued bear",
     },
     "Crash + Fast V-Recovery": {
@@ -48,7 +48,7 @@ SCENARIO_PRESETS = {
         "n_shocks": 1,
         "shock_in_days": 1,
         "shock_spacing_days": 0,
-        "initial_market_state": "Stable (0 %)",
+        "initial_market_state": "Stable",
         "recovery":             "Fast recovery (~6mo)",
     },
 }
@@ -59,6 +59,6 @@ SCENARIO_CUSTOM_DEFAULT = {
     "n_shocks": 1,
     "shock_in_days": 15,
     "shock_spacing_days": 0,
-    "initial_market_state": "Stable (0 %)",
+    "initial_market_state": "Stable",
     "recovery":             "Slow recovery (~2y)",
 }

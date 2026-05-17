@@ -153,14 +153,10 @@ class TestEventNextDriftDict:
 
 class TestInitialDriftDict:
 
-    def test_uniform_drift_across_all_factors(self):
-        d = initial_drift_dict("Bull market (+7 %/y)", FACTORS)
-        assert all(v == 0.07 for v in d.values())
+    def test_drift_dict_has_one_entry_per_factor(self):
+        d = initial_drift_dict("Moderate bull", FACTORS)
         assert set(d) == set(FACTORS)
-
-    def test_stable_is_exactly_zero(self):
-        d = initial_drift_dict("Stable (0 %)", FACTORS)
-        assert all(v == 0.0 for v in d.values())
+        assert all(isinstance(v, float) for v in d.values())
 
     def test_unknown_state_raises(self):
         with pytest.raises(ValueError, match="Unknown initial market state"):
@@ -180,7 +176,7 @@ class TestTranslateUiScenario:
 
     def test_returns_engine_schema_keys(self):
         ui = {
-            "initial_market_state": "Stable (0 %)",
+            "initial_market_state": "Stable",
             "events": [
                 {"day": 30, "factor_shock": {"MKT": -10}, "recovery": "Slow recovery (~2y)"},
             ],
@@ -199,7 +195,7 @@ class TestTranslateUiScenario:
             "description":          "Y",
             "idio_intensity":       0.5,
             "mean_reversion_kappa": 0.7,
-            "initial_market_state": "Stable (0 %)",
+            "initial_market_state": "Stable",
             "events": [],
         }
         out = translate_ui_scenario(ui, FACTORS)
@@ -233,26 +229,32 @@ class TestTranslateUiScenario:
         """When a factor takes a positive shock and the event uses a recovery
         archetype, the post-event drift for that factor should follow the
         initial-market-state regime (bull / stable / …) — not freeze at 0.
-        Factors with negative shocks still mean-revert as usual."""
+        Factors with negative shocks still mean-revert as usual.
+
+        Drifts are now per-factor (from historical premiums), so the test
+        compares against the live initial-drift values rather than hard-
+        coded scalars.
+        """
         ui = {
-            "initial_market_state": "Bull market (+7 %/y)",
+            "initial_market_state": "Moderate bull",
             "events": [
                 {"day": 30,
                  "factor_shock": {"MKT": +10, "TECH": -15, "HC": 0},
                  "recovery": "Slow recovery (~2y)"},
             ],
         }
+        expected_initial = initial_drift_dict("Moderate bull", FACTORS)
         out = translate_ui_scenario(ui, FACTORS)
         ev = out["events"][0]
 
-        # Positive shock → fall back to initial drift (+7 %/y bull)
-        assert ev["next_drift_pa"]["MKT"] == pytest.approx(0.07)
-        # Zero shock + recovery → also falls back to initial drift
-        assert ev["next_drift_pa"]["HC"]  == pytest.approx(0.07)
-        # Negative shock → genuine mean-reverting recovery drift (positive)
+        # Positive shock → falls back to that factor's own initial drift.
+        assert ev["next_drift_pa"]["MKT"] == pytest.approx(expected_initial["MKT"])
+        # Zero shock + recovery → also falls back to its own initial drift.
+        assert ev["next_drift_pa"]["HC"]  == pytest.approx(expected_initial["HC"])
+        # Negative shock → genuine mean-reverting recovery drift (positive).
         assert ev["next_drift_pa"]["TECH"] > 0
-        # And specifically not the initial drift — it's the recovery formula
-        assert ev["next_drift_pa"]["TECH"] != pytest.approx(0.07)
+        # And specifically not the initial drift — it's the recovery formula.
+        assert ev["next_drift_pa"]["TECH"] != pytest.approx(expected_initial["TECH"])
 
 
 # ──────────────────────────────────────────────────────────────────────────

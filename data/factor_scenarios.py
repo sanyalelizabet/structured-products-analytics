@@ -41,7 +41,7 @@ FACTOR_SCENARIO_PRESETS: dict[str, dict] = {
     "V-Shape Sell-off": {
         "label":       "V-Shape Sell-off",
         "description": "Sharp sell-off, snaps back within a month.",
-        "initial_market_state": "Stable (0 %)",
+        "initial_market_state": "Stable",
         "events": [
             {"day":  30,
              "factor_shock": {"MKT": -20.0, "TECH": -25.0, "HC": -10.0,
@@ -61,7 +61,7 @@ FACTOR_SCENARIO_PRESETS: dict[str, dict] = {
             "spikes as safe-haven.  Aftershock at the bottom, then a fast "
             "snap-back rally as central banks / fiscal flood the system."
         ),
-        "initial_market_state": "Stable (0 %)",
+        "initial_market_state": "Stable",
         "events": [
             # Day 30: the crash
             {"day":  30,
@@ -92,7 +92,7 @@ FACTOR_SCENARIO_PRESETS: dict[str, dict] = {
             "duration risk; HC defensive.  Final central-bank pivot brings "
             "a slow recovery and energy reversion."
         ),
-        "initial_market_state": "Bull market (+7 %/y)",
+        "initial_market_state": "Moderate bull",
         "events": [
             # Day 60: first rate-shock
             {"day":  60,
@@ -127,7 +127,7 @@ FACTOR_SCENARIO_PRESETS: dict[str, dict] = {
             "down sharply with broader market following modestly; defensives "
             "hold.  Slow grinding recovery, no V-shape."
         ),
-        "initial_market_state": "Bull market (+7 %/y)",
+        "initial_market_state": "Moderate bull",
         "events": [
             # Day 30: first leg down
             {"day":  30,
@@ -157,7 +157,7 @@ FACTOR_SCENARIO_PRESETS: dict[str, dict] = {
             "China-exposed tech hit hardest, USD rallies on risk-off flows.  "
             "Eventually a deal is struck, triggering a rally and recovery."
         ),
-        "initial_market_state": "Stable (0 %)",
+        "initial_market_state": "Stable",
         "events": [
             # Day 30: first round of tariffs
             {"day":  30,
@@ -187,7 +187,7 @@ FACTOR_SCENARIO_PRESETS: dict[str, dict] = {
             "equities decline modestly, tech weakens on rate fears, USD up.  "
             "Oil eventually normalises and equities recover."
         ),
-        "initial_market_state": "Stable (0 %)",
+        "initial_market_state": "Stable",
         "events": [
             # Day 30: oil crisis hits
             {"day":  30,
@@ -212,7 +212,7 @@ FACTOR_SCENARIO_PRESETS: dict[str, dict] = {
             "with no relief in between.  No recovery rally; final state "
             "stays in continuation."
         ),
-        "initial_market_state": "Stable (0 %)",
+        "initial_market_state": "Stable",
         "events": [
             {"day":  60,
              "factor_shock": {"MKT":  -7.0, "TECH": -10.0, "HC":  -3.0,
@@ -235,7 +235,7 @@ FACTOR_SCENARIO_PRESETS: dict[str, dict] = {
     "Custom": {
         "label":       "Custom",
         "description": "Empty starting point.  Add your own events.",
-        "initial_market_state": "Stable (0 %)",
+        "initial_market_state": "Stable",
         "events": [],
         "idio_intensity":       0.3,
         "mean_reversion_kappa": 0.5,

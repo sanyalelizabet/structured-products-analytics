@@ -184,7 +184,7 @@ def _factor_engine(tmp_path, n_paths=1):
 class TestFactorEngineRecoveryHorizon:
 
     def _ui_scenario(self, archetype, market_shock=-25, day=30,
-                     initial="Stable (0 %)"):
+                     initial="Stable"):
         return {
             "initial_market_state": initial,
             "events": [
@@ -248,20 +248,33 @@ class TestFactorEngineRecoveryHorizon:
             assert ev["next_drift_horizon_years"] == pytest.approx(horizon)
 
     def test_initial_drift_resumes_after_horizon(self, tmp_path):
-        """If initial market state = Bull (+7 %/y) and recovery is Fast,
+        """If initial market state = Moderate bull and recovery is Fast,
         after the 6-month recovery window the path drifts upward at the
-        bull rate — not at the recovery rate, and not flat."""
+        bull rate — not at the recovery rate, and not flat.
+
+        Bounds are derived from the live MKT drift rather than hard-
+        coded (drifts are now per-factor from historical premiums).
+        """
+        import numpy as np
+        from src.factor_engine import FACTORS
+        from src.scenario_archetypes import initial_drift_dict
+
         eng = _factor_engine(tmp_path)
         res = eng.run_path_scenario(self._ui_scenario(
             "Fast recovery (~6mo)",
             market_shock=-15,
-            initial="Bull market (+7 %/y)",
+            initial="Moderate bull",
         ))
         mkt = res["factor_paths"]["MKT"]["median"].to_numpy()
-        # At horizon expiry (~6mo) MKT is roughly back to baseline; over
-        # remaining ~3y at +7 %/y it grows by exp(0.07 × 3) ≈ 1.23.
-        # So terminal should sit around 110-130 (well above 100).
         terminal = float(mkt[-1])
-        assert 105.0 < terminal < 145.0, (
-            f"Bull-state resumption after recovery expected near 120; got {terminal:.1f}"
+
+        # After ~6mo at recovery drift returning us near 100, remaining
+        # ~3y compounds at the bull-regime MKT drift.  Allow ±25 around
+        # the deterministic expectation to absorb path-median noise.
+        bull_mkt_drift = initial_drift_dict("Moderate bull", FACTORS)["MKT"]
+        expected_terminal = 100.0 * float(np.exp(bull_mkt_drift * 3.0))
+        lo, hi = expected_terminal - 25.0, expected_terminal + 25.0
+        assert lo < terminal < hi, (
+            f"Bull-state resumption after recovery expected near "
+            f"{expected_terminal:.0f} (±25); got {terminal:.1f}"
         )

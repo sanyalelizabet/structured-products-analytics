@@ -373,7 +373,7 @@ class TestEngineDispatch:
             n_paths=10, idio_intensity=0.0, mean_reversion_kappa=0.0,
         )
         scenario = {
-            "initial_market_state": "Stable (0 %)",
+            "initial_market_state": "Stable",
             "events": [],
         }
         res = eng.run_path_scenario(scenario)
