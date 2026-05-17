@@ -76,6 +76,9 @@ def render(analytics, df, greeks_df, pf_delta, valuation_date):
     _render_risk(greeks_df, pf_delta)
 
 
+from app.views._layout import fit_height as _fit_height
+
+
 # ──────────────────────────────────────────────────────────────────────────
 # Header
 # ──────────────────────────────────────────────────────────────────────────
@@ -285,7 +288,8 @@ def _render_holdings(analytics, df):
                               vmin=-(t[f"PnL {ref}"].abs().max() or 1),
                               vmax= (t[f"PnL {ref}"].abs().max() or 1))
     )
-    st.dataframe(styled, width="stretch", hide_index=True)
+    st.dataframe(styled, width="stretch", hide_index=True,
+                 height=_fit_height(len(t)))
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -413,7 +417,8 @@ def _render_concentration(analytics):
                                  subset=["Min Dist. to Barrier %"],
                                  vmin=-25, vmax=50)
         )
-        st.dataframe(styled, width="stretch", hide_index=True)
+        st.dataframe(styled, width="stretch", hide_index=True,
+                     height=_fit_height(len(ut)))
 
 
 def _dtb_color(value):
@@ -493,7 +498,8 @@ def _render_maturity(analytics):
                                  vmin=-(m[f"PnL {ref}"].abs().max() or 1),
                                  vmax= (m[f"PnL {ref}"].abs().max() or 1))
         )
-        st.dataframe(styled, width="stretch", hide_index=True)
+        st.dataframe(styled, width="stretch", hide_index=True,
+                     height=_fit_height(len(m)))
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -553,7 +559,8 @@ def _render_risk(greeks_df, pf_delta):
                 styled = styled.background_gradient(
                     cmap=DIVERGING_CMAP, subset=[col], vmin=lo, vmax=hi,
                 )
-        st.dataframe(styled, width="stretch", hide_index=True)
+        st.dataframe(styled, width="stretch", hide_index=True,
+                     height=_fit_height(len(g)))
 
     with col_charts:
         st.markdown("**Portfolio Delta by Underlying**")

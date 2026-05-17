@@ -310,16 +310,18 @@ class TestVShape:
 
     def test_path_drops_then_strongly_recovers(self, engine):
         """V-shape essence: a deep trough, with terminal materially above
-        the trough.  (We don't pin the terminal at baseline because Fast
-        recovery's drift keeps running for the full post-event segment;
-        what matters is the *shape*: down hard, then up.)"""
+        the trough.  (We don't pin the terminal at baseline because the
+        recovery drift only runs for the archetype's horizon — with the
+        "Very fast (~1mo)" default the drift completes quickly and the
+        path then stabilises; what matters is the *shape*: down hard, then
+        up.)"""
         res = _run(engine, "V-Shape Sell-off")
         arr = _factor_median(res, "MKT")
         trough = arr.min()
         terminal = arr[-1]
         assert trough < 90.0,                  f"V-trough not deep enough: {trough:.1f}"
-        assert terminal - trough > 15.0,       f"V-recovery too weak: {terminal - trough:.1f}pp"
-        assert terminal >= arr[0] - 5.0,       f"Terminal still well below baseline: {terminal:.1f}"
+        assert terminal - trough > 10.0,       f"V-recovery too weak: {terminal - trough:.1f}pp"
+        assert terminal >= arr[0] - 10.0,      f"Terminal still well below baseline: {terminal:.1f}"
 
     def test_trough_in_first_half(self, engine):
         res = _run(engine, "V-Shape Sell-off")

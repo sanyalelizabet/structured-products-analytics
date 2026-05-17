@@ -65,11 +65,28 @@ DEFAULT_RECOVERY_ARCHETYPE   = "Stable (no drift)"
 # ──────────────────────────────────────────────────────────────────────────
 
 def event_drift_for_factor(shock_pct: float, archetype: str) -> float:
-    """Per-factor annualised drift given (shock %, recovery archetype)."""
+    """Per-factor annualised drift given (shock %, recovery archetype).
+
+    Semantic by archetype sign:
+
+      * ``sign == 0``  → no drift (e.g. "Stable").
+      * ``sign == +1`` → continue in the shock direction (e.g. "Continued
+        bear" continues bear after a negative shock, or continues bull
+        after a positive shock).  Drift = +log(1+shock)/horizon.
+      * ``sign == -1`` → recovery toward baseline, **only when the shock
+        was negative**.  Positive-shock factors do nothing — the level
+        stays where the shock left it.  This matches user intuition:
+        "recovery" is meaningful only for downside; an upside shock with a
+        recovery archetype shouldn't reverse the rally.
+    """
     if archetype not in EVENT_RECOVERY_ARCHETYPES:
         raise ValueError(f"Unknown recovery archetype: {archetype}")
     sign, horizon = EVENT_RECOVERY_ARCHETYPES[archetype]
     if sign == 0:
+        return 0.0
+    # Recovery-style archetypes (sign = -1) are no-ops for non-negative
+    # shocks: there's nothing to recover from.
+    if sign == -1 and shock_pct >= 0:
         return 0.0
     # Guard against pathological shocks that would give log of non-positive.
     multiplier = max(1.0 + float(shock_pct) / 100.0, 1e-8)
@@ -109,7 +126,9 @@ def translate_ui_scenario(ui_scenario: dict, factor_codes: Iterable[str]) -> dic
     """
     factor_codes = list(factor_codes)
 
-    initial_state = ui_scenario.get("initial_market_state", DEFAULT_INITIAL_MARKET_STATE)
+    initial_state    = ui_scenario.get("initial_market_state", DEFAULT_INITIAL_MARKET_STATE)
+    initial_drift_pa = initial_drift_dict(initial_state, factor_codes)
+
     out_events = []
     for ev in ui_scenario.get("events", []) or []:
         shock_dict = dict(ev.get("factor_shock", {}) or {})
@@ -118,11 +137,28 @@ def translate_ui_scenario(ui_scenario: dict, factor_codes: Iterable[str]) -> dic
         # how long the recovery drift is meant to run.  Past it the
         # engine reverts to ``initial_drift_pa`` (unless a later event
         # supersedes earlier).
-        _sign, horizon = EVENT_RECOVERY_ARCHETYPES[archetype]
+        sign, horizon = EVENT_RECOVERY_ARCHETYPES[archetype]
+
+        # Per-factor drift for the post-event segment.
+        #
+        # For factors where the recovery archetype is a no-op (sign = −1
+        # and shock ≥ 0), we substitute the initial-market-state drift
+        # instead of leaving the factor perfectly flat.  Reasoning: the
+        # "recovery" semantic only makes sense for downside shocks; on the
+        # upside, the realistic post-shock dynamic is to continue at the
+        # ambient market regime (bull / stable / bear) — not to freeze.
+        next_drift_pa = {}
+        for c in factor_codes:
+            shock_c = float(shock_dict.get(c, 0.0))
+            d = event_drift_for_factor(shock_c, archetype)
+            if sign == -1 and shock_c >= 0:
+                d = float(initial_drift_pa[c])
+            next_drift_pa[c] = d
+
         out_events.append({
             "day":                      int(ev["day"]),
             "factor_shock":             shock_dict,
-            "next_drift_pa":            event_next_drift_dict(shock_dict, archetype, factor_codes),
+            "next_drift_pa":            next_drift_pa,
             "next_drift_horizon_years": float(horizon),
             "recovery":                 archetype,   # kept for UI round-trip
         })
@@ -133,6 +169,6 @@ def translate_ui_scenario(ui_scenario: dict, factor_codes: Iterable[str]) -> dic
     }
     return {
         **passthrough,
-        "initial_drift_pa": initial_drift_dict(initial_state, factor_codes),
+        "initial_drift_pa": initial_drift_pa,
         "events":            out_events,
     }

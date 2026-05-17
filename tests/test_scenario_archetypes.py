@@ -37,15 +37,26 @@ class TestEventDriftFormula:
         assert event_drift_for_factor(+30, "Continued bear") > 0   # spike → drift up
         assert event_drift_for_factor(  0, "Continued bear") == 0.0
 
-    def test_recovery_drift_has_opposite_sign_to_shock(self):
-        # "Recovery" means drift reverses the shock toward pre-shock level.
+    def test_recovery_drift_pulls_negative_shocks_back_to_baseline(self):
+        # "Recovery" means drift reverses a *negative* shock toward
+        # pre-shock level.  Positive shocks are left alone — see the
+        # next test for the no-op semantic.
         assert event_drift_for_factor(-25, "Slow recovery (~2y)")  > 0
         assert event_drift_for_factor(-25, "Fast recovery (~6mo)") > 0
-        assert event_drift_for_factor(+30, "Slow recovery (~2y)")  < 0
-        assert event_drift_for_factor(+30, "Fast recovery (~6mo)") < 0
+
+    def test_recovery_archetype_is_noop_for_positive_shocks(self):
+        """Recovery archetypes do nothing when the shock is positive — an
+        upside shock with a recovery setting should leave the rally intact,
+        not pull it back down.  This matches the user-facing intent of
+        "recovery": only meaningful for downside."""
+        for arch in ("Slow recovery (~2y)", "Fast recovery (~6mo)",
+                     "Very fast recovery (~1mo)"):
+            assert event_drift_for_factor(+30, arch) == 0.0
+            assert event_drift_for_factor(+5,  arch) == 0.0
 
     def test_fast_recovery_is_steeper_than_slow_recovery(self):
-        for shock in [-25, -10, +35]:
+        # Recovery archetypes are only active for negative shocks.
+        for shock in [-25, -10]:
             slow = event_drift_for_factor(shock, "Slow recovery (~2y)")
             fast = event_drift_for_factor(shock, "Fast recovery (~6mo)")
             # Fast recovery has 4× the magnitude of slow (0.5y vs 2y horizon).
@@ -54,7 +65,7 @@ class TestEventDriftFormula:
 
     def test_very_fast_recovery_is_steeper_than_fast(self):
         """1-month recovery is 6× the magnitude of the 6-month recovery."""
-        for shock in [-25, -10, +35]:
+        for shock in [-25, -10]:
             fast      = event_drift_for_factor(shock, "Fast recovery (~6mo)")
             very_fast = event_drift_for_factor(shock, "Very fast recovery (~1mo)")
             assert abs(very_fast) > abs(fast)
@@ -217,6 +228,31 @@ class TestTranslateUiScenario:
         out = translate_ui_scenario(ui, FACTORS)
         # The label is preserved alongside the numerical drift for UI display.
         assert out["events"][0]["recovery"] == "Fast recovery (~6mo)"
+
+    def test_positive_shock_with_recovery_falls_back_to_initial_drift(self):
+        """When a factor takes a positive shock and the event uses a recovery
+        archetype, the post-event drift for that factor should follow the
+        initial-market-state regime (bull / stable / …) — not freeze at 0.
+        Factors with negative shocks still mean-revert as usual."""
+        ui = {
+            "initial_market_state": "Bull market (+7 %/y)",
+            "events": [
+                {"day": 30,
+                 "factor_shock": {"MKT": +10, "TECH": -15, "HC": 0},
+                 "recovery": "Slow recovery (~2y)"},
+            ],
+        }
+        out = translate_ui_scenario(ui, FACTORS)
+        ev = out["events"][0]
+
+        # Positive shock → fall back to initial drift (+7 %/y bull)
+        assert ev["next_drift_pa"]["MKT"] == pytest.approx(0.07)
+        # Zero shock + recovery → also falls back to initial drift
+        assert ev["next_drift_pa"]["HC"]  == pytest.approx(0.07)
+        # Negative shock → genuine mean-reverting recovery drift (positive)
+        assert ev["next_drift_pa"]["TECH"] > 0
+        # And specifically not the initial drift — it's the recovery formula
+        assert ev["next_drift_pa"]["TECH"] != pytest.approx(0.07)
 
 
 # ──────────────────────────────────────────────────────────────────────────

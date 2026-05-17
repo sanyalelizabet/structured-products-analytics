@@ -211,4 +211,81 @@ p6 = {
 }
 
 
-portfolio = pd.DataFrame([p1, p2, p3, p4, p5, p6])
+# =========================================================================
+# p7 — Capital Protection Note with Participation on Amazon (Vontobel)
+# =========================================================================
+# Term sheet: ISIN CH1537766565.  6-month CPN on Amazon.com Inc, USD 1'000
+# denomination.  Capital protection 95% (USD 950 per certificate),
+# participation 52% in upside above strike (USD 209.07 = 100% of spot ref).
+# Number of Underlyings B = 1000 / 209.07 = 4.78309 ≈ N·p/K·(1/p).
+#
+# Payoff per certificate (Vontobel formula):
+#     CP + max((SF − X) · B · P, 0)
+# which is algebraically identical to
+#     N · [protection_pct + participation_pct · max(SF/K − 1, 0)]
+# used internally by `CapitalProtectionNote`.
+#
+# Disclosed at issue: bond-leg NPV USD 933.377, implied IRR 3.6556%.
+p7 = {
+    # Identifiers
+    "product_id":                 "CH1537766565",
+    "product_type":               "CPN",
+    "type_style":                 "European",
+
+    # Issuer chain (Vontobel: DIFC issuer, Swiss guarantor, keep-well from bank)
+    "issuer":                     "Vontobel Financial Products Ltd., DIFC Dubai",
+    "issuer_rating":              "",
+    "issuer_country":             "AE",
+    "guarantor":                  "Vontobel Holding AG, Zurich",
+    "guarantor_rating":           "A3",            # Moody's LT Issuer Rating
+    "keep_well_agreement":        "Bank Vontobel AG, Zurich (Aa3)",
+
+    # Underlying
+    "underlyings":                ["Amazon.com Inc."],
+    "underlying_isins":           ["US0231351067"],
+    "currency":                   "USD",
+
+    # Sizing
+    "denomination":               1000,
+    "issue_price":                1000.00,
+    "position_units":             10,
+    "notional":                   10000,
+    "issue_size":                 32000,           # total certificates outstanding
+    "cost_price":                 1.00,
+
+    # Spot & strike
+    "spot_reference_price":       209.07,
+    "initial_levels":             [209.07],
+    "current_spots":              [209.07],
+    "current_spot_dates":         [None],
+    "strike":                     [209.07],
+    "strike_pct_of_spot":         1.00,            # 100% of spot reference
+
+    # Product terms
+    "protection_pct":             0.95,            # 95% capital protection
+    "capital_protection_amount":  950.00,          # USD per certificate
+    "participation_pct":          0.52,            # 52% upside participation
+    "number_of_underlyings":      4.78309,         # B = denomination / strike
+    "coupon":                     0.0,             # zero-coupon
+
+    # Dates
+    "initial_fixing_date":        "2026-02-25",
+    "payment_date":               "2026-03-04",
+    "purchase_date":              "2026-03-04",
+    "last_trading_day":           "2026-08-25",
+    "final_fixing_date":          "2026-08-25",
+    "maturity_date":              "2026-09-01",   # repayment date
+    "coupon_dates":               ["2026-09-01"], # bullet at maturity, rate = 0
+    "day_count":                  "ACT/360",
+
+    # Issuer-disclosed bond-leg pricing at issue (informational)
+    "bond_npv_at_issue":          933.377,
+    "implied_irr_at_issue":       0.036556,
+
+    # Not applicable for CPN
+    "barrier_pct":                None,
+    "barrier_breached":           False,
+}
+
+
+portfolio = pd.DataFrame([p1, p2, p3, p4, p5, p6, p7])

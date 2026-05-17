@@ -5,6 +5,21 @@ import requests
 from datetime import datetime
 from scipy.optimize import brentq
 from src.reverse_convertible import ReverseConvertible
+from src.capital_protection_note import CapitalProtectionNote
+
+
+def _make_product(row, price_db=None):
+    """Product factory.
+
+    Returns the right product object for ``row["product_type"]``.  Both
+    products implement the same RC-compatible interface
+    (``total_cost``, ``total_payoff``, ``pnl``, ``ytm``, ``summary``…),
+    so the rest of the analytics pipeline does not branch on type.
+    """
+    ptype = str(row.get("product_type", "")).upper()
+    if ptype == "CPN":
+        return CapitalProtectionNote(row, price_db=price_db)
+    return ReverseConvertible(row, price_db=price_db)
 
 
 @functools.lru_cache(maxsize=8)
@@ -38,7 +53,7 @@ class PortfolioAnalytics:
         rows = []
 
         for _, row in self.portfolio.iterrows():
-            rc = ReverseConvertible(row, price_db=self.price_db)
+            rc = _make_product(row, price_db=self.price_db)
             s = rc.summary()
 
             spot_date = _latest_spot_date(row)
@@ -149,6 +164,8 @@ class PortfolioAnalytics:
             "n_products": len(df),
             "n_brc": (df["product_type"] == "BRC").sum(),
             "n_mbrc": (df["product_type"] == "MBRC").sum(),
+            "n_ac_brc": (df["product_type"] == "AC_BRC").sum(),
+            "n_cpn": (df["product_type"] == "CPN").sum(),
             "total_cost": total_cost,
             "total_payoff": total_payoff,
             "total_pnl": total_pnl,
@@ -177,8 +194,8 @@ class PortfolioAnalytics:
         rows = []
     
         for _, row in self.portfolio.iterrows():
-            rc = ReverseConvertible(row)
-    
+            rc = _make_product(row)
+
             product_cost = rc.total_cost()
             product_ccy = row["currency"]
             barrier_distances = rc.current_barrier_distances()
@@ -314,7 +331,7 @@ class PortfolioAnalytics:
         cash_flows = []
 
         for _, row in self.portfolio.iterrows():
-            rc = ReverseConvertible(row)
+            rc = _make_product(row)
             purchase_date = rc._purchase_date()
             maturity_date = pd.Timestamp(row["maturity_date"])
 
@@ -336,7 +353,7 @@ class PortfolioAnalytics:
         """
         weights, ytms = [], []
         for _, row in self.portfolio.iterrows():
-            rc = ReverseConvertible(row)
+            rc = _make_product(row)
             cost_ref = self.convert_to_reference(rc.total_cost(), row["currency"])
             weights.append(cost_ref)
             ytms.append(rc.ytm_today())

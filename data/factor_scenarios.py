@@ -36,6 +36,23 @@ from __future__ import annotations
 FACTOR_SCENARIO_PRESETS: dict[str, dict] = {
 
     # ──────────────────────────────────────────────────────────────────────
+    # Default preset — V-Shape sell-off with a very fast (~1 month) snap-back.
+    # Listed first so the Factor Stress selectbox lands on it by default.
+    "V-Shape Sell-off": {
+        "label":       "V-Shape Sell-off",
+        "description": "Sharp sell-off, snaps back within a month.",
+        "initial_market_state": "Stable (0 %)",
+        "events": [
+            {"day":  30,
+             "factor_shock": {"MKT": -20.0, "TECH": -25.0, "HC": -10.0,
+                              "FIN": -22.0, "ENERGY": -25.0, "FX":  +4.0},
+             "recovery": "Very fast recovery (~1mo)"},
+        ],
+        "idio_intensity":       0.3,
+        "mean_reversion_kappa": 0.5,
+    },
+
+    # ──────────────────────────────────────────────────────────────────────
     "COVID March 2020": {
         "label":       "COVID March 2020",
         "description": (
@@ -182,25 +199,6 @@ FACTOR_SCENARIO_PRESETS: dict[str, dict] = {
              "factor_shock": {"MKT":  +5.0, "TECH":  +8.0, "HC":  +2.0,
                               "FIN":  +3.0, "ENERGY": -20.0, "FX":  -3.0},
              "recovery": "Slow recovery (~2y)"},
-        ],
-        "idio_intensity":       0.3,
-        "mean_reversion_kappa": 0.5,
-    },
-
-    # ──────────────────────────────────────────────────────────────────────
-    "V-Shape Sell-off": {
-        "label":       "V-Shape Sell-off",
-        "description": (
-            "Quick sharp drawdown followed immediately by a fast snap-back "
-            "rally.  Demonstrates the shock + Fast-recovery coupling that "
-            "produces a textbook V-shape in factor paths."
-        ),
-        "initial_market_state": "Stable (0 %)",
-        "events": [
-            {"day":  30,
-             "factor_shock": {"MKT": -20.0, "TECH": -25.0, "HC": -10.0,
-                              "FIN": -22.0, "ENERGY": -25.0, "FX":  +4.0},
-             "recovery": "Fast recovery (~6mo)"},
         ],
         "idio_intensity":       0.3,
         "mean_reversion_kappa": 0.5,

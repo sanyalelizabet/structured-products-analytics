@@ -267,11 +267,15 @@ class ScenarioEngine:
         # called ReverseConvertible.summary() once per path).  Dispatch on
         # ``product_type`` — autocallables need the full path to evaluate
         # their observation dates, while plain BRCs only need the terminal.
-        if str(row.get("product_type", "")).upper() == "AC_BRC":
+        ptype = str(row.get("product_type", "")).upper()
+        if ptype == "AC_BRC":
             from src.autocallable_reverse_convertible import (
                 vectorised_autocallable_rc_summary,
             )
             v = vectorised_autocallable_rc_summary(row, price_paths, date_range)
+        elif ptype == "CPN":
+            from src.capital_protection_note import vectorised_cpn_summary
+            v = vectorised_cpn_summary(row, final_prices)
         else:
             v = vectorised_european_rc_summary(row, final_prices)
         pnl              = v["pnl"]

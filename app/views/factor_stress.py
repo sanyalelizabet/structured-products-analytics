@@ -21,6 +21,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+from app.views._layout import fit_height as _fit_height
 from data.factor_scenarios import FACTOR_SCENARIO_PRESETS
 from src.factor_engine import FACTORS
 from src.factor_scenario_engine import FactorScenarioEngine
@@ -80,8 +81,47 @@ def render(portfolio, loadings, factor_engine, risk_free_rates,
     them from PortfolioAnalytics).  Currently used for any future
     cross-currency consolidation of the bottom tables.
     """
-    _ = fx_rates, reference_currency   # reserved for cross-ccy consolidation
     st.subheader("Factor Stress Testing")
+
+    # ── How-to-use panel — collapsed by default so it doesn't clutter, but
+    #    one click away.  Explains every input the user has to fill in.
+    with st.expander("How to use this view", expanded=False):
+        st.markdown(
+            """
+**What it does.** Simulates the portfolio against a *multi-factor* scenario
+of your design and shows the resulting P&L distribution.  Each Monte-Carlo
+path drives the six liquid risk factors (MKT / TECH / HC / FIN / ENERGY / FX),
+which are then projected onto each underlying via its OLS factor loadings.
+
+**Step 1 — Pick a preset.** Pre-baked scenarios (COVID, GFC, energy crisis…)
+populate the events table and the initial-state dropdown.  You can edit
+anything afterwards.
+
+**Step 2 — Tune the sampling.**
+* **Idio intensity λ** — how much idiosyncratic noise sits on top of the
+  factor projection.  0 = deterministic, 0.3 = damped Monte Carlo
+  (recommended), 1.0 = full historical residual vol.
+* **Paths** — Monte Carlo sample size.  100 is enough for the median &
+  fan chart; bump to 500 if the P&L percentiles look noisy.
+* **Regenerate** — draws a fresh noise sample without changing λ / paths.
+
+**Step 3 — Build the scenario (left column).**
+* **Initial market state** — the assumed equity-risk-premium regime for
+  the periods outside the shocks (i.e. the drift applied before the first
+  event and between consecutive events).
+* **Events table** — one row per dated shock.  *Day* is days from today;
+  the *Δ FACTOR* columns are per-factor shocks in %; *Recovery* picks
+  the post-shock dynamic (continued bear / stable / slow / fast recovery).
+* **κ** — Schwartz mean-reversion speed.  Higher κ pulls the factors back
+  toward their fair-value trajectory faster; 0 is pure GBM.
+
+**Step 4 — Read the output (right column).** *Factor Paths* and *Asset
+Paths* show median ± 1σ fans, with red dashed lines at each event date.
+*P&L Distribution* shows the portfolio outcome distribution — see the
+toggle to switch between reference-currency aggregate and per-currency
+breakdowns.
+"""
+        )
 
     # ── Top control row ──────────────────────────────────────────────────
     col_preset, col_lambda, col_paths, col_regen = st.columns([3, 2, 2, 1])
@@ -143,7 +183,10 @@ def render(portfolio, loadings, factor_engine, risk_free_rates,
     st.session_state[_SAMPLER_KEY] = engine.noise_sampler
 
     with col_right:
-        _render_output_tabs(res, portfolio, loadings, ui_scenario)
+        _render_output_tabs(
+            res, portfolio, loadings, ui_scenario,
+            fx_rates=fx_rates, reference_currency=reference_currency,
+        )
 
     # ── Portfolio-level tables ───────────────────────────────────────────
     st.markdown("---")
@@ -312,7 +355,8 @@ def _get_or_make_sampler(portfolio, n_paths, regen_clicked):
 # Output tabs (right column)
 # ──────────────────────────────────────────────────────────────────────────
 
-def _render_output_tabs(res, portfolio, loadings, ui_scenario):
+def _render_output_tabs(res, portfolio, loadings, ui_scenario,
+                        fx_rates=None, reference_currency=None):
     today = pd.Timestamp.today().normalize()
     shock_dates = [
         today + pd.Timedelta(days=int(ev["day"]))
@@ -329,7 +373,8 @@ def _render_output_tabs(res, portfolio, loadings, ui_scenario):
     with tabs[1]:
         _plot_asset_paths(res["asset_paths"], portfolio, shock_dates)
     with tabs[2]:
-        _render_pnl_distribution(res)
+        _render_pnl_distribution(res, fx_rates=fx_rates,
+                                  reference_currency=reference_currency)
     with tabs[3]:
         _render_pl_decomposition(res, portfolio, loadings)
     with tabs[4]:
@@ -476,54 +521,127 @@ def _plot_asset_paths(asset_paths: dict, portfolio: pd.DataFrame, shock_dates):
 # P&L distribution
 # ──────────────────────────────────────────────────────────────────────────
 
-def _render_pnl_distribution(res):
+def _render_pnl_distribution(res, fx_rates=None, reference_currency=None):
+    """Render P&L distribution with a default aggregate (reference-currency)
+    view and an opt-in per-currency breakdown.
+
+    Aggregation rationale: each currency's ``pnl_samples`` array comes from
+    the same Monte Carlo run, so path indices are aligned across currencies.
+    Path-wise FX-converted sum is a valid portfolio P&L sample.
+    """
     samples_by_ccy: dict = res["pnl_samples_by_ccy"]
     if not samples_by_ccy:
         st.info("No P&L samples to display.")
         return
 
+    # ── View toggle ───────────────────────────────────────────────────────
+    has_multi_ccy = len(samples_by_ccy) > 1
+    can_aggregate = (
+        reference_currency is not None
+        and (fx_rates is not None or not has_multi_ccy)
+    )
+    default = "Reference currency (aggregate)" if can_aggregate else "Per currency"
+    options = (
+        ["Reference currency (aggregate)", "Per currency"]
+        if can_aggregate else ["Per currency"]
+    )
+    view_mode = st.radio(
+        "P&L view", options, index=options.index(default),
+        horizontal=True,
+        help=("Aggregate = sum across currencies after converting each path "
+              "to the reference currency (path-wise; FX rates from PortfolioAnalytics).  "
+              "Per currency = one distribution per currency, unconverted."),
+    )
+
+    if view_mode == "Reference currency (aggregate)":
+        _render_aggregate_pnl(samples_by_ccy, fx_rates, reference_currency)
+    else:
+        _render_per_ccy_pnl(samples_by_ccy)
+
+
+def _aggregate_samples(samples_by_ccy: dict, fx_rates: dict | None,
+                        reference_currency: str) -> np.ndarray:
+    """Path-wise sum of FX-converted samples → portfolio P&L array."""
+    arrays = []
     for ccy, samples in samples_by_ccy.items():
-        st.markdown(f"**{ccy} portfolio P&L distribution**  (n = {len(samples)} paths)")
+        if ccy == reference_currency:
+            rate = 1.0
+        else:
+            key = (ccy, reference_currency)
+            rate = fx_rates.get(key) if fx_rates else None
+            if rate is None:
+                st.warning(
+                    f"Missing FX rate for {ccy} → {reference_currency}; "
+                    "this currency excluded from the aggregate."
+                )
+                continue
+        arrays.append(np.asarray(samples) * float(rate))
+    if not arrays:
+        return np.array([])
+    # All currencies share path indices (same MC run), so element-wise sum
+    # is the correct aggregation.
+    return np.sum(np.stack(arrays, axis=0), axis=0)
 
-        mean   = float(samples.mean())
-        median = float(np.median(samples))
-        p5     = float(np.percentile(samples, 5))
-        p95    = float(np.percentile(samples, 95))
-        es5    = (float(samples[samples <= p5].mean())
-                  if len(samples) >= 20 else float(samples.min()))
 
-        fig = go.Figure()
-        fig.add_trace(go.Histogram(
-            x=samples, nbinsx=30, marker_color="#4E79A7", opacity=0.85,
-        ))
-        for label, value, color in [
-            ("Mean",   mean,   "#EDC948"),
-            ("Median", median, "#76B7B2"),
-            ("5%",     p5,     _SHOCK_COLOR),
-            ("95%",    p95,    "#59A14F"),
-        ]:
-            fig.add_vline(
-                x=value,
-                line=dict(color=color, width=1.5, dash="dash"),
-                annotation_text=f"{label}: {value:,.0f}",
-                annotation_position="top",
-                annotation_font=dict(color=color, size=10),
-            )
-        fig.update_layout(
-            template="plotly_dark", height=320,
-            margin=dict(t=50, b=40, l=40, r=20),
-            xaxis_title=f"Portfolio P&L ({ccy})",
-            yaxis_title="Number of paths",
-            showlegend=False,
+def _plot_pnl_histogram(samples: np.ndarray, x_title: str):
+    mean   = float(samples.mean())
+    median = float(np.median(samples))
+    p5     = float(np.percentile(samples, 5))
+    p95    = float(np.percentile(samples, 95))
+    es5    = (float(samples[samples <= p5].mean())
+              if len(samples) >= 20 else float(samples.min()))
+
+    fig = go.Figure()
+    fig.add_trace(go.Histogram(
+        x=samples, nbinsx=30, marker_color="#4E79A7", opacity=0.85,
+    ))
+    for label, value, color in [
+        ("Mean",   mean,   "#EDC948"),
+        ("Median", median, "#76B7B2"),
+        ("5%",     p5,     _SHOCK_COLOR),
+        ("95%",    p95,    "#59A14F"),
+    ]:
+        fig.add_vline(
+            x=value,
+            line=dict(color=color, width=1.5, dash="dash"),
+            annotation_text=f"{label}: {value:,.0f}",
+            annotation_position="top",
+            annotation_font=dict(color=color, size=10),
         )
-        st.plotly_chart(fig, width="stretch")
+    fig.update_layout(
+        template="plotly_dark", height=320,
+        margin=dict(t=50, b=40, l=40, r=20),
+        xaxis_title=x_title,
+        yaxis_title="Number of paths",
+        showlegend=False,
+    )
+    st.plotly_chart(fig, width="stretch")
 
-        c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric("Mean P&L",   f"{mean:,.0f}")
-        c2.metric("Median P&L", f"{median:,.0f}")
-        c3.metric("5% P&L",     f"{p5:,.0f}")
-        c4.metric("95% P&L",    f"{p95:,.0f}")
-        c5.metric("ES (worst 5%)", f"{es5:,.0f}")
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Mean P&L",      f"{mean:,.0f}")
+    c2.metric("Median P&L",    f"{median:,.0f}")
+    c3.metric("5% P&L",        f"{p5:,.0f}")
+    c4.metric("95% P&L",       f"{p95:,.0f}")
+    c5.metric("ES (worst 5%)", f"{es5:,.0f}")
+
+
+def _render_aggregate_pnl(samples_by_ccy, fx_rates, reference_currency):
+    samples = _aggregate_samples(samples_by_ccy, fx_rates, reference_currency)
+    if samples.size == 0:
+        st.info("No samples available after FX conversion.")
+        return
+    st.markdown(
+        f"**Portfolio P&L distribution — aggregate ({reference_currency})**  "
+        f"(n = {len(samples)} paths)"
+    )
+    _plot_pnl_histogram(samples, x_title=f"Portfolio P&L ({reference_currency})")
+
+
+def _render_per_ccy_pnl(samples_by_ccy):
+    for ccy, samples in samples_by_ccy.items():
+        samples = np.asarray(samples)
+        st.markdown(f"**{ccy} portfolio P&L distribution**  (n = {len(samples)} paths)")
+        _plot_pnl_histogram(samples, x_title=f"Portfolio P&L ({ccy})")
         st.markdown("&nbsp;")
 
 
@@ -572,7 +690,8 @@ def _render_pl_decomposition(res, portfolio, loadings):
         .format({c: "{:+.2f}" for c in fmt_cols})
         .background_gradient(cmap="RdYlGn", subset=fmt_cols, vmin=-50, vmax=50)
     )
-    st.dataframe(styled, width="stretch", hide_index=True)
+    st.dataframe(styled, width="stretch", hide_index=True,
+                 height=_fit_height(len(df)))
 
     st.markdown("**Visual decomposition**")
     fig = go.Figure()
@@ -626,7 +745,8 @@ def _render_loadings_table(portfolio: pd.DataFrame, loadings: dict):
         .background_gradient(cmap="RdYlGn", subset=beta_cols, vmin=-1.5, vmax=1.5)
         .background_gradient(cmap="Greens", subset=["R²"], vmin=0, vmax=1)
     )
-    st.dataframe(styled, width="stretch", hide_index=True)
+    st.dataframe(styled, width="stretch", hide_index=True,
+                 height=_fit_height(len(df)))
 
 
 def _isin_label(portfolio: pd.DataFrame, isin: str) -> str:
@@ -663,6 +783,7 @@ def _render_portfolio_summary(res):
             "portfolio_return_p5_pct":     "Return 5% (%)",
         }),
         width="stretch", hide_index=True,
+        height=_fit_height(len(pf)),
     )
 
 
@@ -689,6 +810,7 @@ def _render_product_detail(res):
             "return_p5_pct":       "Return 5% (%)",
         }),
         width="stretch", hide_index=True,
+        height=_fit_height(len(df)),
     )
 
 
@@ -716,6 +838,7 @@ def _render_delivered_stocks(res):
             "return_pct":            "Return (%)",
         }),
         width="stretch", hide_index=True,
+        height=_fit_height(len(df)),
     )
 
 
@@ -728,4 +851,5 @@ def _render_cash_positions(res):
             "total_cash": "Mean Cash Redemption",
         }),
         width="stretch", hide_index=True,
+        height=_fit_height(len(cash)),
     )

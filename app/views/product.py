@@ -87,15 +87,47 @@ def render(portfolio, df, analytics, valuation_date, vol_map, beta_map):
     col2.metric("Total Payoff", f"{row['total_payoff']:,.2f}")
     col3.metric("Days to Expiry", f"{int(row['days_to_expiry'])}")
 
+    is_cpn = str(row["product_type"]).upper() == "CPN"
+
     col4, col5, col6 = st.columns(3)
     col4.metric("YTM from Today (%)", f"{row['ytm_today']:.2f}")
-    col5.metric(
-        "Downside to Barrier (%)",
-        f"{row['distance_to_barrier']:.2f}%",
-        delta=f"{row['distance_delta']*100:+.2f}pp vs yesterday" if row["distance_delta"] is not None else None,
-        delta_color="normal"
-    )
+    if is_cpn:
+        # No barrier on a vanilla CPN — show protection floor instead.
+        prod_row_full = portfolio[portfolio["product_id"] == selected_product].iloc[0]
+        protection = float(prod_row_full.get("protection_pct", float("nan")))
+        col5.metric("Capital Protection", f"{protection * 100:.0f}%")
+    else:
+        col5.metric(
+            "Downside to Barrier (%)",
+            f"{row['distance_to_barrier']:.2f}%",
+            delta=f"{row['distance_delta']*100:+.2f}pp vs yesterday" if row["distance_delta"] is not None else None,
+            delta_color="normal"
+        )
     col6.metric("Worst Underlying", row["worst_underlying"])
+
+    if is_cpn:
+        prod_row_full = portfolio[portfolio["product_id"] == selected_product].iloc[0]
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Capital Protection", f"{float(prod_row_full['protection_pct']) * 100:.0f}%")
+        c2.metric("Participation", f"{float(prod_row_full['participation_pct']) * 100:.0f}%")
+        c3.metric(
+            "Break-even Spot Performance",
+            "0.00%" if row["break_even"] == 0.0
+            else f"{(row['break_even'] - 1.0) * 100:+.2f}%",
+        )
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Product description (after Key Metrics — full name, underlyings,
+    # maturity, coupon if any). Same format for every product type so the
+    # reader gets a consistent one-line "what is this".
+    # ─────────────────────────────────────────────────────────────────────
+    prod_row_full = portfolio[portfolio["product_id"] == selected_product].iloc[0]
+    _render_product_description(prod_row_full, row)
+
+    # =========================
+    # Term Sheet (uniform across product types)
+    # =========================
+    _render_term_sheet(prod_row_full)
 
     # =========================
     # Product Detail + Underlying Metrics
@@ -127,9 +159,15 @@ def render(portfolio, df, analytics, valuation_date, vol_map, beta_map):
         st.markdown("**Product Detail**")
         st.caption("Key metrics for the selected product.")
         detail = pd.DataFrame({"Metric": row_selected.index, "Value": row_selected.values})
-        detail["Value"] = detail["Value"].apply(
-            lambda x: f"{x:.2f}" if isinstance(x, (int, float, np.floating)) else str(x)
-        )
+
+        def _fmt(x):
+            if isinstance(x, (int, float, np.floating)):
+                if pd.isna(x):
+                    return "n/a"
+                return f"{x:.2f}"
+            return str(x)
+
+        detail["Value"] = detail["Value"].apply(_fmt)
         st.dataframe(detail, width="stretch", hide_index=True)
 
     with col_chart:
@@ -156,6 +194,193 @@ def render(portfolio, df, analytics, valuation_date, vol_map, beta_map):
             "YTD (%)": st.column_config.NumberColumn("YTD (%)", format="%.2f"),
         }
     )
+
+
+PRODUCT_TYPE_FULL_NAME = {
+    "BRC":    "Barrier Reverse Convertible",
+    "MBRC":   "Multi-asset Barrier Reverse Convertible (worst-of)",
+    "AC_BRC": "Autocallable Barrier Reverse Convertible",
+    "CPN":    "Capital Protection Note with Participation",
+}
+
+
+def _row_get(prod_row, field):
+    """Return ``prod_row[field]`` or None for missing/NaN/empty values."""
+    if field not in prod_row.index:
+        return None
+    val = prod_row[field]
+    if val is None:
+        return None
+    if isinstance(val, float) and pd.isna(val):
+        return None
+    if isinstance(val, str) and not val.strip():
+        return None
+    return val
+
+
+def _render_product_description(prod_row, analytics_row):
+    """One-line product description directly below Key Metrics.
+
+    Format: **Full product type (ABBR)** · Underlying(s) · Maturity DD.MM.YYYY · Coupon X.XX%
+
+    Coupon segment is omitted when the row has no coupon (zero-coupon
+    notes, CPNs without periodic coupons).
+    """
+    ptype       = str(prod_row.get("product_type", "")).upper()
+    full_name   = PRODUCT_TYPE_FULL_NAME.get(ptype, ptype or "Structured Product")
+    underlyings = ", ".join(prod_row.get("underlyings", []) or [])
+    maturity    = prod_row.get("maturity_date", "")
+    coupon      = prod_row.get("coupon", 0.0) or 0.0
+
+    try:
+        maturity_fmt = pd.Timestamp(maturity).strftime("%d.%m.%Y")
+    except (ValueError, TypeError):
+        maturity_fmt = str(maturity)
+
+    parts = [
+        f"<strong>{full_name} ({ptype})</strong>",
+        f"Underlying: {underlyings}",
+        f"Maturity: {maturity_fmt}",
+    ]
+    if coupon and coupon > 0:
+        parts.append(f"Coupon: {coupon * 100:.2f}% p.a.")
+
+    # Rendered as a title-sized line so the product identity stands out
+    # between the Key Metrics block and the Term Sheet panel.
+    st.markdown(
+        f"<div style='font-size: 1.4rem; line-height: 1.5; "
+        f"margin: 0.5rem 0 0.75rem 0;'>{' · '.join(parts)}</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def _render_term_sheet(prod_row):
+    """Unified term-sheet panel for any product type.
+
+    Three columns:
+      * Issuer chain      — issuer / rating / country / guarantor / keep-well
+      * Product terms     — denomination, position, notional, dates, coupon
+                            cadence, plus product-specific contractual fields
+                            (barrier, autocall, capital protection)
+      * Disclosures       — issue size, bond NPV at issue, implied IRR,
+                            issue / payment / final-fixing / last-trading dates
+
+    Missing fields are silently skipped, so partially-populated rows still
+    render cleanly.  This replaces the CPN-only panel — every product now
+    shows the same shape of term-sheet info.
+    """
+    ptype = str(prod_row.get("product_type", "")).upper()
+
+    issuer_chain = [
+        ("Issuer",            _row_get(prod_row, "issuer")),
+        ("Issuer rating",     _row_get(prod_row, "issuer_rating")),
+        ("Issuer country",    _row_get(prod_row, "issuer_country")),
+        ("Guarantor",         _row_get(prod_row, "guarantor")),
+        ("Guarantor rating",  _row_get(prod_row, "guarantor_rating")),
+        ("Keep-well",         _row_get(prod_row, "keep_well_agreement")),
+    ]
+
+    # ── Product terms — fields that drive the payoff ─────────────────────
+    denom    = _row_get(prod_row, "denomination")
+    units    = _row_get(prod_row, "position_units")
+    notional = _row_get(prod_row, "notional")
+    coupon   = _row_get(prod_row, "coupon")
+    coupon_dates = _row_get(prod_row, "coupon_dates")
+    day_count = _row_get(prod_row, "day_count")
+    init_fix = _row_get(prod_row, "initial_fixing_date")
+    purchase = _row_get(prod_row, "purchase_date")
+    maturity = _row_get(prod_row, "maturity_date")
+
+    terms = [
+        ("Denomination",       f"{denom:,.2f}" if isinstance(denom, (int, float)) else denom),
+        ("Position units",     units),
+        ("Total notional",     f"{notional:,.2f}" if isinstance(notional, (int, float)) else notional),
+        ("Day count",          day_count),
+        ("Initial fixing",     init_fix),
+        ("Purchase date",      purchase),
+        ("Maturity",           maturity),
+    ]
+    if coupon is not None and coupon > 0:
+        terms.append(("Coupon (p.a.)", f"{coupon * 100:.4f}%"))
+    if coupon_dates:
+        try:
+            n_periods = len(coupon_dates)
+            terms.append(("Coupon periods", n_periods))
+        except TypeError:
+            pass
+
+    # Product-specific contractual fields
+    if ptype in ("BRC", "MBRC", "AC_BRC"):
+        bp = _row_get(prod_row, "barrier_pct")
+        if bp is not None:
+            terms.append(("Barrier (% of strike)", f"{bp * 100:.2f}%"))
+    if ptype == "AC_BRC":
+        obs = _row_get(prod_row, "autocall_obs_dates")
+        if obs:
+            terms.append(("Autocall observation dates", ", ".join(map(str, obs))))
+        trig = _row_get(prod_row, "autocall_trigger_pct")
+        if trig is not None:
+            terms.append(("Autocall trigger (× strike)", f"{trig:.4f}"))
+    if ptype == "CPN":
+        ip = _row_get(prod_row, "issue_price")
+        if ip is not None:
+            terms.append(("Issue price", f"{ip:,.2f}"))
+        cp_amt = _row_get(prod_row, "capital_protection_amount")
+        if cp_amt is not None:
+            terms.append(("Capital protection", f"{cp_amt:,.2f}"))
+        pp = _row_get(prod_row, "protection_pct")
+        if pp is not None:
+            terms.append(("Protection level", f"{pp * 100:.2f}%"))
+        part = _row_get(prod_row, "participation_pct")
+        if part is not None:
+            terms.append(("Participation", f"{part * 100:.2f}%"))
+        b = _row_get(prod_row, "number_of_underlyings")
+        if b is not None:
+            terms.append(("Number of Underlyings (B)", f"{b:.5f}"))
+
+    # ── Disclosures (issuer-disclosed, mostly CPN today) ─────────────────
+    disclosures = [
+        ("Issue size",        _row_get(prod_row, "issue_size")),
+        ("Bond NPV at issue", _row_get(prod_row, "bond_npv_at_issue")),
+        ("Implied IRR at issue",
+         f"{_row_get(prod_row, 'implied_irr_at_issue') * 100:.4f}%"
+         if _row_get(prod_row, "implied_irr_at_issue") is not None else None),
+        ("Payment date",      _row_get(prod_row, "payment_date")),
+        ("Final fixing",      _row_get(prod_row, "final_fixing_date")),
+        ("Last trading day",  _row_get(prod_row, "last_trading_day")),
+    ]
+
+    def _tidy(pairs):
+        return [{"Field": k, "Value": v} for k, v in pairs if v is not None]
+
+    issuer_rows = _tidy(issuer_chain)
+    term_rows   = _tidy(terms)
+    disc_rows   = _tidy(disclosures)
+
+    if not (issuer_rows or term_rows or disc_rows):
+        return
+
+    with st.expander("Term sheet", expanded=True):
+        # Layout: 2 cols if no disclosures, 3 cols otherwise — keeps the
+        # display tight for products that don't have issuer-disclosure data.
+        if disc_rows:
+            col_a, col_b, col_c = st.columns(3)
+        else:
+            col_a, col_b = st.columns(2)
+            col_c = None
+
+        if term_rows:
+            with col_a:
+                st.markdown("**Product terms**")
+                st.dataframe(pd.DataFrame(term_rows), width="stretch", hide_index=True)
+        if issuer_rows:
+            with col_b:
+                st.markdown("**Issuer chain**")
+                st.dataframe(pd.DataFrame(issuer_rows), width="stretch", hide_index=True)
+        if disc_rows and col_c is not None:
+            with col_c:
+                st.markdown("**Disclosures**")
+                st.dataframe(pd.DataFrame(disc_rows), width="stretch", hide_index=True)
 
 
 def _render_underlying_prices(analytics, prod_row):

@@ -25,6 +25,40 @@ from typing import Callable
 # Payoff functions
 # ---------------------------------------------------------------------------
 
+def capital_protection_note_payoff(
+    paths: np.ndarray,
+    dates: pd.DatetimeIndex,
+    row: pd.Series,
+) -> np.ndarray:
+    """Capital Protection Note payoff at maturity.
+
+    Per certificate (and scaled by ``notional``):
+
+        Payoff(S_T) = N · [π + p · max(S_T/K − 1, 0)]
+
+    where π = ``protection_pct`` and p = ``participation_pct``.  Coupon
+    is added unconditionally with the same year-fraction convention used
+    by :func:`european_brc_payoff` so the two payoffs sit on the same
+    discounting basis.
+    """
+    notional      = float(row["notional"])
+    strike        = float(row["strike"][0])
+    protection    = float(row["protection_pct"])
+    participation = float(row["participation_pct"])
+
+    terminal = paths[:, -1, 0]                                   # (n_paths,)
+    upside   = np.maximum(terminal / strike - 1.0, 0.0)
+    redemption = notional * (protection + participation * upside)
+
+    T_total = (
+        pd.Timestamp(row["maturity_date"]) -
+        pd.Timestamp(row["initial_fixing_date"])
+    ).days / 360
+    coupon = notional * float(row.get("coupon", 0.0) or 0.0) * T_total
+
+    return redemption + coupon
+
+
 def european_brc_payoff(
     paths: np.ndarray,
     dates: pd.DatetimeIndex,
@@ -591,6 +625,18 @@ class MonteCarloPricer:
     # Internal helpers
     # ------------------------------------------------------------------
     def _resolve_payoff(self, row: pd.Series) -> Callable:
+        """Pick the right payoff function for this product.
+
+        Dispatch on ``product_type`` first (so CPN doesn't get priced with
+        BRC's worst-of barrier mechanic); fall back to ``type_style`` for
+        the legacy BRC/MBRC path.
+        """
+        ptype = str(row.get("product_type", "")).upper()
+        if ptype == "CPN":
+            return capital_protection_note_payoff
+        # NOTE: AC_BRC currently falls through to the European BRC payoff;
+        # autocallable Monte Carlo support is a separate piece of work
+        # (would mirror ``vectorised_autocallable_rc_summary``).
         style = str(row.get("type_style", "european")).lower()
         if style == "european":
             return european_brc_payoff

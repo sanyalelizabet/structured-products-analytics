@@ -18,6 +18,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from app.config import SCENARIO_PRESETS, SCENARIO_CUSTOM_DEFAULT
+from app.views._layout import fit_height as _fit_height
 from src.noise_sampler import NoiseSampler
 from src.scenario_archetypes import (
     DEFAULT_INITIAL_MARKET_STATE,
@@ -384,7 +385,8 @@ def _render_engine_inputs_table(portfolio, beta_map, vol_map, risk_free_rates,
         "r_f":         "{:.2%}",
         "Per-event shock × β (%)": "{:+.2f}",
     })
-    st.dataframe(styled, width="stretch", hide_index=True)
+    st.dataframe(styled, width="stretch", hide_index=True,
+                 height=_fit_height(len(df)))
     st.caption(
         "If a β is negative or near zero, a *negative* market shock can map to "
         "a *positive* (or near-zero) effect on that underlying — the OU drift / "
@@ -464,6 +466,7 @@ def _render_portfolio_summary(res):
             "portfolio_return_p5_pct":     "Return 5% (%)",
         }),
         width="stretch", hide_index=True,
+        height=_fit_height(len(pf)),
     )
 
 
@@ -490,6 +493,7 @@ def _render_product_detail(res):
             "return_p5_pct":       "Return 5% (%)",
         }),
         width="stretch", hide_index=True,
+        height=_fit_height(len(df)),
     )
 
 
@@ -517,6 +521,7 @@ def _render_delivered_stocks(res):
             "return_pct":            "Return (%)",
         }),
         width="stretch", hide_index=True,
+        height=_fit_height(len(df)),
     )
 
 
@@ -529,4 +534,5 @@ def _render_cash_positions(res):
             "total_cash": "Mean Cash Redemption",
         }),
         width="stretch", hide_index=True,
+        height=_fit_height(len(cash)),
     )
