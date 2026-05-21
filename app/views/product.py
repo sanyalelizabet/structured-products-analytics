@@ -196,12 +196,9 @@ def render(portfolio, df, analytics, valuation_date, vol_map, beta_map):
     )
 
 
-PRODUCT_TYPE_FULL_NAME = {
-    "BRC":    "Barrier Reverse Convertible",
-    "MBRC":   "Multi-asset Barrier Reverse Convertible (worst-of)",
-    "AC_BRC": "Autocallable Barrier Reverse Convertible",
-    "CPN":    "Capital Protection Note with Participation",
-}
+# Imported from the schema module so the dropdown in the entry form, the
+# product-detail header, and any future surface all read the same labels.
+from src.portfolio_entry import PRODUCT_TYPE_FULL_NAME  # noqa: E402
 
 
 def _row_get(prod_row, field):

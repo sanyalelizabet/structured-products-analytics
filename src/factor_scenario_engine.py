@@ -187,7 +187,8 @@ class FactorScenarioEngine:
             "events":           events,
         }
 
-    def _simulate_factor_paths(self, scenario: dict, sampler: NoiseSampler):
+    def _simulate_factor_paths(self, scenario: dict, sampler: NoiseSampler,
+                               today: pd.Timestamp | None = None):
         """Run vectorised correlated mean-reverting GBM on the K-dim factor
         block across all paths.  The scenario is an *event timeline*: an
         initial per-factor drift, followed by a series of dated events.
@@ -203,7 +204,12 @@ class FactorScenarioEngine:
         """
         scenario = self._normalise_scenario(scenario)
 
-        today              = pd.Timestamp.today().normalize()
+        # ``today`` is injectable so tests can pin the simulation start
+        # to a fixed date — without this, every run drifts by however
+        # many days have elapsed since the test was calibrated.  Default
+        # to the wall clock for production callers.
+        today = (pd.Timestamp(today).normalize() if today is not None
+                 else pd.Timestamp.today().normalize())
         portfolio_maturity = pd.to_datetime(self.portfolio["maturity_date"]).max()
 
         date_range = pd.bdate_range(start=today, end=portfolio_maturity)
@@ -449,13 +455,16 @@ class FactorScenarioEngine:
 
     # ─────────────────────────────────────────────────────── portfolio run
 
-    def run_path_scenario(self, scenario: dict) -> dict:
+    def run_path_scenario(self, scenario: dict,
+                          today: pd.Timestamp | None = None) -> dict:
         # Build / reuse the noise sampler for the union of asset universes.
         all_isins = sorted({
             isin for _, row in self.portfolio.iterrows() for isin in row["underlying_isins"]
         })
-        # Need n_days first; derive from grid.
-        today              = pd.Timestamp.today().normalize()
+        # Need n_days first; derive from grid.  ``today`` is injectable —
+        # see ``_simulate_factor_paths`` for the rationale.
+        today = (pd.Timestamp(today).normalize() if today is not None
+                 else pd.Timestamp.today().normalize())
         portfolio_maturity = pd.to_datetime(self.portfolio["maturity_date"]).max()
         n_days             = len(pd.bdate_range(start=today, end=portfolio_maturity))
         sampler = self._ensure_sampler(n_days=n_days, all_isins=all_isins)
@@ -469,7 +478,7 @@ class FactorScenarioEngine:
 
         try:
             date_range, log_F_paths, factor_returns = self._simulate_factor_paths(
-                scenario, sampler
+                scenario, sampler, today=today
             )
 
             # Per-factor path summary (median, p5, p95, mean) base 100

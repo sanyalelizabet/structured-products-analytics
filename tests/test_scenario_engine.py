@@ -123,14 +123,20 @@ class TestGetCorrSubset:
         assert m[0, 0] == 1.0 and m[1, 1] == 1.0
         assert m[0, 1] == m[1, 0] == pytest.approx(0.5)
 
-    def test_missing_isin_raises(self, engine):
-        row = make_mbrc_row()
+    def test_missing_isin_falls_back_to_identity(self, engine):
+        """A manually-entered product whose underlying ISIN isn't in the
+        correlation matrix should not crash the analytics pipeline.  The
+        engine returns identity (same as ``corr_df is None``); the
+        Streamlit pre-flight surfaces a market-data coverage warning so
+        the user knows their cross-asset estimates are simplified.
+        """
+        row = make_mbrc_row()  # MBRC has 2 underlyings
         bad = pd.DataFrame(
             {"CH0099999999": [1.0]},
             index=["CH0099999999"],
         )
-        with pytest.raises(KeyError, match="Missing ISIN"):
-            engine.get_corr_subset(row, bad)
+        m = engine.get_corr_subset(row, bad)
+        np.testing.assert_array_equal(m, np.eye(2))
 
 
 # ─────────────────────────────────────────

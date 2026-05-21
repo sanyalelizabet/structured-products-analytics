@@ -1,0 +1,65 @@
+{
+  "name": "Portfolio01",
+  "slug": "portfolio01",
+  "created_at": "2026-05-21T16:50:00Z",
+  "updated_at": "2026-05-21T16:50:00Z",
+  "owner_key_hash": "sha256:c0f284ac7aa371ccd2c6c87698cda435db10898cd9251d3d0863d6ec35c13628",
+  "reference_currency": "CHF",
+  "products": [
+    {
+      "product_type": "AC_BRC",
+      "product_id": "CH1532240566",
+      "type_style": "European",
+      "currency": "USD",
+      "issuer": "Opus (Public) Chartered Issuance S.A. - Compartment P100, Luxembourg",
+      "issuer_rating": null,
+      "underlyings": [
+        "Coca-Cola Company"
+      ],
+      "underlying_isins": [
+        "US1912161007"
+      ],
+      "initial_levels": [
+        81.56
+      ],
+      "strike": [
+        69.33
+      ],
+      "denomination": 1000.0,
+      "position_units": 100,
+      "cost_price": 1.0,
+      "purchase_date": "2026-05-04",
+      "initial_fixing_date": "2026-02-27",
+      "maturity_date": "2027-03-08",
+      "barrier_pct": 0.85,
+      "coupon": 0.05,
+      "autocall_obs_dates": null,
+      "autocall_trigger_pct": 0.0,
+      "autocall_coupon_memory": false,
+      "notional": 100000.0,
+      "issue_price": 1000.0,
+      "coupon_dates": [
+        "2027-03-08"
+      ],
+      "current_spots": [
+        81.56
+      ],
+      "current_spot_dates": [
+        null
+      ],
+      "barrier_breached": false,
+      "strike_pct_of_spot": 0.8500490436488475,
+      "day_count": "ACT/360",
+      "issuer_country": null,
+      "guarantor": null,
+      "guarantor_rating": null,
+      "keep_well_agreement": null,
+      "issue_size": null,
+      "payment_date": null,
+      "last_trading_day": null,
+      "final_fixing_date": null,
+      "bond_npv_at_issue": null,
+      "implied_irr_at_issue": null
+    }
+  ]
+}

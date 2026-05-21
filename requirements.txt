@@ -9,3 +9,4 @@ scipy
 yfinance
 tenacity
 matplotlib
+google-genai

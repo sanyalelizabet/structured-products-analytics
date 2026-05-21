@@ -454,15 +454,30 @@ class ScenarioEngine:
 
     def get_corr_subset(self, row, corr_df):
         """Extract product-specific correlation submatrix in the order of
-        ``row["underlying_isins"]``."""
+        ``row["underlying_isins"]``.
+
+        Returns identity (``np.eye``) when:
+
+        * ``corr_df`` is ``None`` — no correlation data available, or
+        * **any** of the product's ISINs is missing from ``corr_df`` — a
+          manually-added product whose underlying isn't in the market
+          data DB.  We fall back to identity (treats underlyings as
+          uncorrelated) instead of raising; partial analytics is more
+          useful than a stack trace, and the pre-flight in the
+          Streamlit app surfaces which products are affected so the user
+          knows their stress-test correlations are simplified.
+        """
         isins = list(row["underlying_isins"])
 
         if corr_df is None:
             return np.eye(len(isins))
 
-        missing = [isin for isin in isins if isin not in corr_df.index or isin not in corr_df.columns]
+        missing = [
+            isin for isin in isins
+            if isin not in corr_df.index or isin not in corr_df.columns
+        ]
         if missing:
-            raise KeyError(f"Missing ISIN(s) in correlation matrix: {missing}")
+            return np.eye(len(isins))
 
         return corr_df.loc[isins, isins].to_numpy(dtype=float)
 

@@ -1,0 +1,20 @@
+# =========================================================================
+# Streamlit theme — Structured Products Analytics
+# =========================================================================
+# The default Streamlit primary colour is red (#FF4B4B), which reads as
+# "error" in a financial dashboard.  We override to a calm corporate
+# blue so:
+#
+#   * primary buttons look like call-to-action, not warnings;
+#   * selected dataframe rows / radio items / focused inputs all use
+#     a neutral accent that pairs with the dark Plotly charts;
+#   * the semantic colours (error red, warning amber, success green)
+#     stay reserved for their actual meanings.
+
+[theme]
+base            = "dark"
+primaryColor    = "#3B82F6"     # corporate blue (Tailwind blue-500)
+backgroundColor = "#0E1117"     # Streamlit dark default
+secondaryBackgroundColor = "#1E2230"
+textColor       = "#FAFAFA"
+font            = "sans serif"
