@@ -56,7 +56,7 @@ Three sources for an existing portfolio:
 ### 2 · Add structured products manually
 
 
-![Manual product entry](figures/dashboard02.png)
+![Manual product entry](figures/start_view.png)
 
 Per-product **Edit** and **Delete** controls let users curate the
 portfolio before saving.
@@ -68,7 +68,7 @@ the sidebar — Product, Portfolio, Stress Testing and Factor Stress. The
 portfolio name and reference currency appear under the page title on
 every view, so it is always clear *which* portfolio is being analysed.
 
-![Analytics views](figures/dashboard03.png)
+![Analytics views](figures/dashboard02.png)
 
 ### 4 · Extract products directly from term sheets (AI-assisted)
 
@@ -77,7 +77,7 @@ the row fields via the Gemini API. Extracted data prefills the manual
 entry form so the user only has to confirm the trading-side fields
 (`position_units`, `cost_price`, `purchase_date`).
 
-![Term-sheet upload](figures/dashboard04.png)
+![Term-sheet upload](figures/dashboard03.png)
 
 
 
