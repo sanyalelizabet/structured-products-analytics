@@ -35,9 +35,21 @@ from unittest.mock import MagicMock
 
 from data.factor_scenarios import FACTOR_SCENARIO_PRESETS
 from src.factor_engine import FACTORS, FactorEngine
+from src.factor_premiums import REGIMES
 from src.factor_scenario_engine import FactorScenarioEngine
 from src.market_data_engine import MarketDataEngine
 from tests.conftest import make_mbrc_row
+
+
+def _neutral_premiums():
+    """Controlled regime×factor premiums for deterministic behaviour tests:
+    flat = 0, modest symmetric bull/bear. Decouples these mechanics/shape tests
+    from the live, data-driven premium CSV."""
+    vals = {"bear": -0.08, "flat": 0.0, "bull": 0.10}
+    return pd.DataFrame(
+        {c: [vals[r] for r in REGIMES] for c in FACTORS},
+        index=pd.Index(list(REGIMES), name="regime"),
+    )
 
 
 FACTOR_CODES = list(FACTORS.keys())
@@ -117,6 +129,7 @@ def engine(tmp_path):
         idio_intensity=0.0,           # deterministic — no idio noise
         mean_reversion_kappa=0.5,
         n_paths=25,
+        premiums=_neutral_premiums(),
     )
 
 
@@ -274,7 +287,6 @@ class TestTechWreck:
         subtracting the regime's MKT drift × horizon before comparing.
         """
         from src.scenario_archetypes import initial_drift_dict
-        from src.factor_engine import FACTORS
         from data.factor_scenarios import FACTOR_SCENARIO_PRESETS
 
         covid = _run(engine, "COVID March 2020")
@@ -282,14 +294,16 @@ class TestTechWreck:
         c_arr = _factor_median(covid, "MKT")
         w_arr = _factor_median(wreck, "MKT")
 
+        # Detrend with the SAME controlled premiums the engine ran on.
+        prem = _neutral_premiums()
         T_years = len(c_arr) / 252.0  # both runs share horizon
         c_drift = initial_drift_dict(
             FACTOR_SCENARIO_PRESETS["COVID March 2020"]["initial_market_state"],
-            FACTORS,
+            FACTORS, premiums=prem,
         )["MKT"]
         w_drift = initial_drift_dict(
             FACTOR_SCENARIO_PRESETS["Tech Wreck"]["initial_market_state"],
-            FACTORS,
+            FACTORS, premiums=prem,
         )["MKT"]
 
         covid_gap = (c_arr[-1] - c_arr.min()) - c_drift * T_years * 100

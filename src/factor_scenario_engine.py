@@ -45,6 +45,7 @@ import numpy as np
 import pandas as pd
 
 from src.factor_engine import FACTORS
+from src.linalg import safe_cholesky
 from src.noise_sampler import NoiseSampler
 from src.reverse_convertible import vectorised_european_rc_summary
 
@@ -66,6 +67,7 @@ class FactorScenarioEngine:
         n_paths: int = 100,
         noise_sampler: NoiseSampler | None = None,
         years_for_factor_stats: int = 3,
+        premiums=None,
     ):
         self.portfolio    = portfolio
         self.loadings     = loadings
@@ -74,6 +76,9 @@ class FactorScenarioEngine:
         self.idio_lambda  = float(idio_intensity)
         self.kappa        = float(mean_reversion_kappa)
         self.n_paths      = int(n_paths)
+        # Regime×factor premium table (chosen estimator) used to translate the
+        # initial-market-state into the pre-shock drift. None → default cache.
+        self.premiums     = premiums
 
         self.factor_codes = list(FACTORS.keys())
 
@@ -82,10 +87,9 @@ class FactorScenarioEngine:
         self.factor_corr_df = self.fe.factor_corr(years=years_for_factor_stats)
 
         rho = self.factor_corr_df.loc[self.factor_codes, self.factor_codes].to_numpy()
-        eigvals = np.linalg.eigvalsh(rho)
-        if eigvals.min() < 1e-8:
-            rho = rho + np.eye(len(self.factor_codes)) * (1e-8 - eigvals.min())
-        self.L_factor = np.linalg.cholesky(rho)
+        # safe_cholesky projects a non-PSD factor correlation matrix to the
+        # nearest correlation matrix (Higham) before factorising.
+        self.L_factor = safe_cholesky(rho)
 
         self.noise_sampler = noise_sampler   # may be None — built lazily
 
@@ -150,7 +154,8 @@ class FactorScenarioEngine:
             and any("recovery" in e for e in scenario["events"])
         )
         if "initial_market_state" in scenario or events_have_archetypes:
-            return translate_ui_scenario(scenario, self.factor_codes)
+            return translate_ui_scenario(scenario, self.factor_codes,
+                                         premiums=self.premiums)
 
         # 2. Already engine-ready
         if "events" in scenario or "initial_drift_pa" in scenario:

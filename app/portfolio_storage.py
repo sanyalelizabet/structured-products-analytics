@@ -1,24 +1,11 @@
 """Public, named portfolio storage with owner-key write protection.
 
-Design summary
---------------
-Saved portfolios live as JSON files in ``data/user_portfolios/``.
-Reads are public: anyone using the app can list and load every saved
-portfolio.  Writes (overwrite or delete) require the **owner key** that
-was shown to the user once at save time and stored only as a SHA-256
-hash inside the portfolio file.
-
-This is the "pastebin / gist edit-token" pattern:
-
-* No accounts, no auth machinery.
-* Public read, gated write.
-* Key is shown to the user once and is unrecoverable — losing it means
-  you can't update that portfolio (but you can always Save As under a
-  new name).
-
-The 32-character URL-safe owner key carries ~190 bits of entropy, well
-beyond brute-force range.  Per-request rate limiting is out of scope
-for v1.
+Saved portfolios are JSON files in ``data/user_portfolios/``. Reads are public
+(list/load any portfolio); writes (overwrite/delete) require the owner key,
+shown once at save time and stored only as a SHA-256 hash. No accounts: public
+read, gated write. The key is unrecoverable — if lost, save under a new name.
+The 32-byte URL-safe key (~190 bits) is beyond brute-force range; per-request
+rate limiting is out of scope for v1.
 
 File schema
 -----------

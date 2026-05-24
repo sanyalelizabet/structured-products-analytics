@@ -40,18 +40,15 @@ from src.pricing.black_scholes import BlackScholes
 def vectorised_cpn_summary(row, final_prices: np.ndarray) -> dict:
     """Vectorised per-path summary for Capital Protection Notes.
 
-    Mirrors the shape of :func:`vectorised_european_rc_summary` so the
-    scenario engines can dispatch on ``product_type`` without changing
-    downstream code.  CPNs are always cash-settled and have no barrier,
-    so settlement / delivery fields are constant across paths.
+    Same dict keys as :func:`vectorised_european_rc_summary`. CPNs are
+    cash-settled with no barrier, so settlement/delivery fields are constant.
 
     Parameters
     ----------
     row : pd.Series
-        Portfolio row.  Must carry ``notional``, ``strike`` (length-1
-        list), ``underlyings`` (length-1 list), ``protection_pct``,
-        ``participation_pct``, plus the standard schedule / cost fields
-        consumed by :class:`CapitalProtectionNote`.
+        Portfolio row. Requires ``notional``, ``strike`` (length-1),
+        ``underlyings`` (length-1), ``protection_pct``, ``participation_pct``,
+        plus the schedule/cost fields used by :class:`CapitalProtectionNote`.
     final_prices : np.ndarray
         Terminal underlying prices, shape ``(n_paths, 1)``.
     """
@@ -417,7 +414,7 @@ class CapitalProtectionNote:
             return np.nan
         dates, amounts = zip(*sorted(cash_flows, key=lambda x: x[0]))
         t0 = pd.Timestamp(dates[0])
-        years = [(pd.Timestamp(d) - t0).days / 365.0 for d in dates]
+        years = [(pd.Timestamp(d) - t0).days / 360.0 for d in dates]  # ACT/360
 
         def npv(r):
             return sum(cf / (1 + r) ** t for cf, t in zip(amounts, years))
@@ -456,14 +453,14 @@ class CapitalProtectionNote:
                        as_of: Optional[pd.Timestamp] = None) -> float:
         as_of = pd.Timestamp(as_of) if as_of is not None else pd.Timestamp.today()
         maturity = pd.Timestamp(self.row["maturity_date"])
-        T = max((maturity - as_of).days / 365.0, 0.0)
+        T = max((maturity - as_of).days / 360.0, 0.0)  # ACT/360
 
         # PV of remaining coupons (assume flat rate r, continuous discounting).
         coupon_pv = 0.0
         for date, amount in self.schedule.future_cashflows(
             self.notional, self.coupon, as_of
         ):
-            t = max((date - as_of).days / 365.0, 0.0)
+            t = max((date - as_of).days / 360.0, 0.0)  # ACT/360
             coupon_pv += amount * np.exp(-r * t)
 
         return analytic_cpn_price(
@@ -478,7 +475,7 @@ class CapitalProtectionNote:
                         as_of: Optional[pd.Timestamp] = None) -> dict:
         as_of = pd.Timestamp(as_of) if as_of is not None else pd.Timestamp.today()
         maturity = pd.Timestamp(self.row["maturity_date"])
-        T = max((maturity - as_of).days / 365.0, 1e-9)
+        T = max((maturity - as_of).days / 360.0, 1e-9)  # ACT/360
         return analytic_cpn_greeks(
             S=self.current_spot, K=self.strike, T=T, r=r, sigma=sigma,
             notional=self.notional,

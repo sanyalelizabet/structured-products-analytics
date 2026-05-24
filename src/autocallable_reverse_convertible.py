@@ -1,20 +1,14 @@
 """Autocallable Barrier Reverse Convertible — vectorised path-dependent payoff.
 
-A standard *Phoenix-without-memory* autocallable BRC, the most common
-Swiss flavour:
+Phoenix-without-memory autocallable BRC:
 
-* On each observation date, the worst-performing underlying (relative to
-  its **strike**) is checked.  If the worst-of ratio is above the
-  autocall trigger, the product is **called early** at par + prorata
-  coupon to that date.
-* If never called, the path falls through to the **standard European
-  barrier** BRC payoff at maturity — reusing
-  :func:`vectorised_european_rc_summary` so there's a single source of
-  truth for the at-maturity mechanics.
+* At each observation date, if the worst-of ratio to strike is at or above
+  the autocall trigger, the product is called early at par + prorata coupon.
+* Otherwise the path settles at maturity via the European barrier BRC payoff
+  (:func:`vectorised_european_rc_summary`).
 
-The function returns the same dict keys as the BRC helper, so a scenario
-engine can dispatch on ``product_type`` with a single line and feed the
-result into the rest of its pipeline unchanged.
+Returns the same dict keys as the BRC helper, plus ``autocalled`` and
+``call_date``.
 """
 from __future__ import annotations
 
@@ -148,7 +142,7 @@ def vectorised_autocallable_rc_summary(
             fractional_cash[p]  = 0.0
 
     # ── Uncalled paths fall through to the existing European-barrier
-    #     payoff at maturity (single source of truth). ─────────────────
+    #     payoff at maturity. ────────────────────────────────────────────
     if (~autocalled).any():
         maturity = pd.Timestamp(row["maturity_date"])
         mat_mask = np.asarray(date_range >= maturity)

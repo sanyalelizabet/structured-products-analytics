@@ -1,26 +1,21 @@
-"""Factor data plumbing for the multi-factor stress engine.
+"""Factor data layer for the multi-factor stress engine.
 
-Thin wrapper around ``MarketDataEngine`` — factors are stored in the same
-``prices.csv`` as securities, under synthetic keys ``__FACTOR_<CODE>__``,
-so they reuse the existing density/refresh/caching logic for free.
-This mirrors the pattern ``BetaEngine`` already established with
-``__BENCHMARK__``.
+Wraps ``MarketDataEngine``: factors are stored in ``prices.csv`` under
+synthetic keys ``__FACTOR_<CODE>__``, reusing the existing refresh/caching
+logic (same pattern as ``BetaEngine``'s ``__BENCHMARK__``).
 
-The factor universe is intentionally narrow — six liquid proxies that span
-the dominant systematic dimensions of an equity-linked structured-products
-book denominated in CHF/USD:
+Six liquid proxies spanning the systematic dimensions of a CHF/USD
+equity-linked book:
 
     MKT     URTH.US        MSCI World ETF — global equity beta
     TECH    XLK.US         Technology Select Sector ETF
     HC      XLV.US         Healthcare Select Sector ETF
     FIN     XLF.US         Financials Select Sector ETF
     ENERGY  XLE.US         Energy Select Sector ETF — oil-price proxy
-    FX      USDCHF.FOREX   USD/CHF spot — FX exposure for CHF-base book
+    FX      USDCHF.FOREX   USD/CHF spot
 
-Downstream consumers:
-
-* ``FactorLoadingsEngine``    — multivariate OLS of asset returns on factors
-* ``FactorScenarioEngine``    — simulates factor paths under a scenario spec
+Consumers: ``FactorLoadingsEngine`` (OLS of asset returns on factors),
+``FactorScenarioEngine`` (factor-path simulation under a scenario spec).
 """
 
 from __future__ import annotations

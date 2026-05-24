@@ -124,6 +124,31 @@ class TestSimulatePaths:
         # Near-perfect correlation → cross-path differences should be tiny
         assert np.max(np.abs(log_ret_0 - log_ret_1)) < 0.02
 
+    def test_non_psd_correlation_does_not_raise(self):
+        """A non-PSD correlation matrix is projected (Higham) instead of
+        crashing np.linalg.cholesky; paths come back finite."""
+        pricer = make_pricer(n_paths=500, seed=0)
+        # Three-asset all -0.6 off-diagonals → indefinite (negative eigenvalue).
+        isins = ["A1", "A2", "A3"]
+        row = pd.Series({
+            "product_id": "MBRC3", "product_type": "MBRC", "type_style": "european",
+            "currency": "CHF", "notional": 100_000, "position_units": 1,
+            "cost_price": 1.0, "coupon": 0.08, "barrier_pct": 0.60,
+            "underlyings": ["A", "B", "C"], "underlying_isins": isins,
+            "initial_levels": [100.0, 100.0, 100.0], "strike": [100.0, 100.0, 100.0],
+            "current_spots": [100.0, 100.0, 100.0],
+            "initial_fixing_date": "2024-01-01", "maturity_date": "2027-01-01",
+        })
+        vols = {i: 0.20 for i in isins}
+        corr = np.array([
+            [1.0, -0.6, -0.6],
+            [-0.6, 1.0, -0.6],
+            [-0.6, -0.6, 1.0],
+        ])
+        paths, _ = pricer.simulate_paths(row, vols, risk_free_rate=0.0, corr_matrix=corr)
+        assert np.isfinite(paths).all()
+        assert paths.shape[2] == 3
+
 
 # ---------------------------------------------------------------------------
 # european_brc_payoff
@@ -155,19 +180,22 @@ class TestEuropeanBrcPayoff:
         assert abs(payoffs[0] - (100_000 + expected_coupon)) < 0.01
 
     def test_breach_partial_redemption(self):
-        """Spot finishes below strike → redemption = notional * perf."""
+        """Spot finishes below the barrier → redemption = notional * (final/strike).
+
+        Defaults: initial_level=100, barrier_pct=0.60 → barrier=60.
+        """
         row = make_brc_row(
             notional=100_000, coupon=0.08,
             strike=100.0, current_spot=95.0,
             initial_fixing_date="2024-01-01", maturity_date="2025-01-01",
         )
-        paths = self._make_flat_paths(row, [70.0])   # 30% below strike
+        paths = self._make_flat_paths(row, [50.0])   # below barrier (60)
         dates = pd.bdate_range("2024-01-01", "2025-01-01")
 
         payoffs = european_brc_payoff(paths, dates, row)
 
         T_total = (pd.Timestamp("2025-01-01") - pd.Timestamp("2024-01-01")).days / 360
-        expected_redemption = 100_000 * (70.0 / 100.0)
+        expected_redemption = 100_000 * (50.0 / 100.0)
         expected_coupon = 100_000 * 0.08 * T_total
         assert abs(payoffs[0] - (expected_redemption + expected_coupon)) < 0.01
 
@@ -190,21 +218,26 @@ class TestEuropeanBrcPayoff:
         assert abs(payoff_below[0] - (100_000 * 0.60 + coupon)) < 0.01
 
     def test_mbrc_worst_of_determines_breach(self):
-        """MBRC: only the worst-of performance matters."""
+        """MBRC: only the worst-of matters, and breach is observed per-underlying
+        against its own barrier (= initial_level × barrier_pct).
+
+        initial_levels=[100,80], barrier_pct=0.60 → barriers=[60,48].
+        """
         row = make_mbrc_row(
             notional=100_000, coupon=0.08,
             strikes=[100.0, 80.0],
             current_spots=[95.0, 75.0],
             initial_fixing_date="2024-01-01", maturity_date="2025-01-01",
         )
-        # Asset 0: 110/100 = 1.10 (above), Asset 1: 60/80 = 0.75 (below → worst-of)
-        paths = np.array([[[110.0, 60.0]]])
+        # Asset 0: 110 (above barrier 60). Asset 1: 40 ≤ barrier 48 → breach,
+        # worst-of = 40/80 = 0.50.
+        paths = np.array([[[110.0, 40.0]]])
         dates = pd.bdate_range("2024-01-01", "2025-01-01")
 
         payoffs = european_brc_payoff(paths, dates, row)
 
         T_total = (pd.Timestamp("2025-01-01") - pd.Timestamp("2024-01-01")).days / 360
-        expected = 100_000 * 0.75 + 100_000 * 0.08 * T_total
+        expected = 100_000 * 0.50 + 100_000 * 0.08 * T_total
         assert abs(payoffs[0] - expected) < 0.01
 
 
@@ -219,14 +252,14 @@ class TestPrice:
         pricer = make_pricer()
         row = make_brc_row(
             notional=100_000, coupon=0.08,
-            strike=100.0, current_spot=95.0,
+            strike=100.0, current_spot=50.0,
             initial_fixing_date="2020-01-01", maturity_date="2020-06-01",  # in the past
         )
         result = pricer.price(row, european_brc_payoff, zero_vol_map(row), risk_free_rate=0.0)
 
-        # spot=95 < strike=100 → breach → redemption = 95/100 * notional
+        # spot=50 ≤ barrier=60 (initial 100 × 0.60) → breach → 50/100 × notional
         T_total = (pd.Timestamp("2020-06-01") - pd.Timestamp("2020-01-01")).days / 360
-        expected = 100_000 * 0.95 + 100_000 * 0.08 * T_total
+        expected = 100_000 * 0.50 + 100_000 * 0.08 * T_total
         assert abs(result["fair_value"] - expected) < 0.01
         assert result["std_error"] == 0.0
 
@@ -251,18 +284,18 @@ class TestPrice:
         assert abs(result["fair_value"] - expected) < 1.0    # allow tiny float drift
         assert abs(result["std_error"]) < 0.01               # essentially zero variance
 
-    def test_zero_vol_spot_below_strike_deterministic(self):
-        """Zero vol, r=0, spot below strike → every path breaches."""
+    def test_zero_vol_spot_below_barrier_deterministic(self):
+        """Zero vol, r=0, spot below the barrier → every path breaches."""
         pricer = make_pricer(n_paths=1_000)
         row = make_brc_row(
             notional=100_000, coupon=0.08,
-            strike=100.0, current_spot=70.0,  # spot < strike
+            strike=100.0, current_spot=50.0,  # spot < barrier (60)
             initial_fixing_date="2024-01-01", maturity_date="2025-01-01",
         )
         result = pricer.price(row, european_brc_payoff, zero_vol_map(row), risk_free_rate=0.0)
 
         T_total = (pd.Timestamp("2025-01-01") - pd.Timestamp("2024-01-01")).days / 360
-        expected = 100_000 * (70.0 / 100.0) + 100_000 * 0.08 * T_total
+        expected = 100_000 * (50.0 / 100.0) + 100_000 * 0.08 * T_total
         assert abs(result["fair_value"] - expected) < 1.0
 
     def test_fair_value_pct_is_fair_value_over_notional(self):
@@ -291,10 +324,11 @@ class TestPrice:
         row = make_brc_row()
         empty_corr = pd.DataFrame()   # no ISINs at all
 
+        corr, fell_back = pricer._get_corr_subset(row, empty_corr)
         # Should not raise
         result = pricer.price(
             row, european_brc_payoff, VOL_MAP, risk_free_rate=0.01,
-            corr_matrix=pricer._get_corr_subset(row, empty_corr),
+            corr_matrix=corr,
         )
         assert result["fair_value"] > 0
 
@@ -392,9 +426,22 @@ class TestGreeks:
         assert g["theta"] > 0
 
     def test_mbrc_corr_sens_positive(self):
-        """Higher correlation between underlyings reduces worst-of risk — FV rises."""
-        g = make_pricer(n_paths=10_000).compute_greeks(
-            MBRC_GREEK, european_brc_payoff, VOL_MBRC_G, R_CHF, CORR_2x2
+        """Higher correlation between underlyings reduces worst-of dispersion,
+        lowering the chance of a deep worst-of breach — so FV rises (corr_sens > 0).
+
+        Uses a row with spots above but within reach of the barrier and ample
+        vol, so correlation genuinely moves the worst-of payoff (the far-OTM
+        greek fixture would leave corr_sens ≈ 0, i.e. pure MC noise).
+        """
+        row = make_mbrc_row(
+            notional=100_000, coupon=0.08,
+            initial_levels=[100.0, 100.0], strikes=[100.0, 100.0],
+            current_spots=[80.0, 80.0],   # above barrier (60) but reachable
+            initial_fixing_date="2024-01-01", maturity_date="2027-01-01",
+        )
+        vol = {"CH0012221716": 0.30, "CH0012221717": 0.30}
+        g = make_pricer(n_paths=20_000).compute_greeks(
+            row, european_brc_payoff, vol, R_CHF, CORR_2x2
         )
         assert g["corr_sens"] > 0
 
@@ -447,23 +494,34 @@ class TestGreeks:
     # ── Analytical benchmark (delta vs Black-Scholes) ─────────────────────
 
     def test_brc_delta_close_to_black_scholes(self):
-        """For a single European BRC the MC delta should match BS within 5%.
+        """For a single European BRC the MC delta should match BS within 10%.
 
-        A BRC with notional N and barrier (strike) K is equivalent to:
+        The bond − put decomposition only holds when the barrier coincides
+        with the strike (a plain reverse convertible, breach observed at K).
+        We therefore use a barrier-at-strike row here:
+            initial_level = strike, barrier_pct = 1.0  ⇒  barrier = strike = K.
+
+        Such a BRC with notional N is equivalent to:
             N bonds  −  (N/K) vanilla puts struck at K
-
-        So the BRC delta = (N/K) × |put_delta| × S × 0.01  (per 1% spot move).
+        so the BRC delta = (N/K) × |put_delta| × S × 0.01  (per 1% spot move).
         """
         from src.pricing.black_scholes import BlackScholes
 
+        K = 70.0
+        row = make_brc_row(
+            notional=100_000, coupon=0.08,
+            strike=K, current_spot=95.0,
+            initial_level=K, barrier_pct=1.0,   # barrier = initial × 1.0 = strike
+            initial_fixing_date="2024-01-01", maturity_date="2027-01-01",
+        )
+
         pricer = make_pricer(n_paths=20_000, seed=42)
-        g = pricer.compute_greeks(BRC_GREEK, european_brc_payoff, VOL_BRC_G, R_CHF)
+        g = pricer.compute_greeks(row, european_brc_payoff, VOL_BRC_G, R_CHF)
 
         today    = pd.Timestamp.today().normalize()
-        T        = (pd.Timestamp(BRC_GREEK["maturity_date"]) - today).days / 360
+        T        = (pd.Timestamp(row["maturity_date"]) - today).days / 360
         S        = 95.0
-        K        = float(BRC_GREEK["strike"][0])
-        N        = float(BRC_GREEK["notional"])
+        N        = float(row["notional"])
         bs       = BlackScholes(S=S, K=K, T=T, r=R_CHF, sigma=0.20)
 
         # BRC embeds N/K puts; short-put delta is positive
@@ -497,3 +555,42 @@ class TestGreeks:
         sum_from_products = greeks_df[greeks_df["isin"] == isin]["delta_1pct"].sum()
         pf_value          = pf_delta[pf_delta["isin"] == isin]["total_delta_1pct"].iloc[0]
         assert abs(sum_from_products - pf_value) < 0.01
+
+
+# ---------------------------------------------------------------------------
+# Input-fallback provenance
+# ---------------------------------------------------------------------------
+
+class TestFallbackProvenance:
+
+    def test_missing_vol_flagged_in_price(self):
+        """An ISIN absent from vol_map is priced at DEFAULT_VOL and recorded."""
+        pricer = make_pricer(n_paths=200)
+        row = make_brc_row()
+        result = pricer.price(row, european_brc_payoff, {}, risk_free_rate=0.01)
+        assert any(t.startswith("vol:") for t in result["fallbacks"])
+
+    def test_no_fallbacks_when_inputs_present(self):
+        pricer = make_pricer(n_paths=200)
+        row = make_brc_row()
+        vol = {row["underlying_isins"][0]: 0.20}
+        result = pricer.price(row, european_brc_payoff, vol, risk_free_rate=0.01)
+        assert result["fallbacks"] == []
+
+    def test_missing_rate_flagged_in_portfolio(self):
+        pricer = make_pricer(n_paths=200)
+        portfolio = make_portfolio()
+        # Empty rate map → every product's currency falls back.
+        result = pricer.price_portfolio(portfolio, VOL_MAP, {})
+        assert "fallbacks" in result.columns
+        assert result["fallbacks"].str.contains("rate:").any()
+
+    def test_corr_subset_single_asset_not_flagged(self):
+        pricer = make_pricer()
+        _, fell_back = pricer._get_corr_subset(make_brc_row(), None)
+        assert fell_back is False
+
+    def test_corr_subset_multi_asset_missing_is_flagged(self):
+        pricer = make_pricer()
+        _, fell_back = pricer._get_corr_subset(make_mbrc_row(), None)
+        assert fell_back is True

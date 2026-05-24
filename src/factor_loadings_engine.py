@@ -1,24 +1,15 @@
-"""Multivariate OLS factor loadings — the single computation point for all
-asset-vs-factor regressions in the codebase.
+"""Multivariate OLS factor loadings — one computation point for all
+asset-vs-factor regressions.
 
-Design
-------
-For each underlying ISIN, the engine fits
+Per ISIN, fits over aligned daily log-returns:
 
-    r_{i,t}  =  α_i  +  Σ_k  β_{i,k} F_{k,t}  +  ε_{i,t}
+    r_{i,t} = α_i + Σ_k β_{i,k} F_{k,t} + ε_{i,t}
 
-over aligned daily log-returns, where the factor universe ``F`` is whatever
-subset of ``FactorEngine.FACTORS`` the caller specifies.  This subsumes:
+where ``F`` is any subset of ``FactorEngine.FACTORS``. Covers both single-factor
+β vs MSCI World (``factors=["MKT"]``) and the full multi-factor set.
 
-* **Single-factor β** vs MSCI World (the legacy ``BetaEngine`` use-case)
-  — pass ``factors=["MKT"]`` and read ``β_MKT``.
-* **Multi-factor loadings** for the multi-factor stress engine
-  — pass the full set ``["MKT","TECH","HC","FIN","ENERGY","FX"]``.
-
-The two flows share data, alignment, and OLS — there is no duplicated logic.
-
-Output for each ISIN
---------------------
+Output per ISIN
+---------------
 ``{
     "betas":     {factor_code: β_k},
     "alpha":     α,
@@ -27,12 +18,9 @@ Output for each ISIN
     "n_obs":     observations used,
 }``
 
-Robustness
-----------
-* Pairwise alignment on date — each ISIN uses whatever overlap it has with
-  the factors. Insufficient overlap (< ``min_obs``) falls back to a default
-  loading set (β_MKT=1, others=0, idio_vol=total_vol, R²=0).
-* Near-singular design matrix → fall back, log a warning.
+Fallbacks: pairwise date alignment per ISIN; overlap < ``min_obs`` or a
+near-singular design matrix returns a default loading set (β_MKT=1, others=0,
+idio_vol=total_vol, R²=0) and logs a warning.
 """
 
 from __future__ import annotations

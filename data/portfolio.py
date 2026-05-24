@@ -171,8 +171,10 @@ p5 = {
 # Early Payment Date at par + the relevant period coupon.
 #
 # Strike Price = 85 % of Spot Reference (USD 69.33).  No separate barrier —
-# the strike acts as the protection level.  Hence ``barrier_pct = 1.00``
-# (barrier = strike × 1.0).
+# the strike acts as the protection level.  Under our convention the barrier
+# is a fraction of the *initial fixing level* (USD 81.56), so to place the
+# barrier at the strike we set ``barrier_pct = 69.33 / 81.56 ≈ 0.85``
+# (barrier = initial × 0.85 = strike).
 #
 # Autocall trigger expressed as a ratio against the strike (per our schema
 # convention): ``autocall_trigger_pct = 81.56 / 69.33 ≈ 1.1764``.
@@ -195,7 +197,7 @@ p6 = {
     "current_spots":           [81.56],   # placeholder; live feed will refresh
     "current_spot_dates":      [None],
     "strike":                  [69.33],   # Strike Price = 85 % × spot ref
-    "barrier_pct":             1.00,      # strike acts as barrier
+    "barrier_pct":             69.33 / 81.56,  # ≈ 0.85 → barrier = initial × 0.85 = strike
     "coupon":                  0.05,      # 5.00 % p.a., paid quarterly
     "initial_fixing_date":     "2026-02-27",
     "purchase_date":           "2026-03-06",   # Payment Date

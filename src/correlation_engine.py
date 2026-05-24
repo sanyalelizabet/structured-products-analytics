@@ -1,5 +1,11 @@
+import logging
+
 import numpy as np
 import pandas as pd
+
+from src.linalg import is_positive_semidefinite, nearest_correlation_matrix
+
+log = logging.getLogger(__name__)
 
 
 class CorrelationEngine:
@@ -37,6 +43,19 @@ class CorrelationEngine:
             )
             arr = np.array(corr.fillna(0.0).values, dtype=float, copy=True)
             np.fill_diagonal(arr, 1.0)
+            corr = pd.DataFrame(arr, index=corr.index, columns=corr.columns)
+
+        # Pairwise estimation (per-pair overlap windows) and NaN→0 fills can
+        # leave the matrix indefinite, which has no Cholesky factor. Project to
+        # the nearest valid correlation matrix (Higham) so downstream samplers
+        # always receive a PSD input.
+        arr = corr.to_numpy(dtype=float)
+        if not is_positive_semidefinite(arr):
+            log.warning(
+                "Correlation matrix not PSD; projecting to nearest correlation "
+                "matrix (Higham) for %d underlyings.", arr.shape[0],
+            )
+            arr = nearest_correlation_matrix(arr)
             corr = pd.DataFrame(arr, index=corr.index, columns=corr.columns)
 
         return corr

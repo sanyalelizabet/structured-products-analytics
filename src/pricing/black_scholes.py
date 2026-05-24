@@ -74,16 +74,16 @@ class BlackScholes:
         return self.S * np.exp(-self.q * self.T) * norm.pdf(d1) * np.sqrt(self.T) * 0.01
 
     def theta(self, option: str = "call") -> float:
-        """dV/dt per calendar day (time passing, so T decreasing)"""
+        """dV/dt per day on an ACT/360 basis (1 day = 1/360 year), T decreasing."""
         d1, d2 = self.d1(), self.d2()
         common = -(self.S * np.exp(-self.q * self.T) * norm.pdf(d1) * self.sigma) / (2 * np.sqrt(self.T))
         if option == "call":
             return (common
                     - self.r * self.K * np.exp(-self.r * self.T) * norm.cdf(d2)
-                    + self.q * self.S * np.exp(-self.q * self.T) * norm.cdf(d1)) / 365
+                    + self.q * self.S * np.exp(-self.q * self.T) * norm.cdf(d1)) / 360
         return (common
                 + self.r * self.K * np.exp(-self.r * self.T) * norm.cdf(-d2)
-                - self.q * self.S * np.exp(-self.q * self.T) * norm.cdf(-d1)) / 365
+                - self.q * self.S * np.exp(-self.q * self.T) * norm.cdf(-d1)) / 360
 
     def rho(self, option: str = "call") -> float:
         """dV/dr per 1% rate move"""

@@ -1,24 +1,27 @@
-"""
-Monte Carlo pricing engine for structured products.
+"""Monte Carlo pricing engine for structured products.
 
-Architecture (Option A — payoff strategy)
-------------------------------------------
-  MonteCarloPricer.simulate_paths()   — correlated GBM, returns full path matrix
-  MonteCarloPricer.price()            — simulates paths, applies payoff_fn, discounts
-  MonteCarloPricer.price_portfolio()  — iterates portfolio, infers payoff_fn from row
+Risk-neutral GBM under ACT/360. Payoff functions are passed to the pricer as
+strategies, so adding a product type means adding a payoff function, not
+modifying the pricer.
 
-  Payoff functions live outside the pricer:
-    european_brc_payoff(paths, dates, row) → np.ndarray (n_paths,)
+    simulate_paths()  correlated GBM path tensor (n_paths, n_steps, n_assets)
+    price()           simulate, apply payoff_fn, discount
+    price_portfolio() dispatch payoff_fn per row, price each product
 
-  To add autocalls or American barriers: write a new payoff function and pass it in.
-  The pricer itself never changes.
+    payoff_fn(paths, dates, row) -> np.ndarray, shape (n_paths,)
 """
 
 from __future__ import annotations
 
+import logging
 import numpy as np
 import pandas as pd
 from typing import Callable
+
+from src.linalg import safe_cholesky
+from src.reverse_convertible import barrier_levels
+
+log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -87,6 +90,7 @@ def european_brc_payoff(
     """
     notional = float(row["notional"])
     strikes  = np.array([float(k) for k in row["strike"]])   # (n_assets,)
+    barriers = barrier_levels(row["initial_levels"], row.get("barrier_pct"))  # (n_assets,)
 
     T_total = (
         pd.Timestamp(row["maturity_date"]) -
@@ -100,8 +104,12 @@ def european_brc_payoff(
     perfs      = terminal / strikes                           # (n_paths, n_assets)
     worst_perf = perfs.min(axis=1)                            # (n_paths,)
 
-    # Redemption: full notional if worst-of above barrier, else notional * worst_perf
-    redemptions = np.where(worst_perf >= 1.0, notional, notional * worst_perf)
+    # European barrier breach: any underlying at/below its barrier
+    # (= initial_level × barrier_pct) at final fixing.
+    breached   = (terminal <= barriers[None, :]).any(axis=1)  # (n_paths,)
+
+    # Redemption: full notional if the barrier held, else worst-of conversion.
+    redemptions = np.where(breached, notional * worst_perf, notional)
 
     # Fixed coupon paid unconditionally at maturity
     coupon = notional * float(row["coupon"]) * T_total
@@ -110,21 +118,29 @@ def european_brc_payoff(
 
 
 # ---------------------------------------------------------------------------
+# Fallback defaults — applied when an input is missing. Every use is recorded
+# in the per-product ``fallbacks`` provenance so a defaulted figure is never
+# silently indistinguishable from one computed on real data.
+# ---------------------------------------------------------------------------
+
+DEFAULT_VOL = 0.15               # annualised vol when an ISIN has no vol estimate
+DEFAULT_RISK_FREE_RATE = 0.02    # rate when a currency has no rate
+
+
+# ---------------------------------------------------------------------------
 # Pricer
 # ---------------------------------------------------------------------------
 
 class MonteCarloPricer:
-    """
-    Simulates correlated GBM paths and prices any product whose payoff
-    can be expressed as a function of those paths.
+    """Prices any product whose payoff is a function of correlated GBM paths.
 
     Parameters
     ----------
     n_paths : int
-        Number of simulated paths.  10,000 is fast and accurate for
-        European payoffs.  Increase to 50,000+ for path-dependent features.
+        Number of paths. ~10,000 suffices for European payoffs; use 50,000+
+        for path-dependent features.
     seed : int
-        Base random seed for reproducibility.
+        RNG seed; fixed for reproducibility and common random numbers.
     """
 
     def __init__(self, n_paths: int = 10_000, seed: int = 42):
@@ -170,26 +186,31 @@ class MonteCarloPricer:
         spots    = np.array([float(s) for s in row["current_spots"]])
         n_assets = len(isins)
 
-        vols = np.array([vol_map.get(isin, 0.15) for isin in isins])
+        vols = np.array([vol_map.get(isin, DEFAULT_VOL) for isin in isins])
         r    = float(risk_free_rate)
 
         # Business-day grid
         dates   = pd.bdate_range(start=today, end=maturity)
         n_steps = len(dates)
 
-        # Correlation
+        # Correlation. safe_cholesky never raises: a non-PSD matrix (e.g. from
+        # pairwise estimation) is projected to the nearest correlation matrix
+        # before factorisation.
         if corr_matrix is None or n_assets == 1:
             corr_matrix = np.eye(n_assets)
-        L = np.linalg.cholesky(corr_matrix)
+        L = safe_cholesky(corr_matrix)
 
         # Draw all random increments at once: (n_paths, n_steps, n_assets)
         rng   = np.random.default_rng(self.seed)
         Z_raw = rng.standard_normal((self.n_paths, n_steps, n_assets))
         Z     = Z_raw @ L.T                                    # correlated
 
-        # Step sizes in years — prepend today as datetime64 to match dates dtype
+        # Step sizes in years — prepend today as datetime64 to match dates dtype.
+        # ACT/360 throughout: the simulation clock must match the discounting and
+        # accrual basis (also /360) so the risk-neutral drift and the discount
+        # factor share one day-count convention.
         all_dates = np.concatenate([[today.to_datetime64()], dates.values])
-        dt = np.diff(all_dates) / np.timedelta64(1, "D") / 365.25
+        dt = np.diff(all_dates) / np.timedelta64(1, "D") / 360.0
         dt = np.maximum(dt, 0.0)
 
         # GBM log-increments: (n_steps, n_assets) broadcast with (n_paths, n_steps, n_assets)
@@ -237,6 +258,7 @@ class MonteCarloPricer:
             fair_value         : present value of expected payoff
             fair_value_pct     : fair_value / notional
             std_error          : Monte Carlo standard error
+            fallbacks          : provenance tags for any defaulted inputs
         """
         today    = pd.Timestamp.today().normalize()
         maturity = pd.Timestamp(row["maturity_date"])
@@ -244,19 +266,28 @@ class MonteCarloPricer:
         T_remaining = max((maturity - today).days / 360, 0.0)
         notional    = float(row["notional"])
 
+        # Input provenance: vol defaults, and identity-correlation fallback when
+        # a multi-asset product is priced without a correlation matrix. Logged by
+        # the portfolio-level callers (price() runs repeatedly inside greeks).
+        corr_fell_back = corr_matrix is None and len(row["underlying_isins"]) > 1
+        fallbacks = self._input_fallbacks(row, vol_map, corr_fell_back)
+
         # Already expired — return intrinsic value
         if T_remaining <= 0:
             spots    = np.array([float(s) for s in row["current_spots"]])
             strikes  = np.array([float(k) for k in row["strike"]])
+            barriers = barrier_levels(row["initial_levels"], row.get("barrier_pct"))
             T_total  = (maturity - pd.Timestamp(row["initial_fixing_date"])).days / 360
             worst    = (spots / strikes).min()
-            redemp   = notional if worst >= 1.0 else notional * worst
+            breached = bool((spots <= barriers).any())
+            redemp   = notional * worst if breached else notional
             coupon   = notional * float(row["coupon"]) * T_total
             fv       = redemp + coupon
             return {
                 "fair_value":     fv,
                 "fair_value_pct": fv / notional if notional else np.nan,
                 "std_error":      0.0,
+                "fallbacks":      fallbacks,
             }
 
         paths, dates = self.simulate_paths(row, vol_map, risk_free_rate, corr_matrix)
@@ -272,6 +303,7 @@ class MonteCarloPricer:
             "fair_value":     fair_value,
             "fair_value_pct": fair_value / notional if notional else np.nan,
             "std_error":      std_error,
+            "fallbacks":      fallbacks,
         }
 
     # ------------------------------------------------------------------
@@ -300,14 +332,19 @@ class MonteCarloPricer:
 
         Returns
         -------
-        pd.DataFrame   columns: product_id, fair_value, fair_value_pct, std_error
+        pd.DataFrame   columns: product_id, fair_value, fair_value_pct,
+                       std_error, fallbacks
         """
         rows = []
 
         for _, row in portfolio.iterrows():
-            r           = float(risk_free_rates.get(row["currency"], 0.02))
-            corr_matrix = self._get_corr_subset(row, corr_df)
+            r = float(risk_free_rates.get(row["currency"], DEFAULT_RISK_FREE_RATE))
+            corr_matrix, corr_fb = self._get_corr_subset(row, corr_df)
             payoff_fn   = self._resolve_payoff(row)
+            fallbacks   = self._input_fallbacks(row, vol_map, corr_fb, risk_free_rates)
+            if fallbacks:
+                log.warning("Pricing %s with defaulted inputs: %s",
+                            row["product_id"], "; ".join(fallbacks))
 
             result = self.price(row, payoff_fn, vol_map, r, corr_matrix=corr_matrix)
 
@@ -316,6 +353,7 @@ class MonteCarloPricer:
                 "fair_value":     result["fair_value"],
                 "fair_value_pct": result["fair_value_pct"],
                 "std_error":      result["std_error"],
+                "fallbacks":      "; ".join(fallbacks),
             })
 
         return pd.DataFrame(rows)
@@ -332,15 +370,12 @@ class MonteCarloPricer:
         risk_free_rate: float,
         T_remaining: float,
     ) -> tuple[float, float]:
-        """Apply a payoff function to a precomputed path tensor and discount.
+        """Discount a payoff applied to a precomputed path tensor.
 
-        Used by :meth:`compute_greeks` to avoid re-running ``simulate_paths``
-        when only the *spot* changes (GBM is multiplicative in the starting
-        spot — see the ``compute_greeks`` delta block) or when the time-to-
-        maturity moves by one business day (theta).
+        Lets :meth:`compute_greeks` reprice for delta (scaled spot) and theta
+        (shifted T) without re-running ``simulate_paths``.
 
-        Returns ``(fair_value, std_error)`` so the caller can also expose
-        a fair-value snapshot via ``return_base_price=True``.
+        Returns ``(fair_value, std_error)``.
         """
         payoffs    = payoff_fn(paths, dates, row)
         discount   = np.exp(-risk_free_rate * T_remaining)
@@ -365,27 +400,23 @@ class MonteCarloPricer:
         corr_bump: float = 0.01,       # 1 pp correlation move (MBRC)
         return_base_price: bool = False,
     ) -> dict:
-        """
-        Per-product Greeks via central finite differences.
+        """Per-product Greeks by central finite difference.
 
-        The same RNG seed is used for base and every bumped reprice so that
-        the Monte Carlo noise cancels almost entirely in the difference —
-        the signal-to-noise ratio of a finite-difference Greek is much better
-        than that of the fair value itself.
+        Base and bumped reprices share the RNG seed (common random numbers),
+        so MC noise largely cancels in the difference.
 
-        All Greeks are expressed as the absolute FV change (in product
-        currency) per one unit of the bump:
+        Greeks are absolute FV changes (product currency) per bump:
 
-          delta    — FV change for a 1 % spot move, per underlying
-          vega     — FV change for a 1 pp (0.01) vol move, per underlying
-          theta    — FV change for 1 calendar day passing (approx)
-          rho      — FV change for a 1 bp (0.0001) rate move
-          corr_sens— FV change for a 1 pp uniform correlation shift (MBRC only)
+          delta     1 % spot move, per underlying
+          vega      1 pp (0.01) vol move, per underlying
+          theta     one calendar day, T decreasing (approx)
+          rho       1 bp (0.0001) rate move
+          corr_sens 1 pp uniform correlation shift (MBRC only)
 
         Returns
         -------
-        dict with keys: product_id, isins, underlyings,
-                        delta (list), vega (list), theta, rho, corr_sens
+        dict: product_id, isins, underlyings, delta (list), vega (list),
+              theta, rho, corr_sens
         """
         # If the product has already matured, fall back to the original
         # price() path which short-circuits on T_remaining <= 0.  No
@@ -417,9 +448,8 @@ class MonteCarloPricer:
                 result["std_error"]      = base_result["std_error"]
             return result
 
-        # Simulate the base path tensor ONCE for this product.  Delta and
-        # theta both reuse it without re-running simulate_paths — which
-        # is by far the dominant cost.
+        # Simulate the base path tensor once; delta and theta reuse it
+        # rather than re-running simulate_paths (the dominant cost).
         paths_base, dates_base = self.simulate_paths(
             row, vol_map, risk_free_rate, corr_matrix,
         )
@@ -433,11 +463,9 @@ class MonteCarloPricer:
         n      = len(isins)
 
         # ── Delta ─────────────────────────────────────────────────────────
-        # GBM is multiplicative in the starting spot:
-        #     S_{i,t} = S_{i,0} · exp(drift·t + σ_i·√t·Z)
-        # Therefore bumping S_{i,0} by (1+ε) is identical to scaling the
-        # i-th column of paths by (1+ε).  No re-simulation needed —
-        # the savings are 2N full Monte-Carlo runs per product.
+        # GBM is multiplicative in S_{i,0}: S_{i,t} = S_{i,0}·exp(drift·t + σ_i√t·Z).
+        # Bumping S_{i,0} by (1+ε) equals scaling the i-th path column by (1+ε),
+        # so delta needs no re-simulation.
         deltas = []
         for i in range(n):
             paths_up = paths_base.copy()
@@ -468,18 +496,11 @@ class MonteCarloPricer:
             vegas.append((fv_up - fv_dn) / 2)
 
         # ── Theta ─────────────────────────────────────────────────────────
-        # Theta = FV if we were 1 business day closer to maturity.
-        #
-        # Naive approach (shift maturity date by -1 day) breaks CRN because
-        # the path grid changes size, so Monte Carlo noise swamps the tiny
-        # signal (~a few CHF per day).
-        #
-        # Correct approach: take the *base* path tensor (already simulated
-        # for delta), evaluate the payoff at the penultimate step and
-        # discount for T_remaining - 1 business day.  The coupon is fixed
-        # contractually and is unchanged by 1 day passing.  No extra
-        # simulate_paths call needed — saves one full Monte-Carlo run per
-        # product.
+        # FV one business day closer to maturity. Re-simulating with a shifted
+        # maturity changes the grid size and breaks CRN, so the small daily
+        # signal is lost in MC noise. Instead reuse the base tensor: evaluate
+        # the payoff at the penultimate step and discount for T_remaining - 1
+        # business day (the contractual coupon is unaffected by one day).
         if len(dates_base) >= 2:
             paths_tm1 = paths_base[:, :-1, :]
             dates_tm1 = dates_base[:-1]
@@ -556,19 +577,21 @@ class MonteCarloPricer:
             Sorted by absolute delta descending — shows largest exposures first.
 
         fair_values : pd.DataFrame (one row per product)
-            product_id, fair_value, fair_value_pct, std_error.  This is
-            piggy-backed off the same Monte-Carlo base price computed
-            inside ``compute_greeks`` — drop the separate
-            ``price_portfolio`` call to avoid double work.
+            product_id, fair_value, fair_value_pct, std_error. Reuses the base
+            price from ``compute_greeks``, avoiding a separate ``price_portfolio``.
         """
         greeks_rows = []
         fv_rows     = []
         delta_agg   = {}   # isin → {"underlying": str, "currency": str, "total": float}
 
         for _, row in portfolio.iterrows():
-            r           = float(risk_free_rates.get(row["currency"], 0.02))
-            corr_matrix = self._get_corr_subset(row, corr_df)
+            r = float(risk_free_rates.get(row["currency"], DEFAULT_RISK_FREE_RATE))
+            corr_matrix, corr_fb = self._get_corr_subset(row, corr_df)
             payoff_fn   = self._resolve_payoff(row)
+            fallbacks   = self._input_fallbacks(row, vol_map, corr_fb, risk_free_rates)
+            if fallbacks:
+                log.warning("Pricing %s with defaulted inputs: %s",
+                            row["product_id"], "; ".join(fallbacks))
 
             g = self.compute_greeks(row, payoff_fn, vol_map, r, corr_matrix,
                                     return_base_price=True)
@@ -578,6 +601,7 @@ class MonteCarloPricer:
                 "fair_value":     g["fair_value"],
                 "fair_value_pct": g["fair_value_pct"],
                 "std_error":      g["std_error"],
+                "fallbacks":      "; ".join(fallbacks),
             })
 
             for isin, name, delta, vega in zip(
@@ -647,14 +671,37 @@ class MonteCarloPricer:
 
     def _get_corr_subset(
         self, row: pd.Series, corr_df: pd.DataFrame | None
-    ) -> np.ndarray:
+    ) -> tuple[np.ndarray, bool]:
+        """Return ``(corr_submatrix, fell_back)``.
+
+        ``fell_back`` is True when the product has multiple underlyings but no
+        correlation data covers them, so an identity matrix is substituted.
+        Single-underlying products need no correlation, so identity there is
+        exact and not flagged.
+        """
         isins = list(row["underlying_isins"])
+        n = len(isins)
 
-        if corr_df is None:
-            return np.eye(len(isins))
+        if n == 1:
+            return np.eye(1), False
 
-        missing = [i for i in isins if i not in corr_df.index]
-        if missing:
-            return np.eye(len(isins))   # graceful fallback
+        if corr_df is None or any(i not in corr_df.index for i in isins):
+            return np.eye(n), True
 
-        return corr_df.loc[isins, isins].to_numpy(dtype=float)
+        return corr_df.loc[isins, isins].to_numpy(dtype=float), False
+
+    @staticmethod
+    def _input_fallbacks(
+        row: pd.Series, vol_map: dict, corr_fell_back: bool,
+        risk_free_rates: dict | None = None,
+    ) -> list[str]:
+        """Provenance tags for inputs substituted by defaults for this product."""
+        tags: list[str] = []
+        if risk_free_rates is not None and row["currency"] not in risk_free_rates:
+            tags.append(f"rate:{row['currency']}")
+        missing_vols = [i for i in row["underlying_isins"] if i not in vol_map]
+        if missing_vols:
+            tags.append("vol:" + ",".join(missing_vols))
+        if corr_fell_back:
+            tags.append("correlation:identity")
+        return tags

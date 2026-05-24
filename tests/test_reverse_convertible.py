@@ -108,43 +108,53 @@ class TestPerformances:
 
 class TestBarrier:
     """
-    barrier_breaches_final() compares final vs strike (the barrier IS the strike
-    for European-style reverse convertibles). barrier_pct is used only for the
-    live distance-to-barrier monitoring metric, not for the final fixing check.
+    barrier_breaches_final() compares the final fixing against the barrier,
+    where ``barrier = initial_level × barrier_pct`` (NOT the strike). With the
+    test defaults (initial_level=100, barrier_pct=0.60) the barrier is 60.
     """
 
     def test_no_breach_above_strike(self):
-        """Final above strike → no breach."""
+        """Final above strike (and barrier) → no breach."""
         rc = brc(final_pct=5.0, current_spot=100.0, strike=100.0)
-        # final=105, strike=100 → no breach
+        # final=105, barrier=60 → no breach
         assert rc.barrier_breaches_final() == [False]
 
-    def test_breach_below_strike(self):
-        """Final below strike → breach (barrier is the strike)."""
+    def test_no_breach_between_barrier_and_strike(self):
+        """Final below strike but above barrier → no breach (the whole point
+        of a barrier: par is preserved unless the barrier is breached)."""
         rc = brc(final_pct=-20.0, current_spot=100.0, strike=100.0)
-        # final=80, strike=100 → breach
+        # final=80, barrier=60 → no breach
+        assert rc.barrier_breaches_final() == [False]
+
+    def test_breach_below_barrier(self):
+        """Final below barrier → breach."""
+        rc = brc(final_pct=-45.0, current_spot=100.0, strike=100.0)
+        # final=55, barrier=60 → breach
         assert rc.barrier_breaches_final() == [True]
 
-    def test_breach_at_strike(self):
-        """Final exactly at strike → breach (<=)."""
-        rc = brc(final_pct=0.0, current_spot=100.0, strike=100.0)
-        # final=100, strike=100 → breach
+    def test_breach_at_barrier(self):
+        """Final exactly at barrier → breach (<=)."""
+        rc = brc(final_pct=-40.0, current_spot=100.0, strike=100.0)
+        # final=60, barrier=60 → breach
         assert rc.barrier_breaches_final() == [True]
 
     def test_mbrc_one_underlying_breaches(self):
-        """MBRC: one underlying below strike → overall breach."""
+        """MBRC: one underlying below its barrier → overall breach."""
         rc = mbrc(
-            final_pcts=[5.0, -10.0],
+            final_pcts=[5.0, -50.0],
+            initial_levels=[100.0, 100.0],
             current_spots=[100.0, 100.0],
             strikes=[100.0, 100.0],
         )
+        # barriers=[60,60]; finals=[105,50] → second breaches
         assert rc.barrier_breaches_final() == [False, True]
         assert rc.barrier_breached() is True
 
-    def test_mbrc_no_breach_when_all_above_strike(self):
-        """MBRC: all underlyings above strike → no breach."""
+    def test_mbrc_no_breach_when_all_above_barrier(self):
+        """MBRC: all underlyings above their barrier → no breach."""
         rc = mbrc(
             final_pcts=[5.0, 3.0],
+            initial_levels=[100.0, 100.0],
             current_spots=[100.0, 100.0],
             strikes=[100.0, 100.0],
         )
@@ -208,33 +218,37 @@ class TestPayoff:
 # ─────────────────────────────────────────
 
 class TestBarrierDistance:
+    # Barrier = initial_level × barrier_pct. With initial_level=100 and
+    # barrier_pct=0.70 the barrier sits at 70, independent of the strike.
+
     def test_distance_formula(self):
-        # spot=90, strike=70 (barrier level) → (90-70)/90 = 0.2222...
-        rc = brc(current_spot=90.0, strike=70.0, barrier_pct=0.60)
+        # spot=90, barrier=100×0.70=70 → (90-70)/90 = 0.2222...
+        rc = brc(current_spot=90.0, initial_level=100.0, barrier_pct=0.70)
         distances = rc.current_barrier_distances()
         assert abs(distances[0] - (20 / 90)) < 1e-9
 
     def test_distance_zero_at_barrier(self):
-        # spot exactly at barrier (strike) → distance = 0
-        rc = brc(current_spot=70.0, strike=70.0, barrier_pct=0.60)
+        # spot exactly at barrier (70) → distance = 0
+        rc = brc(current_spot=70.0, initial_level=100.0, barrier_pct=0.70)
         assert abs(rc.current_barrier_distances()[0]) < 1e-9
 
     def test_distance_to_barrier_brc_single(self):
-        rc = brc(current_spot=90.0, strike=70.0, barrier_pct=0.60)
+        rc = brc(current_spot=90.0, initial_level=100.0, barrier_pct=0.70)
         assert abs(rc.distance_to_barrier() - rc.current_barrier_distances()[0]) < 1e-9
 
     def test_distance_to_barrier_mbrc_is_minimum(self):
         rc = mbrc(
+            initial_levels=[100.0, 100.0],
             current_spots=[90.0, 70.0],
             strikes=[70.0, 60.0],
-            barrier_pct=0.60,
+            barrier_pct=0.70,
         )
         expected = min(rc.current_barrier_distances())
         assert abs(rc.distance_to_barrier() - expected) < 1e-9
 
     def test_negative_distance_means_breached_intraday(self):
-        # spot below barrier (strike) → distance negative
-        rc = brc(current_spot=55.0, strike=70.0, barrier_pct=0.60)
+        # spot below barrier (70) → distance negative
+        rc = brc(current_spot=55.0, initial_level=100.0, barrier_pct=0.70)
         assert rc.current_barrier_distances()[0] < 0
 
 

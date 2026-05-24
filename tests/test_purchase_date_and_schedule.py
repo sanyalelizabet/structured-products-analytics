@@ -192,22 +192,25 @@ class TestYTM:
         assert rc.ytm() > 0
 
     def test_ytm_negative_on_breach_with_loss(self):
-        row = row_with(coupon=0.02)  # small coupon won't cover a 30% drop
-        rc = ReverseConvertible(row, final_levels=[-30.0])
+        # current_spot=110, barrier=60 (initial 100 × 0.60); a 50% shock takes
+        # the final to 55 ≤ barrier → breach; the small coupon won't cover the loss.
+        row = row_with(coupon=0.02)
+        rc = ReverseConvertible(row, final_levels=[-50.0])
         assert rc.ytm() < 0
 
     def test_ytm_single_bullet_matches_compound_formula(self):
-        # Single bullet → IRR satisfies (1+r)^T = payoff/cost where T = days/365
+        # Single bullet → IRR satisfies (1+r)^T = payoff/cost where T = days/360
         row = row_with()  # 366 days, coupon 8%, no breach
         rc = ReverseConvertible(row, final_levels=[10.0])
         ratio = rc.total_payoff() / rc.total_cost()
-        T_years = 366 / 365  # _xirr uses 365-day basis
+        T_years = 366 / 360  # _xirr uses ACT/360 basis
         expected = ratio ** (1 / T_years) - 1
         assert abs(rc.ytm() - expected) < 1e-6
 
     def test_ytm_differs_from_simple_return_pa_for_multi_coupon(self):
         # For a multi-period product, true IRR ≠ simple annualization
         row = row_with(
+            coupon=0.20,  # large intermediate coupon → clear compounding divergence
             initial_fixing_date="2024-01-01",
             maturity_date="2026-01-01",
             coupon_dates=["2025-01-01", "2026-01-01"],

@@ -154,7 +154,7 @@ class TestEventNextDriftDict:
 class TestInitialDriftDict:
 
     def test_drift_dict_has_one_entry_per_factor(self):
-        d = initial_drift_dict("Moderate bull", FACTORS)
+        d = initial_drift_dict("Bull", FACTORS)
         assert set(d) == set(FACTORS)
         assert all(isinstance(v, float) for v in d.values())
 
@@ -176,7 +176,7 @@ class TestTranslateUiScenario:
 
     def test_returns_engine_schema_keys(self):
         ui = {
-            "initial_market_state": "Stable",
+            "initial_market_state": "Flat",
             "events": [
                 {"day": 30, "factor_shock": {"MKT": -10}, "recovery": "Slow recovery (~2y)"},
             ],
@@ -195,7 +195,7 @@ class TestTranslateUiScenario:
             "description":          "Y",
             "idio_intensity":       0.5,
             "mean_reversion_kappa": 0.7,
-            "initial_market_state": "Stable",
+            "initial_market_state": "Flat",
             "events": [],
         }
         out = translate_ui_scenario(ui, FACTORS)
@@ -205,10 +205,19 @@ class TestTranslateUiScenario:
         assert out["mean_reversion_kappa"] == 0.7
 
     def test_default_archetypes_used_when_missing(self):
-        # No initial_market_state, no recovery on the event
+        # No initial_market_state, no recovery on the event. A controlled
+        # premiums table with a zero Flat row makes the default-regime drift
+        # deterministic (independent of the live premium CSV).
+        import pandas as pd
+        from src.factor_premiums import REGIMES
+        premiums = pd.DataFrame(
+            {c: [(-0.08 if r == "bear" else 0.10 if r == "bull" else 0.0)
+                 for r in REGIMES] for c in FACTORS},
+            index=pd.Index(list(REGIMES), name="regime"),
+        )
         ui = {"events": [{"day": 30, "factor_shock": {"MKT": -10}}]}
-        out = translate_ui_scenario(ui, FACTORS)
-        # initial drift = default ("Stable") = 0
+        out = translate_ui_scenario(ui, FACTORS, premiums=premiums)
+        # initial drift = default ("Flat") = 0 in the controlled table
         assert all(v == 0.0 for v in out["initial_drift_pa"].values())
         # event drift = default ("Stable (no drift)") = 0
         assert all(v == 0.0 for v in out["events"][0]["next_drift_pa"].values())
@@ -228,7 +237,7 @@ class TestTranslateUiScenario:
     def test_positive_shock_with_recovery_falls_back_to_initial_drift(self):
         """When a factor takes a positive shock and the event uses a recovery
         archetype, the post-event drift for that factor should follow the
-        initial-market-state regime (bull / stable / …) — not freeze at 0.
+        initial-market-state regime (bull / flat / …) — not freeze at 0.
         Factors with negative shocks still mean-revert as usual.
 
         Drifts are now per-factor (from historical premiums), so the test
@@ -236,14 +245,14 @@ class TestTranslateUiScenario:
         coded scalars.
         """
         ui = {
-            "initial_market_state": "Moderate bull",
+            "initial_market_state": "Bull",
             "events": [
                 {"day": 30,
                  "factor_shock": {"MKT": +10, "TECH": -15, "HC": 0},
                  "recovery": "Slow recovery (~2y)"},
             ],
         }
-        expected_initial = initial_drift_dict("Moderate bull", FACTORS)
+        expected_initial = initial_drift_dict("Bull", FACTORS)
         out = translate_ui_scenario(ui, FACTORS)
         ev = out["events"][0]
 

@@ -1,21 +1,17 @@
-"""Scenario archetypes — user-friendly shorthand for drifts.
+"""Scenario archetypes — map named presets to per-factor drift dicts.
 
-The UI lets the user pick an *archetype* (e.g. "Fast recovery"); the engine
-consumes a numerical per-factor drift dict.  Translation happens here so
-the engine stays purely numerical and presets / UI share one vocabulary.
+The UI picks an archetype (e.g. "Fast recovery"); the engine consumes a
+numerical per-factor drift dict. This module does the translation, keeping
+the engine purely numerical.
 
-Coupling design
----------------
-For **events**, the post-event drift is **coupled to the shock magnitude**.
-A −25 % shock + "Fast recovery (~6mo)" produces a much steeper recovery
-slope than a −5 % + "Fast recovery" — that's the V-shape mechanic the user
-asked for.  The post-event drift per factor is::
+For events, the post-event drift is coupled to the shock magnitude, so a
+−25 % shock recovers on a steeper slope than a −5 % shock under the same
+archetype. Per factor::
 
     drift_i = sign × log(1 + shock_i/100) / horizon
 
-with ``(sign, horizon)`` set by the archetype (see
-:data:`EVENT_RECOVERY_ARCHETYPES`).  ``sign = -1`` means *recovery* (drift
-reverses the shock); ``sign = +1`` means *continuation*; ``sign = 0`` flat.
+with ``(sign, horizon)`` from the archetype (:data:`EVENT_RECOVERY_ARCHETYPES`).
+``sign = -1`` recovery (drift reverses the shock); ``+1`` continuation; ``0`` flat.
 
 Concrete examples (per-factor), with shock −25 %:
 
@@ -56,13 +52,12 @@ EVENT_RECOVERY_ARCHETYPES: dict[str, tuple[int, float]] = {
 # on the trailing-12mo MKT return.  The dropdown stays short and
 # regime-flavoured; the engine sees vectors.
 INITIAL_MARKET_STATES: dict[str, str] = {
-    "Bear":          "bear",
-    "Stable":        "stable",
-    "Moderate bull": "moderate_bull",
-    "Strong bull":   "strong_bull",
+    "Bull": "bull",
+    "Flat": "flat",
+    "Bear": "bear",
 }
 
-DEFAULT_INITIAL_MARKET_STATE = "Stable"
+DEFAULT_INITIAL_MARKET_STATE = "Flat"
 DEFAULT_RECOVERY_ARCHETYPE   = "Stable (no drift)"
 
 
@@ -115,23 +110,23 @@ def event_next_drift_dict(
 def initial_drift_dict(
     market_state: str,
     factor_codes: Iterable[str],
+    premiums=None,
 ) -> dict[str, float]:
     """Translate the initial-market-state archetype → per-factor drift dict.
 
-    Drifts come from :func:`src.factor_premiums.get_factor_drift`, which
-    loads historically-conditioned premiums from
-    ``data/factor_premiums.csv`` (or falls back to legacy scalar drifts
-    broadcast across factors when the cache is missing or a regime is
-    data-sparse).
+    Drifts come from :func:`src.factor_premiums.get_factor_drift`. ``premiums``,
+    when supplied, is the regime×factor table to read (the chosen estimator);
+    otherwise the default cache is used.
     """
     if market_state not in INITIAL_MARKET_STATES:
         raise ValueError(f"Unknown initial market state: {market_state}")
     regime = INITIAL_MARKET_STATES[market_state]
     from src.factor_premiums import get_factor_drift
-    return get_factor_drift(regime, factor_codes)
+    return get_factor_drift(regime, factor_codes, premiums=premiums)
 
 
-def translate_ui_scenario(ui_scenario: dict, factor_codes: Iterable[str]) -> dict:
+def translate_ui_scenario(ui_scenario: dict, factor_codes: Iterable[str],
+                          premiums=None) -> dict:
     """Translate a UI/preset scenario (archetype labels) → engine scenario
     (numerical ``initial_drift_pa`` + per-event ``next_drift_pa``).
 
@@ -141,7 +136,7 @@ def translate_ui_scenario(ui_scenario: dict, factor_codes: Iterable[str]) -> dic
     factor_codes = list(factor_codes)
 
     initial_state    = ui_scenario.get("initial_market_state", DEFAULT_INITIAL_MARKET_STATE)
-    initial_drift_pa = initial_drift_dict(initial_state, factor_codes)
+    initial_drift_pa = initial_drift_dict(initial_state, factor_codes, premiums=premiums)
 
     out_events = []
     for ev in ui_scenario.get("events", []) or []:

@@ -41,6 +41,11 @@ def get_yahoo_client():
 _TTL_INTRADAY = 60 * 60          # 1h
 _TTL_DAILY    = 24 * 60 * 60     # 24h
 
+# History window for historical estimations (factor loadings, single-factor
+# betas, correlations). Matches the factor-premium estimation window so all
+# estimates share the same horizon.
+_ESTIMATION_YEARS = 5
+
 
 # ---------------------------------------------------------------------------
 # Cache-key derivation
@@ -114,6 +119,24 @@ def fetch_implied_vols(_portfolio, portfolio_key: str):
         return vol_map_static
 
 @st.cache_data(ttl=_TTL_INTRADAY)
+def fetch_fx_rates(reference_currency: str):
+    """Refresh the FX store and return ``(fx_map, as_of_str)`` for the reference.
+
+    Appends today's snapshot to ``data/fx_rates.csv`` via the market-data
+    engine (skipped if already present). On failure the stored snapshot remains
+    the fallback. ``as_of_str`` feeds the analytics cache key so conversions
+    re-run when the FX snapshot changes.
+    """
+    engine = get_market_engine()
+    try:
+        engine.fetch_latest_fx(reference_currency)
+    except Exception as e:  # defensive: never block analytics on an FX refresh
+        st.warning(f"Could not refresh FX rates. Using stored snapshot. {e}")
+    fx_map, as_of = engine.build_fx_rate_map(reference_currency)
+    return fx_map, str(as_of)
+
+
+@st.cache_data(ttl=_TTL_INTRADAY)
 def fetch_risk_free_rates(_portfolio, portfolio_key: str,
                           currencies=("CHF", "USD", "EUR", "GBP"),
                           tenor: str = "3M"):
@@ -152,13 +175,14 @@ def fetch_realised_vols(_portfolio, portfolio_key: str):
 
 @st.cache_data(ttl=_TTL_INTRADAY)
 def build_product_analytics(_portfolio, _db, reference_currency: str,
-                            portfolio_key: str):
-    # ``reference_currency`` + ``portfolio_key`` jointly form the cache
-    # key so the analytics pipeline re-runs when EITHER the user changes
-    # the roll-up currency OR the portfolio composition changes.
+                            portfolio_key: str, fx_as_of: str = "", _fx_map=None):
+    # ``reference_currency`` + ``portfolio_key`` + ``fx_as_of`` form the cache
+    # key so the analytics pipeline re-runs when the roll-up currency, the
+    # portfolio composition, OR the FX snapshot changes. ``_fx_map`` is the
+    # engine-built rate map (leading underscore → not hashed; fx_as_of keys it).
     _ = portfolio_key
     pa = PortfolioAnalytics(_portfolio, reference_currency=reference_currency,
-                            price_db=_db)
+                            price_db=_db, fx_rates=_fx_map, fx_as_of=fx_as_of)
     df = pa.build_product_analytics()
     df["return_pa"]  *= 100
     df["ytm"]        *= 100
@@ -172,7 +196,7 @@ def build_corr_matrix(_portfolio, portfolio_key: str):
     engine = get_market_engine()
     isins = list({isin for _, row in _portfolio.iterrows() for isin in row["underlying_isins"]})
     isin_ticker_map = engine.build_isin_ticker_map(isins)
-    return CorrelationEngine(engine).build_corr_matrix(isin_ticker_map, years=3)
+    return CorrelationEngine(engine).build_corr_matrix(isin_ticker_map, years=_ESTIMATION_YEARS)
 
 @st.cache_data(ttl=_TTL_DAILY)
 def build_beta_map(_portfolio, portfolio_key: str):
@@ -181,7 +205,7 @@ def build_beta_map(_portfolio, portfolio_key: str):
     isins = list({isin for _, row in _portfolio.iterrows() for isin in row["underlying_isins"]})
     isin_ticker_map = engine.build_isin_ticker_map(isins)
     try:
-        return BetaEngine(engine).build_beta_map(isin_ticker_map, years=3)
+        return BetaEngine(engine).build_beta_map(isin_ticker_map, years=_ESTIMATION_YEARS)
     except Exception as e:
         st.warning(f"Could not compute dynamic betas, falling back to static. {e}")
         return beta_map_static
@@ -205,7 +229,7 @@ def build_factor_loadings(_portfolio, portfolio_key: str):
     isins = list({isin for _, row in _portfolio.iterrows() for isin in row["underlying_isins"]})
     isin_ticker_map = mde.build_isin_ticker_map(isins)
     try:
-        return fle.build_loadings(isin_ticker_map, years=3)
+        return fle.build_loadings(isin_ticker_map, years=_ESTIMATION_YEARS)
     except Exception as e:
         st.warning(f"Factor loadings unavailable, using safe defaults. {e}")
         from src.factor_engine import FACTORS
@@ -383,11 +407,17 @@ portfolio, db, valuation_date, fetch_error = fetch_market_data(
 if fetch_error:
     st.warning(f"Could not refresh market prices. Using portfolio default spots. {fetch_error}")
 
+# Refresh the FX store and build the rate map BEFORE analytics use it. The
+# snapshot date feeds the analytics cache key so conversions re-run when the FX
+# snapshot changes.
+fx_map, fx_as_of = fetch_fx_rates(portfolio_currency)
+
 # Re-fingerprint after fetch_market_data: ``update_spots`` may have set
 # current_spots, but it does not change product IDs, so the key is the
 # same — passing ``pkey`` here keeps caches consistent.
 analytics, df        = build_product_analytics(
     portfolio, db, portfolio_currency, portfolio_key=pkey,
+    fx_as_of=fx_as_of, _fx_map=fx_map,
 )
 corr_df              = build_corr_matrix(portfolio, portfolio_key=pkey)
 beta_map             = build_beta_map(portfolio, portfolio_key=pkey)

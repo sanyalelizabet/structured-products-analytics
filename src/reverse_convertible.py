@@ -8,39 +8,48 @@ from scipy.optimize import brentq
 from src.coupon_schedule import CouponSchedule
 
 
+def barrier_levels(initial_levels, barrier_pct) -> np.ndarray:
+    """Absolute downside barrier per underlying.
+
+    The barrier is a fraction of the **initial fixing level**, not the
+    strike::
+
+        barrier_i = initial_level_i * barrier_pct
+
+    A missing / ``None`` ``barrier_pct`` is treated as ``1.0`` — i.e. no
+    separate downside barrier, with the breach observed at the initial
+    level (plain reverse-convertible behaviour).
+    """
+    bp = 1.0 if barrier_pct is None else float(barrier_pct)
+    return np.asarray([float(x) for x in initial_levels], dtype=float) * bp
+
+
 def vectorised_european_rc_summary(row, final_prices: np.ndarray) -> dict:
     """Vectorised per-path summary for European reverse convertibles.
 
-    Replaces the per-path Python loop in the scenario engines:
-
-        for p in range(N):
-            rc = ReverseConvertible(row, final_levels=...)
-            s  = rc.summary()
-
-    Computes everything the scenario engines consume in pure numpy on a
-    ``(N, n_assets)`` terminal-price tensor — orders of magnitude faster
-    than the loop for non-trivial ``n_paths``.
+    Pure-numpy equivalent of looping ``ReverseConvertible(...).summary()`` over
+    a ``(N, n_assets)`` terminal-price tensor.
 
     Parameters
     ----------
     row : pd.Series
-        Portfolio row.  Must carry ``notional``, ``strike``, ``underlyings``,
-        and the fields needed by :class:`ReverseConvertible` to compute
-        ``total_cost`` and ``coupon_payment`` (constants of the product).
+        Portfolio row. Requires ``notional``, ``strike``, ``initial_levels``,
+        ``barrier_pct``, ``underlyings``, plus the fields
+        :class:`ReverseConvertible` needs for ``total_cost`` / ``coupon_payment``.
     final_prices : np.ndarray
         Terminal underlying prices, shape ``(n_paths, n_assets)``.
 
     Returns
     -------
     dict
-        Per-path arrays and scalars that mirror the keys consumed by the
-        scenario engines from ``ReverseConvertible.summary()``.
+        Per-path arrays/scalars matching the keys of ``ReverseConvertible.summary()``.
     """
     final_prices = np.asarray(final_prices, dtype=float)
     N, n_assets = final_prices.shape
 
     notional    = float(row["notional"])
     strikes     = np.array([float(k) for k in row["strike"]])  # (n_assets,)
+    barriers    = barrier_levels(row["initial_levels"], row.get("barrier_pct"))  # (n_assets,)
     underlyings = list(row["underlyings"])
 
     # Constants — computed once via a prototype RC instance.
@@ -51,10 +60,12 @@ def vectorised_european_rc_summary(row, final_prices: np.ndarray) -> dict:
     perfs       = final_prices / strikes[None, :]                     # (N, n_assets)
     worst_idx   = np.argmin(perfs, axis=1)                            # (N,)
     worst_perf  = perfs[np.arange(N), worst_idx]                      # (N,)
-    breached    = (final_prices <= strikes[None, :]).any(axis=1)      # (N,)
 
-    # European RC redemption: notional if worst-of stayed above all strikes,
-    # else notional × worst_perf.
+    # European barrier observation at final fixing: breach if ANY underlying's
+    # terminal level is at or below its barrier (= initial_level × barrier_pct).
+    breached    = (final_prices <= barriers[None, :]).any(axis=1)     # (N,)
+
+    # Redemption: par if the barrier held, else worst-of conversion at strike.
     redemption    = np.where(breached, notional * worst_perf, notional)
     total_payoff  = redemption + coupon_payment
     pnl           = total_payoff - total_cost
@@ -64,7 +75,9 @@ def vectorised_european_rc_summary(row, final_prices: np.ndarray) -> dict:
 
     strike_used     = strikes[worst_idx]                              # (N,)
     final_spot_used = final_prices[np.arange(N), worst_idx]           # (N,)
-    physical        = final_spot_used < strike_used
+    # Physical delivery occurs exactly when the barrier is breached — the
+    # worst-of is converted into the underlying; otherwise cash at par.
+    physical        = breached
 
     total_shares     = notional / strike_used                         # (N,)
     delivered_shares = np.where(physical, np.floor(total_shares), 0).astype(int)
@@ -230,6 +243,13 @@ class ReverseConvertible:
 
         return prev_spots
 
+    def barrier_levels(self):
+        """Per-underlying absolute barrier = initial fixing level × barrier_pct.
+
+        See the module-level :func:`barrier_levels` for the convention.
+        """
+        return barrier_levels(self.initial_levels, self.barrier_pct)
+
     def _redemption_for(self, spots) -> float:
         """Closed-form redemption when ``spots`` are treated as terminal levels.
 
@@ -239,7 +259,8 @@ class ReverseConvertible:
         whole second :class:`ReverseConvertible` (which is expensive —
         rebuilds the coupon schedule, parses dates, etc.).
         """
-        breached = any(s <= k for s, k in zip(spots, self.strike_levels))
+        barriers = self.barrier_levels()
+        breached = any(s <= b for s, b in zip(spots, barriers))
         if not breached:
             return self.notional
         worst_perf = min(s / k for s, k in zip(spots, self.strike_levels))
@@ -255,8 +276,13 @@ class ReverseConvertible:
         )
 
     def _min_distance_for(self, spots) -> float:
-        """Distance-to-barrier for a hypothetical spot vector."""
-        distances = [(s - k) / s for s, k in zip(spots, self.strike_levels)]
+        """Distance-to-barrier for a hypothetical spot vector.
+
+        Distance is measured to the barrier (= initial × barrier_pct), as a
+        fraction of the hypothetical spot.
+        """
+        barriers = self.barrier_levels()
+        distances = [(s - b) / s for s, b in zip(spots, barriers)]
         return min(distances) if self.is_multi() else distances[0]
 
 
@@ -295,11 +321,11 @@ class ReverseConvertible:
     def barrier_breaches_final(self):
         """
         European barrier observation at final fixing.
-        Barrier level = strike
+        Barrier level = initial fixing level × barrier_pct (NOT the strike).
         """
         return [
-            final <= strike
-            for final, strike in zip(self.final_levels, self.strike_levels)
+            final <= barrier
+            for final, barrier in zip(self.final_levels, self.barrier_levels())
         ]
     
     def barrier_breached(self):
@@ -388,7 +414,7 @@ class ReverseConvertible:
             return np.nan
         dates, amounts = zip(*sorted(cash_flows, key=lambda x: x[0]))
         t0 = pd.Timestamp(dates[0])
-        years = [(pd.Timestamp(d) - t0).days / 365.0 for d in dates]
+        years = [(pd.Timestamp(d) - t0).days / 360.0 for d in dates]  # ACT/360
 
         def npv(r):
             return sum(cf / (1 + r) ** t for cf, t in zip(amounts, years))
@@ -439,12 +465,12 @@ class ReverseConvertible:
         """
         How far spot can fall from current price before hitting the barrier.
         Expressed as a fraction of current spot:
-            (spot - strike) / spot  where strike is the barrier level
+            (spot - barrier) / spot  where barrier = initial_level × barrier_pct
         Positive = above barrier, 0 = at barrier, negative = below barrier.
         """
         return [
-            (spot- strike)/spot
-            for spot, strike in zip(self.current_spots, self.strike_levels)
+            (spot - barrier) / spot
+            for spot, barrier in zip(self.current_spots, self.barrier_levels())
         ]
     
     def distance_to_barrier(self):

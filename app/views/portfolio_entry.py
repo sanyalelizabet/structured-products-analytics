@@ -277,7 +277,7 @@ def _render_form(
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# Running user portfolio (read via app.portfolio_source — single source of truth)
+# Running user portfolio (read via app.portfolio_source)
 # ──────────────────────────────────────────────────────────────────────────
 
 def _is_empty(v: Any) -> bool:
@@ -408,9 +408,11 @@ def _render_running_portfolio() -> None:
                      width="stretch", key="save_open"):
             # Reset dialog state every time the dialog opens so a stale
             # half-completed flow from earlier doesn't bleed through.
+            # render() reopens the dialog on the rerun while a flow is active.
+            st.session_state.pop("save_name_input", None)
             st.session_state["_save_dialog_state"] = "initial"
             st.session_state["_save_dialog_msg"] = None
-            _save_dialog()
+            st.rerun()
     with c2:
         st.download_button(
             "Download as JSON",
@@ -698,6 +700,14 @@ def _render_initial_save() -> None:
         "can read it. Updates and deletion require the owner key the "
         "app generates for you below."
     )
+    # Pre-fill with the active portfolio's name so saving an edited,
+    # previously-loaded portfolio routes through the overwrite/owner-key
+    # prompt instead of silently creating a new one.
+    if "save_name_input" not in st.session_state:
+        active_name = ps.get_name()
+        st.session_state["save_name_input"] = (
+            active_name if active_name != ps.UNSAVED_PORTFOLIO_NAME else ""
+        )
     name = st.text_input("Portfolio name", key="save_name_input",
                          placeholder="e.g. my-structured-portfolio")
     public_ok = st.checkbox(
@@ -853,9 +863,10 @@ def _render_page_header() -> None:
             ),
             key="header_save_portfolio",
         ):
+            st.session_state.pop("save_name_input", None)
             st.session_state["_save_dialog_state"] = "initial"
             st.session_state["_save_dialog_msg"] = None
-            _save_dialog()
+            st.rerun()
 
     st.caption(
         "Manage your portfolio: add products manually, extract them from "
@@ -888,6 +899,14 @@ def _render_page_header() -> None:
 
 def render() -> None:
     """Streamlit view entry point. Wired from ``app/streamlit_app.py``."""
+    # Re-open the save dialog on every rerun while a save flow is active.
+    # A @st.dialog only renders when its function is called during a run;
+    # the internal st.rerun() between steps (initial → reveal_key /
+    # needs_key → success) would otherwise close it before those later
+    # steps — including the owner-key reveal and overwrite prompt — show.
+    if st.session_state.get("_save_dialog_state"):
+        _save_dialog()
+
     # After a successful save, show a persistent banner with a "View
     # analytics" CTA so the user can immediately use their portfolio.
     last_msg = st.session_state.pop("_save_last_message", None)
@@ -905,9 +924,10 @@ def render() -> None:
                              key="post_save_view_analytics"):
                     # The sidebar reads ``active_view`` directly when
                     # rendering its button group, so a single state set
-                    # is enough to highlight the Product button on the
-                    # next render.
-                    st.session_state["active_view"] = "Product"
+                    # is enough to highlight the Portfolio button on the
+                    # next render. Land on the portfolio-level overview —
+                    # the natural view after building a whole portfolio.
+                    st.session_state["active_view"] = "Portfolio"
                     st.rerun()
 
     _render_page_header()

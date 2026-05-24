@@ -1,10 +1,8 @@
-"""Single source of truth for the active portfolio.
+"""Accessor for the active portfolio.
 
-Every consumer that needs the live portfolio should import
-:func:`get_active_portfolio` from this module rather than reading
-``data.portfolio.portfolio`` directly.  That gives us one place to
-dispatch between the bundled demo portfolio and a user-built one held
-in ``st.session_state``.
+Consumers import :func:`get_active_portfolio` from here rather than reading
+``data.portfolio.portfolio`` directly, giving one place to dispatch between
+the bundled demo portfolio and a user-built one held in ``st.session_state``.
 
 Session state keys this module reads:
 

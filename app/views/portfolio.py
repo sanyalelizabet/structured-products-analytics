@@ -22,7 +22,7 @@ from matplotlib.colors import LinearSegmentedColormap
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# Palette — single source of truth for the whole view
+# Palette for the whole view
 # ──────────────────────────────────────────────────────────────────────────
 
 

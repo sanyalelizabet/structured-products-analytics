@@ -1,11 +1,10 @@
 """Factor Stress Testing view — multi-factor structural Monte Carlo engine.
 
-The user thinks in **scenarios as event timelines**: an initial market
-state, plus a series of dated events.  Each event has per-factor shocks
-and a *Recovery* archetype that, coupled with the shock magnitude,
-defines the drift afterwards.  The engine translates this into numerical
-drifts and runs a vectorised multi-path simulation with Common Random
-Numbers (cached :class:`NoiseSampler` in session state).
+Scenarios are event timelines: an initial market state plus a series of dated
+events. Each event carries per-factor shocks and a Recovery archetype that,
+coupled with the shock magnitude, sets the post-event drift. The engine maps
+this to numerical drifts and runs a vectorised multi-path simulation with
+Common Random Numbers (cached :class:`NoiseSampler` in session state).
 
 Layout
 ------
@@ -24,6 +23,9 @@ import streamlit as st
 from app.views._layout import fit_height as _fit_height
 from data.factor_scenarios import FACTOR_SCENARIO_PRESETS
 from src.factor_engine import FACTORS
+from src.factor_premiums import (
+    ESTIMATION_LOOKBACK_YEARS, PREMIUM_METHODS, compute_factor_premiums,
+)
 from src.factor_scenario_engine import FactorScenarioEngine
 from src.noise_sampler import NoiseSampler
 from src.scenario_archetypes import (
@@ -88,38 +90,21 @@ def render(portfolio, loadings, factor_engine, risk_free_rates,
     with st.expander("How to use this view", expanded=False):
         st.markdown(
             """
-**What it does.** Simulates the portfolio against a *multi-factor* scenario
-of your design and shows the resulting P&L distribution.  Each Monte-Carlo
-path drives the six liquid risk factors (MKT / TECH / HC / FIN / ENERGY / FX),
-which are then projected onto each underlying via its OLS factor loadings.
+Test the portfolio against a market scenario you design, and see the range of
+possible P&L.
 
-**Step 1 — Pick a preset.** Pre-baked scenarios (COVID, GFC, energy crisis…)
-populate the events table and the initial-state dropdown.  You can edit
-anything afterwards.
-
-**Step 2 — Tune the sampling.**
-* **Idio intensity λ** — how much idiosyncratic noise sits on top of the
-  factor projection.  0 = deterministic, 0.3 = damped Monte Carlo
-  (recommended), 1.0 = full historical residual vol.
-* **Paths** — Monte Carlo sample size.  100 is enough for the median &
-  fan chart; bump to 500 if the P&L percentiles look noisy.
-* **Regenerate** — draws a fresh noise sample without changing λ / paths.
-
-**Step 3 — Build the scenario (left column).**
-* **Initial market state** — the assumed equity-risk-premium regime for
-  the periods outside the shocks (i.e. the drift applied before the first
-  event and between consecutive events).
-* **Events table** — one row per dated shock.  *Day* is days from today;
-  the *Δ FACTOR* columns are per-factor shocks in %; *Recovery* picks
-  the post-shock dynamic (continued bear / stable / slow / fast recovery).
-* **κ** — Schwartz mean-reversion speed.  Higher κ pulls the factors back
-  toward their fair-value trajectory faster; 0 is pure GBM.
-
-**Step 4 — Read the output (right column).** *Factor Paths* and *Asset
-Paths* show median ± 1σ fans, with red dashed lines at each event date.
-*P&L Distribution* shows the portfolio outcome distribution — see the
-toggle to switch between reference-currency aggregate and per-currency
-breakdowns.
+1. **Pick a preset** (COVID, energy crisis…) to fill in the scenario, then edit
+   it if you like.
+2. **Set the sampling.** *Paths* = number of simulations (100 is fine, 500 if
+   the result looks noisy). *Idio intensity* = extra random noise (0.3
+   recommended). *Regenerate* draws a new random sample.
+3. **Build the scenario** (left). *Initial market state* = Bull / Flat / Bear
+   assumed between shocks. *Events* = one row per shock: when (days from today),
+   how much each factor moves (%), and what happens afterwards (recovery type).
+   *κ* = how fast factors revert to trend.
+4. **Read the output** (right). *Factor / Asset Paths* show the median and a
+   spread band, with a line at each shock date. *P&L Distribution* shows the
+   range of portfolio outcomes.
 """
         )
 
@@ -155,6 +140,23 @@ breakdowns.
 
     st.info(f"**{preset['label']}** — {preset['description']}")
 
+    # ── Factor-premium estimator selector ────────────────────────────────
+    premium_method = st.radio(
+        "Factor premium estimate",
+        options=list(PREMIUM_METHODS),
+        format_func=lambda m: {
+            "mean":      "Historical average",
+            "shrinkage": "Stabilised (recommended)",
+        }.get(m, m),
+        horizontal=True,
+        help=("How each regime's factor drifts are estimated. "
+              "'Historical average' uses the plain in-regime mean (and a fixed "
+              "fallback when a regime has little data). 'Stabilised' blends that "
+              "average with a model-based estimate, which is steadier and gives "
+              "sensible per-factor values even when a regime is thinly observed."),
+    )
+    premiums_by_method, chosen_premiums = _compute_premiums(factor_engine, premium_method)
+
     # ── Two-column control / output layout ───────────────────────────────
     col_left, col_right = st.columns([2, 3])
 
@@ -178,6 +180,7 @@ breakdowns.
         mean_reversion_kappa=ui_scenario["mean_reversion_kappa"],
         n_paths=n_paths,
         noise_sampler=sampler,
+        premiums=chosen_premiums,
     )
     res = engine.run_path_scenario(ui_scenario)
     st.session_state[_SAMPLER_KEY] = engine.noise_sampler
@@ -186,6 +189,7 @@ breakdowns.
         _render_output_tabs(
             res, portfolio, loadings, ui_scenario,
             fx_rates=fx_rates, reference_currency=reference_currency,
+            premiums_by_method=premiums_by_method, premium_method=premium_method,
         )
 
     # ── Portfolio-level tables ───────────────────────────────────────────
@@ -355,8 +359,36 @@ def _get_or_make_sampler(portfolio, n_paths, regen_clicked):
 # Output tabs (right column)
 # ──────────────────────────────────────────────────────────────────────────
 
+def _compute_premiums(factor_engine, chosen_method):
+    """Compute the regime×factor premium tables for every estimator.
+
+    Returns ``({method: DataFrame}, chosen_DataFrame)``. On failure (e.g. no
+    factor history yet) returns ``({}, None)`` so the engine falls back to the
+    cached default premiums.
+    """
+    try:
+        # Ensure the estimation window of factor history is present (skip-safe:
+        # re-fetches only when the stored history is shorter than requested).
+        try:
+            factor_engine.fetch_factor_prices(
+                years=ESTIMATION_LOOKBACK_YEARS, force_refresh=False,
+            )
+        except Exception as e:  # network/data issues → use whatever is stored
+            st.warning(f"Could not extend factor history to "
+                       f"{ESTIMATION_LOOKBACK_YEARS}y ({e}); using stored data.")
+        by_method = {
+            m: compute_factor_premiums(factor_engine, method=m)
+            for m in PREMIUM_METHODS
+        }
+    except Exception as e:  # never block the view on a premium-compute failure
+        st.warning(f"Could not compute factor premiums ({e}); using cached defaults.")
+        return {}, None
+    return by_method, by_method.get(chosen_method)
+
+
 def _render_output_tabs(res, portfolio, loadings, ui_scenario,
-                        fx_rates=None, reference_currency=None):
+                        fx_rates=None, reference_currency=None,
+                        premiums_by_method=None, premium_method="mean"):
     today = pd.Timestamp.today().normalize()
     shock_dates = [
         today + pd.Timedelta(days=int(ev["day"]))
@@ -365,7 +397,7 @@ def _render_output_tabs(res, portfolio, loadings, ui_scenario,
 
     tabs = st.tabs([
         "Factor Paths", "Asset Paths", "P&L Distribution",
-        "P&L Decomposition", "Loadings",
+        "P&L Decomposition", "Loadings", "Premiums",
     ])
 
     with tabs[0]:
@@ -379,6 +411,8 @@ def _render_output_tabs(res, portfolio, loadings, ui_scenario,
         _render_pl_decomposition(res, portfolio, loadings)
     with tabs[4]:
         _render_loadings_table(portfolio, loadings)
+    with tabs[5]:
+        _render_factor_premiums(premiums_by_method, premium_method, ui_scenario)
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -747,6 +781,62 @@ def _render_loadings_table(portfolio: pd.DataFrame, loadings: dict):
     )
     st.dataframe(styled, width="stretch", hide_index=True,
                  height=_fit_height(len(df)))
+
+
+def _render_factor_premiums(premiums_by_method: dict, premium_method: str,
+                            ui_scenario: dict):
+    """Show the per-regime, per-factor premium drifts (%/yr) for both
+    estimators, with the active regime row highlighted.
+
+    These are the values that feed the pre-shock (initial-market-state) drift.
+    The estimator selected above is marked as **in use**; the other is shown
+    for comparison.
+    """
+    from src.factor_premiums import REGIMES
+
+    st.markdown("#### Factor premiums by regime")
+    st.caption(
+        "Each number is the assumed **yearly drift (%)** for a risk factor while "
+        "the market sits in a given regime (Bear / Flat / Bull). The regime is "
+        "judged from the market's recent trend and how turbulent it has been. "
+        "Your **Initial market state** above selects which row the simulation uses."
+    )
+
+    if not premiums_by_method:
+        st.warning("No factor premiums available (factor history not loaded yet).")
+        return
+
+    init_state    = ui_scenario.get("initial_market_state", DEFAULT_INITIAL_MARKET_STATE)
+    active_regime = INITIAL_MARKET_STATES.get(init_state)
+
+    labels = {
+        "mean":      "Historical average",
+        "shrinkage": "Stabilised (recommended)",
+    }
+
+    def _highlight_active(row):
+        hit = row.name == active_regime
+        return ["background-color: #2A3F5F; color: white; font-weight: 600"
+                if hit else "" for _ in row]
+
+    for method, prem in premiums_by_method.items():
+        factor_cols = [c for c in FACTORS if c in prem.columns]
+        disp = prem.reindex(REGIMES)[factor_cols] * 100.0
+        in_use = " — in use" if method == premium_method else ""
+        st.markdown(f"**{labels.get(method, method)}**{in_use}")
+        styled = (
+            disp.style
+            .format("{:+.2f}")
+            .apply(_highlight_active, axis=1)
+            .background_gradient(cmap="RdYlGn", vmin=-25, vmax=25)
+        )
+        st.dataframe(styled, width="stretch")
+
+    st.caption(
+        f"Showing the **{init_state}** regime (highlighted row). "
+        "**Stabilised** is the recommended table — it stays reliable even for "
+        "regimes that rarely occur; **Historical average** can be patchy there."
+    )
 
 
 def _isin_label(portfolio: pd.DataFrame, isin: str) -> str:

@@ -1,11 +1,12 @@
-import functools
+import logging
 import pandas as pd
 import numpy as np
-import requests
 from datetime import datetime
 from scipy.optimize import brentq
 from src.reverse_convertible import ReverseConvertible
 from src.capital_protection_note import CapitalProtectionNote
+
+log = logging.getLogger(__name__)
 
 
 def _make_product(row, price_db=None):
@@ -22,29 +23,27 @@ def _make_product(row, price_db=None):
     return ReverseConvertible(row, price_db=price_db)
 
 
-@functools.lru_cache(maxsize=8)
-def _fetch_fx_rates(reference_currency: str) -> dict:
-    """Fetch FX rates against ``reference_currency`` from Frankfurter.
-
-    Cached at the module level so repeated :class:`PortfolioAnalytics`
-    instantiations within the same process don't re-hit the network.
-    Keys are ``(from_ccy, reference_currency)`` tuples mapping to the
-    multiplier that converts from-ccy → ref ccy.
-    """
-    url = f"https://api.frankfurter.app/latest?from={reference_currency}"
-    response = requests.get(url, timeout=10)
-    rates = response.json()["rates"]
-    return {(ccy, reference_currency): 1 / rate for ccy, rate in rates.items()}
-
-
 class PortfolioAnalytics:
 
-    def __init__(self, portfolio: pd.DataFrame, reference_currency: str = "CHF", price_db=None):
+    def __init__(self, portfolio: pd.DataFrame, reference_currency: str = "CHF",
+                 price_db=None, fx_rates: dict | None = None, fx_as_of=None):
         self.portfolio = portfolio
         self.reference_currency = reference_currency
         self.price_db = price_db
         self.product_df = None
-        self.fx_rates = self._get_fx_rates()
+        # FX is supplied by the data layer (MarketDataEngine.build_fx_rate_map);
+        # this class is a pure consumer. Keys are (quote, reference) → multiplier.
+        self.fx_rates = dict(fx_rates) if fx_rates else {}
+        # Provenance: snapshot date of the rates, and which currencies were
+        # converted at parity (1.0) for lack of a rate.
+        self._fx_as_of = fx_as_of
+        self._fx_fallback_ccys: set[str] = set()
+        if not self.fx_rates:
+            log.warning(
+                "No FX rates supplied for reference %s; foreign-currency values "
+                "will be converted at parity. Reference-currency figures are "
+                "unaffected.", reference_currency,
+            )
 
     # =========================
     # 1. PRODUCT LEVEL
@@ -109,20 +108,33 @@ class PortfolioAnalytics:
 
         self.product_df = product_df
         return self.product_df
-    def _get_fx_rates(self):
-        """Module-level LRU cache prevents re-hitting the network."""
-        return _fetch_fx_rates(self.reference_currency)
-    
     def convert_to_reference(self, value, from_currency):
         if from_currency == self.reference_currency:
             return value
-    
+
         rate = self.fx_rates.get((from_currency, self.reference_currency))
-    
+
         if rate is None:
-            raise ValueError(f"Missing FX rate: {from_currency}")
-    
+            # Graceful fallback: convert at parity and record provenance so the
+            # UI can flag the figure as FX-unconverted (see fx_provenance()).
+            if from_currency not in self._fx_fallback_ccys:
+                self._fx_fallback_ccys.add(from_currency)
+                log.warning(
+                    "No FX rate for %s→%s; converting at parity (1.0).",
+                    from_currency, self.reference_currency,
+                )
+            return value
+
         return value * rate
+
+    def fx_provenance(self) -> dict:
+        """FX data provenance for display: whether stored rates were available,
+        their snapshot date, and which currencies were converted at parity."""
+        return {
+            "fx_available": bool(self.fx_rates),
+            "as_of": self._fx_as_of,
+            "fallback_currencies": sorted(self._fx_fallback_ccys),
+        }
 
     # =========================
     # 2. PORTFOLIO SUMMARY
@@ -307,7 +319,7 @@ class PortfolioAnalytics:
             return np.nan
         dates, amounts = zip(*sorted(cash_flows, key=lambda x: x[0]))
         t0 = pd.Timestamp(dates[0])
-        years = [(pd.Timestamp(d) - t0).days / 365.0 for d in dates]
+        years = [(pd.Timestamp(d) - t0).days / 360.0 for d in dates]  # ACT/360
 
         def npv(r):
             return sum(cf / (1 + r) ** t for cf, t in zip(amounts, years))
@@ -399,8 +411,15 @@ class PortfolioAnalytics:
             else self.fx_rates.get((c, ref))
         )
         if rate.isna().any():
+            # Graceful fallback at parity, mirroring convert_to_reference, with
+            # the affected currencies recorded for fx_provenance().
             missing = df.loc[rate.isna(), "currency"].unique().tolist()
-            raise ValueError(f"Missing FX rate(s): {missing}")
+            self._fx_fallback_ccys.update(missing)
+            log.warning(
+                "No FX rate for %s→%s; converting at parity (1.0).",
+                missing, ref,
+            )
+            rate = rate.fillna(1.0)
         df["total_cost_ref"]   = df["total_cost"]   * rate
         df["total_payoff_ref"] = df["total_payoff"] * rate
         df["pnl_ref"]          = df["pnl"]          * rate

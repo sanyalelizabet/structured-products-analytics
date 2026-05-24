@@ -2,33 +2,36 @@
 Tests for PortfolioAnalytics — FX API is mocked.
 """
 import math
+
 import pytest
 import pandas as pd
 import numpy as np
-from unittest.mock import patch
 from datetime import datetime
 from src.portfolio_analytics import PortfolioAnalytics
 from tests.conftest import make_portfolio, make_brc_row, make_mbrc_row
 
 
 # ─────────────────────────────────────────
-# FX mock: 1 CHF = 1 EUR (for simplicity)
+# FX map supplied by the data layer: 1 CHF = 1 EUR = 1.1 USD.
+# Keys are (quote, reference) → multiplier converting quote into reference.
 # ─────────────────────────────────────────
 
-FAKE_FX_RESPONSE = {
-    "rates": {
-        "EUR": 1.0,
-        "USD": 1.1,
-    }
+_FX_MAP = {
+    ("CHF", "CHF"): 1.0,
+    ("EUR", "CHF"): 1.0 / 1.0,
+    ("USD", "CHF"): 1.0 / 1.1,
 }
+_FX_AS_OF = pd.Timestamp("2026-05-20")
 
 
-def make_pa(portfolio=None, reference_currency="CHF"):
+def make_pa(portfolio=None, reference_currency="CHF", fx_rates=_FX_MAP,
+            fx_as_of=_FX_AS_OF):
     if portfolio is None:
         portfolio = make_portfolio()
-    with patch("requests.get") as mock_get:
-        mock_get.return_value.json.return_value = FAKE_FX_RESPONSE
-        return PortfolioAnalytics(portfolio, reference_currency=reference_currency)
+    return PortfolioAnalytics(
+        portfolio, reference_currency=reference_currency,
+        fx_rates=fx_rates, fx_as_of=fx_as_of,
+    )
 
 
 # ─────────────────────────────────────────
@@ -42,14 +45,30 @@ class TestFxConversion:
 
     def test_known_rate_conversion(self):
         pa = make_pa()
-        # EUR rate is 1.0 in fake response → CHF/EUR = 1/1.0 = 1.0
+        # EUR→CHF multiplier = 1.0
         result = pa.convert_to_reference(100.0, "EUR")
         assert abs(result - 100.0) < 1e-9
 
-    def test_unknown_rate_raises(self):
+    def test_unknown_rate_falls_back_to_parity(self):
+        """No rate for a currency → convert at parity (1.0) and record it in
+        provenance rather than crashing the analytics."""
         pa = make_pa()
-        with pytest.raises(ValueError, match="Missing FX rate"):
-            pa.convert_to_reference(100.0, "GBP")
+        result = pa.convert_to_reference(100.0, "GBP")
+        assert result == 100.0
+        assert "GBP" in pa.fx_provenance()["fallback_currencies"]
+
+    def test_no_rates_does_not_crash_and_is_flagged(self):
+        """An empty FX map leaves analytics usable and is flagged."""
+        pa = PortfolioAnalytics(make_portfolio(), reference_currency="CHF",
+                                fx_rates=None)
+        prov = pa.fx_provenance()
+        assert prov["fx_available"] is False
+        # Reference-currency conversion still works.
+        assert pa.convert_to_reference(100.0, "CHF") == 100.0
+
+    def test_provenance_reports_snapshot_date(self):
+        pa = make_pa()
+        assert pa.fx_provenance()["as_of"] == _FX_AS_OF
 
 
 # ─────────────────────────────────────────

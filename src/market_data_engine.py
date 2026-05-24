@@ -6,6 +6,9 @@ import pandas as pd
 from pathlib import Path
 from pandas.tseries.offsets import BDay
 
+from src.exceptions import DataFetchError
+from src.frankfurter_client import FrankfurterClient
+
 log = logging.getLogger(__name__)
 
 
@@ -38,6 +41,11 @@ class MarketDataEngine:
     RATES_COLUMNS = ["date", "currency", "tenor", "ticker",
                      "yield_pct", "yield"]
 
+    # FX store: rate = units of ``quote`` per 1 unit of ``base`` (Frankfurter
+    # convention). One base per fetch; reverse direction handled by inversion
+    # in build_fx_rate_map.
+    FX_COLUMNS = ["date", "base", "quote", "rate"]
+
     # Default GBOND ticker per (currency, tenor).  Extend by inserting
     # additional tenors as needed.
     #
@@ -61,12 +69,16 @@ class MarketDataEngine:
         "GBP": "3M",
     }
 
-    def __init__(self, client, db_path="data/prices.csv"):
+    def __init__(self, client, db_path="data/prices.csv", fx_client=None):
         self.client = client
+        # FX provider — injected for testing/substitution; defaults to
+        # Frankfurter. Same role the EOD ``client`` plays for prices/yields.
+        self.fx_client = fx_client if fx_client is not None else FrankfurterClient()
         self.db_path = Path(db_path)
         self.master_path  = self.db_path.parent / "securities_master_data.csv"
         self.options_path = self.db_path.parent / "options.csv"
         self.rates_path   = self.db_path.parent / "risk_free_rates.csv"
+        self.fx_path      = self.db_path.parent / "fx_rates.csv"
 
         # Per-engine "fetched-today" memo for fetch_daily_prices.  In a
         # given session BetaEngine, FactorLoadingsEngine, CorrelationEngine,
@@ -354,6 +366,86 @@ class MarketDataEngine:
             latest = sub.sort_values("date").iloc[-1]
             result[ccy] = float(latest["yield"])
         return result
+
+    # ─────────────────────────────────────────
+    # FX rates (Frankfurter)
+    # ─────────────────────────────────────────
+
+    def load_fx_db(self) -> pd.DataFrame:
+        """Load the persisted FX DB. Empty frame if absent."""
+        if self.fx_path.exists():
+            return pd.read_csv(self.fx_path, parse_dates=["date"])
+        return pd.DataFrame(columns=self.FX_COLUMNS)
+
+    def save_fx_db(self, df: pd.DataFrame) -> None:
+        self.fx_path.parent.mkdir(parents=True, exist_ok=True)
+        df.to_csv(self.fx_path, index=False)
+
+    def fetch_latest_fx(self, base: str, force_refresh: bool = False) -> pd.DataFrame:
+        """Refresh and persist FX rates for ``base`` (long form:
+        ``date, base, quote, rate``).
+
+        Mirrors :meth:`fetch_latest_rates`: skip the call when today's snapshot
+        for ``base`` is already stored; on any client failure log and return the
+        existing DB (the stored snapshot is the fallback). Returns the full DB.
+        """
+        db = self.load_fx_db()
+        today = pd.Timestamp.today().normalize()
+
+        if not force_refresh and not db.empty:
+            if ((db["base"] == base) & (db["date"] == today)).any():
+                return db
+
+        try:
+            payload = self.fx_client.get_latest_rates(base)
+        except DataFetchError as e:
+            log.warning("FX fetch failed for base %s (%s); using stored rates.",
+                        base, e)
+            return db
+
+        rates = payload["rates"]
+        quote_date = pd.to_datetime(payload.get("date"))
+        if quote_date is None or pd.isna(quote_date):
+            quote_date = today
+        quote_date = quote_date.normalize()
+
+        rows = [{"date": quote_date, "base": base, "quote": q, "rate": float(r)}
+                for q, r in rates.items()]
+        rows.append({"date": quote_date, "base": base, "quote": base, "rate": 1.0})
+
+        new_df = pd.DataFrame(rows)
+        db = new_df if db.empty else pd.concat([db, new_df], ignore_index=True)
+        db = db.drop_duplicates(subset=["base", "quote", "date"], keep="last")
+        db = db.sort_values(["base", "quote", "date"]).reset_index(drop=True)
+        self.save_fx_db(db)
+        return db
+
+    def build_fx_rate_map(
+        self, base: str,
+    ) -> tuple[dict[tuple[str, str], float], "pd.Timestamp | None"]:
+        """Return ``({(quote, base): multiplier_to_base}, as_of)``.
+
+        ``multiplier_to_base`` converts 1 unit of ``quote`` into ``base`` and
+        equals ``1 / rate``. Uses the latest stored snapshot per quote. Returns
+        ``({}, None)`` when no data exists for ``base``.
+        """
+        db = self.load_fx_db()
+        if db.empty:
+            return {}, None
+        sub = db[db["base"] == base]
+        if sub.empty:
+            return {}, None
+
+        as_of = sub["date"].max()
+        latest = sub.sort_values("date").groupby("quote", as_index=False).last()
+
+        fx: dict[tuple[str, str], float] = {}
+        for _, r in latest.iterrows():
+            rate = float(r["rate"])
+            if rate != 0.0:
+                fx[(str(r["quote"]), base)] = 1.0 / rate
+        fx[(base, base)] = 1.0
+        return fx, as_of
 
     def fetch_monthly_prices(self, isin_ticker_map, years=6, force_refresh=False,
                              max_workers: int = _DEFAULT_MAX_WORKERS):

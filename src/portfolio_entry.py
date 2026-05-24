@@ -21,7 +21,7 @@ from typing import Any, Callable, Iterable
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# Field metadata (single source of truth for CLI + future Streamlit form)
+# Field metadata (drives the CLI and the Streamlit form)
 # ──────────────────────────────────────────────────────────────────────────
 
 # Which product types this field applies to.  None = always.
@@ -120,11 +120,12 @@ FIELDS: list[Field] = [
           help="When the certificate matures and the payoff is settled."),
 
     # ----- BRC / MBRC / AC_BRC --------------------------------------------
-    Field("barrier_pct", "Barrier (fraction of strike)", "float",
+    Field("barrier_pct", "Barrier (fraction of initial level)", "float",
           applies_to=BARRIER_TYPES,
           placeholder="e.g. 0.60 for a 60 % barrier",
-          help="Knock-in barrier as a fraction of strike. 0.60 means the barrier "
-               "triggers if the underlying ever falls below 60 % of strike."),
+          help="Knock-in barrier as a fraction of the initial fixing level. "
+               "0.60 means the barrier triggers if the underlying falls below "
+               "60 % of its initial level."),
     Field("coupon",      "Coupon (annualised, as a fraction)", "float",
           applies_to=BARRIER_TYPES, default=0.0,
           placeholder="e.g. 0.08 for 8 %/yr",

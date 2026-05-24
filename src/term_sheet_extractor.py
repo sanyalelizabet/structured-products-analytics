@@ -62,7 +62,7 @@ SCHEMA_SPEC = """
   "participation_pct":          "number  // CPN only — upside participation rate (e.g. 0.52)",
   "number_of_underlyings":      "number  // CPN only — disclosed B = denomination / strike",
 
-  "barrier_pct":                "number  // BRC/MBRC/AC_BRC only — barrier as fraction of strike (e.g. 0.60)",
+  "barrier_pct":                "number  // BRC/MBRC/AC_BRC only — barrier as fraction of the initial fixing level (e.g. 0.60)",
 
   "coupon":                     "number  // annualised coupon rate as fraction (0.08 for 8%)",
   "coupon_dates":               "list[string]  // ISO dates YYYY-MM-DD; for zero-coupon use ['maturity_date']",

@@ -451,18 +451,18 @@ class TestProductReturnConsistency:
 
     def test_brc_barrier_breach_redemption_is_performance_times_notional(self):
         """
-        30% downside shock → final=70, strike=100 → breach.
-        Redemption = notional * performance = 100,000 * 0.70 = 70,000.
+        45% downside shock → final=55, barrier=60 (initial 100 × 0.60) → breach.
+        Redemption = notional * (final/strike) = 100,000 * 0.55 = 55,000.
         """
         row = make_brc_row(
             notional=100_000, cost_price=1.0, coupon=0.08,
             current_spot=100.0, strike=100.0,
             initial_fixing_date="2024-01-01", maturity_date="2025-01-01",
         )
-        rc = ReverseConvertible(row, final_levels=[-30.0])
-        # final = 70, strike = 100 → breach
+        rc = ReverseConvertible(row, final_levels=[-45.0])
+        # final = 55 ≤ barrier 60 → breach
         assert rc.barrier_breached() is True
-        assert abs(rc.redemption() - 70_000) < 1e-6
+        assert abs(rc.redemption() - 55_000) < 1e-6
 
     def test_brc_barrier_breach_pnl_is_negative(self):
         row = make_brc_row(
@@ -470,8 +470,8 @@ class TestProductReturnConsistency:
             current_spot=100.0, strike=100.0,
             initial_fixing_date="2024-01-01", maturity_date="2025-01-01",
         )
-        rc = ReverseConvertible(row, final_levels=[-30.0])
-        # redemption=70,000 + coupon_pmt — this is less than cost=100,000
+        rc = ReverseConvertible(row, final_levels=[-45.0])
+        # redemption=55,000 + coupon_pmt — this is less than cost=100,000
         assert rc.pnl() < 0
 
     def test_brc_barrier_breach_exact_payoff(self):
@@ -481,9 +481,9 @@ class TestProductReturnConsistency:
             current_spot=100.0, strike=100.0,
             initial_fixing_date="2024-01-01", maturity_date="2025-01-01",
         )
-        rc = ReverseConvertible(row, final_levels=[-30.0])
+        rc = ReverseConvertible(row, final_levels=[-45.0])
 
-        expected_redemption  = 100_000 * 0.70
+        expected_redemption  = 100_000 * 0.55
         expected_coupon_pmt  = 100_000 * 0.08 * (DAYS / 360)
         expected_payoff      = expected_redemption + expected_coupon_pmt
 
@@ -512,22 +512,23 @@ class TestProductReturnConsistency:
 
     def test_mbrc_worst_of_determines_payoff(self):
         """
-        NESN +10% (no breach), NOVN -25% (breach).
-        Worst-of performance = NOVN = 0.75.
-        Redemption = 100,000 * 0.75 = 75,000.
+        NESN +10% (no breach), NOVN -45% → final 55 ≤ barrier 60 (breach).
+        Worst-of performance = NOVN = 55/100 = 0.55.
+        Redemption = 100,000 * 0.55 = 55,000.
         """
         row = make_mbrc_row(
             notional=100_000, cost_price=1.0, coupon=0.08,
+            initial_levels=[100.0, 100.0],
             current_spots=[100.0, 100.0],
             strikes=[100.0, 100.0],
             initial_fixing_date="2024-01-01", maturity_date="2025-01-01",
         )
-        # NESN shock=+10, NOVN shock=-25
-        rc = ReverseConvertible(row, final_levels=[10.0, -25.0])
+        # NESN shock=+10, NOVN shock=-45 (barriers = 60, 60)
+        rc = ReverseConvertible(row, final_levels=[10.0, -45.0])
 
         assert rc.worst_underlying() == "NOVN"
         assert rc.barrier_breached() is True
-        assert abs(rc.redemption() - 75_000) < 1e-6
+        assert abs(rc.redemption() - 55_000) < 1e-6
 
     def test_mbrc_no_breach_if_all_above_strike(self):
         """Both underlyings above strike → no breach → full redemption."""
@@ -541,14 +542,15 @@ class TestProductReturnConsistency:
         assert rc.redemption() == 100_000
 
     def test_mbrc_one_breach_sufficient(self):
-        """Even if NESN is fine, a NOVN breach alone triggers loss of principal."""
+        """Even if NESN is fine, a NOVN barrier breach alone triggers loss of principal."""
         row = make_mbrc_row(
             notional=100_000, cost_price=1.0,
+            initial_levels=[100.0, 100.0],
             current_spots=[100.0, 100.0],
             strikes=[100.0, 100.0],
         )
-        # NESN above strike, NOVN below strike
-        rc = ReverseConvertible(row, final_levels=[10.0, -15.0])
+        # NESN above barrier, NOVN below barrier (60)
+        rc = ReverseConvertible(row, final_levels=[10.0, -45.0])
         assert rc.barrier_breached() is True
         assert rc.redemption() < 100_000
 

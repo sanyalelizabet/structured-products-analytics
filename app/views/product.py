@@ -4,8 +4,7 @@ import numpy as np
 import plotly.graph_objects as go
 
 
-# Palette — kept in sync with ``app/views/portfolio.py`` so the app speaks
-# one visual language.
+# Palette — kept in sync with ``app/views/portfolio.py``.
 _LINE_PALETTE = [
     "#4E79A7", "#76A65A", "#9C755F", "#C9A961", "#2A3F5F", "#7A8797",
     "#3FA29E", "#8E7CC3", "#A35F4A", "#5E8A6E", "#7E91AB",
@@ -234,8 +233,10 @@ def _render_product_description(prod_row, analytics_row):
     except (ValueError, TypeError):
         maturity_fmt = str(maturity)
 
+    # full_name already includes the abbreviation, e.g. "Barrier Reverse
+    # Convertible (BRC)" — don't append ({ptype}) again or it doubles up.
     parts = [
-        f"<strong>{full_name} ({ptype})</strong>",
+        f"<strong>{full_name}</strong>",
         f"Underlying: {underlyings}",
         f"Maturity: {maturity_fmt}",
     ]

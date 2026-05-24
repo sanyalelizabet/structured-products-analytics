@@ -41,6 +41,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from src.linalg import safe_cholesky
 from src.noise_sampler import NoiseSampler
 from src.reverse_convertible import (
     ReverseConvertible,
@@ -151,11 +152,9 @@ class ScenarioEngine:
 
         if corr_matrix is None:
             corr_matrix = np.eye(n_assets)
-        # Repair tiny-negative eigenvalues from sample noise so Cholesky succeeds.
-        eigvals = np.linalg.eigvalsh(corr_matrix)
-        if eigvals.min() < 1e-8:
-            corr_matrix = corr_matrix + np.eye(n_assets) * (1e-8 - eigvals.min())
-        L = np.linalg.cholesky(corr_matrix)
+        # safe_cholesky projects a non-PSD sample matrix to the nearest
+        # correlation matrix (Higham) before factorising.
+        L = safe_cholesky(corr_matrix)
 
         date_range = pd.bdate_range(start=today, end=portfolio_maturity)
         n_days     = len(date_range)

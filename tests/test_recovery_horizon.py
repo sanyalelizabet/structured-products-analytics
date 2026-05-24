@@ -16,8 +16,19 @@ from unittest.mock import MagicMock
 from src.scenario_engine        import ScenarioEngine
 from src.factor_scenario_engine import FactorScenarioEngine
 from src.factor_engine          import FACTORS, FactorEngine
+from src.factor_premiums        import REGIMES
 from src.market_data_engine     import MarketDataEngine
 from src.noise_sampler          import NoiseSampler
+
+
+def _neutral_premiums():
+    """Controlled regime×factor premiums (flat = 0, modest bull/bear) so the
+    recovery-horizon mechanic is tested independently of the live premium CSV."""
+    vals = {"bear": -0.08, "flat": 0.0, "bull": 0.10}
+    return pd.DataFrame(
+        {c: [vals[r] for r in REGIMES] for c in FACTORS},
+        index=pd.Index(list(REGIMES), name="regime"),
+    )
 from src.scenario_archetypes    import (
     EVENT_RECOVERY_ARCHETYPES,
     event_drift_for_factor,
@@ -178,13 +189,14 @@ def _factor_engine(tmp_path, n_paths=1):
     return FactorScenarioEngine(
         portfolio=portfolio, loadings=loadings, factor_engine=fe,
         n_paths=n_paths, idio_intensity=0.0, mean_reversion_kappa=0.0,
+        premiums=_neutral_premiums(),
     )
 
 
 class TestFactorEngineRecoveryHorizon:
 
     def _ui_scenario(self, archetype, market_shock=-25, day=30,
-                     initial="Stable"):
+                     initial="Flat"):
         return {
             "initial_market_state": initial,
             "events": [
@@ -248,7 +260,7 @@ class TestFactorEngineRecoveryHorizon:
             assert ev["next_drift_horizon_years"] == pytest.approx(horizon)
 
     def test_initial_drift_resumes_after_horizon(self, tmp_path):
-        """If initial market state = Moderate bull and recovery is Fast,
+        """If initial market state = Bull and recovery is Fast,
         after the 6-month recovery window the path drifts upward at the
         bull rate — not at the recovery rate, and not flat.
 
@@ -256,22 +268,21 @@ class TestFactorEngineRecoveryHorizon:
         coded (drifts are now per-factor from historical premiums).
         """
         import numpy as np
-        from src.factor_engine import FACTORS
-        from src.scenario_archetypes import initial_drift_dict
 
         eng = _factor_engine(tmp_path)
         res = eng.run_path_scenario(self._ui_scenario(
             "Fast recovery (~6mo)",
             market_shock=-15,
-            initial="Moderate bull",
+            initial="Bull",
         ))
         mkt = res["factor_paths"]["MKT"]["median"].to_numpy()
         terminal = float(mkt[-1])
 
         # After ~6mo at recovery drift returning us near 100, remaining
         # ~3y compounds at the bull-regime MKT drift.  Allow ±25 around
-        # the deterministic expectation to absorb path-median noise.
-        bull_mkt_drift = initial_drift_dict("Moderate bull", FACTORS)["MKT"]
+        # the deterministic expectation to absorb path-median noise.  The
+        # bull drift comes from the same controlled table the engine uses.
+        bull_mkt_drift = _neutral_premiums().loc["bull", "MKT"]
         expected_terminal = 100.0 * float(np.exp(bull_mkt_drift * 3.0))
         lo, hi = expected_terminal - 25.0, expected_terminal + 25.0
         assert lo < terminal < hi, (
