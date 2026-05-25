@@ -2,9 +2,10 @@
 
 Two-step state machine driven by ``st.session_state['onboarding_step']``:
 
-* ``"start"`` (default) — choose between Load existing / Create new.
-* ``"load_choose"``     — Load was picked; choose between Demo and
-                          Upload JSON.
+* ``"start"`` (default) — choose between Open existing / Load demo
+                          directly / Create new.
+* ``"load_choose"``     — Open existing was picked; choose between Demo,
+                          a saved portfolio, or Upload JSON.
 
 When a terminal choice is made (Demo, Upload success, or Create), this
 module sets the portfolio mode via :mod:`app.portfolio_source` and clears
@@ -97,19 +98,18 @@ def _render_start() -> None:
     _CARD_HEIGHT  = 330
     _INPUT_SPACER = 86   # matches a default-sized st.text_input
 
-    col_a, col_b = st.columns(2, gap="large")
+    col_a, col_b, col_c = st.columns(3, gap="large")
 
     with col_a:
         with st.container(border=True, height=_CARD_HEIGHT):
             st.subheader("Open an existing portfolio")
             st.write(
                 "Continue with a portfolio you have previously saved, "
-                "or open the demonstration portfolio for an overview "
-                "of the analytics."
+                "or uploaded from a file."
             )
-            # Invisible spacer to align this card's button with Card B's
-            # — Card B has a text_input below its description that we
-            # don't render here.
+            # Invisible spacer to align this button-only card's button with
+            # the Create card's button — that card has a text_input below its
+            # description that this one does not.
             st.markdown(
                 f"<div style='height: {_INPUT_SPACER}px;'></div>",
                 unsafe_allow_html=True,
@@ -119,6 +119,24 @@ def _render_start() -> None:
                 _go_to("load_choose")
 
     with col_b:
+        with st.container(border=True, height=_CARD_HEIGHT):
+            st.subheader("Demonstration portfolio")
+            st.write(
+                f"A pre-populated portfolio of **{len(demo_portfolio)} "
+                "representative products**. Read-only — ideal for a quick "
+                "tour of the analytics."
+            )
+            # Same spacer as the Open card: button-only, so align with the
+            # Create card's text_input-offset button.
+            st.markdown(
+                f"<div style='height: {_INPUT_SPACER}px;'></div>",
+                unsafe_allow_html=True,
+            )
+            if st.button("Load Demo portfolio", type="primary",
+                         width="stretch", key="onboard_demo_direct"):
+                _finish("demo")
+
+    with col_c:
         with st.container(border=True, height=_CARD_HEIGHT):
             st.subheader("Create a new portfolio")
             st.write(
