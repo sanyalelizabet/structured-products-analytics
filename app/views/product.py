@@ -353,7 +353,15 @@ def _render_term_sheet(prod_row):
     ]
 
     def _tidy(pairs):
-        return [{"Field": k, "Value": v} for k, v in pairs if v is not None]
+        # Render every value as a string so the resulting column is uniformly
+        # typed.  A mixed object column (e.g. the day-count "30/360" string next
+        # to numeric fields) makes Streamlit's Arrow conversion infer int64 and
+        # raise ArrowInvalid.  Dates are shown date-only for readability.
+        def _as_text(v):
+            if hasattr(v, "strftime"):           # date / datetime / Timestamp
+                return pd.Timestamp(v).strftime("%Y-%m-%d")
+            return str(v)
+        return [{"Field": k, "Value": _as_text(v)} for k, v in pairs if v is not None]
 
     issuer_rows = _tidy(issuer_chain)
     term_rows   = _tidy(terms)

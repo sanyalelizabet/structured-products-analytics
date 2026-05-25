@@ -9,7 +9,7 @@ logo_path = Path(__file__).resolve().parent / "assets" / "logo.png"
 from src.logging_config import configure_logging
 configure_logging()
 
-from src.portfolio_analytics import PortfolioAnalytics
+from src.portfolio_analytics import PortfolioAnalytics, scale_display_units
 from src.eod_client import EODClient
 from src.market_data_engine import MarketDataEngine
 from src.correlation_engine import CorrelationEngine
@@ -184,10 +184,9 @@ def build_product_analytics(_portfolio, _db, reference_currency: str,
     pa = PortfolioAnalytics(_portfolio, reference_currency=reference_currency,
                             price_db=_db, fx_rates=_fx_map, fx_as_of=fx_as_of)
     df = pa.build_product_analytics()
-    df["return_pa"]  *= 100
-    df["ytm"]        *= 100
-    df["ytm_today"]  *= 100
-    df["distance_to_barrier"] *= 100
+    # Percent-ify the fractional rate columns once, here at the source, so every
+    # downstream view renders them as percentages without re-scaling locally.
+    scale_display_units(df)
     return pa, df
 
 @st.cache_data(ttl=_TTL_DAILY)

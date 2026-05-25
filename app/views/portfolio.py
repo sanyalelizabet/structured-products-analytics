@@ -252,10 +252,9 @@ def _build_holdings_table(analytics, df) -> tuple[pd.DataFrame, str]:
         "fair_value", "fair_value_pct",
     ]
     t = t[cols].copy()
-    t["return_pct"] *= 100
-    # ``distance_to_barrier`` is already in % at this layer — the streamlit app
-    # mutates ``analytics.product_df["distance_to_barrier"] *= 100`` as a side
-    # effect of ``build_product_analytics``.  Don't scale it again.
+    # ``return_pct`` and ``distance_to_barrier`` are already in % at this layer —
+    # the streamlit app mutates ``analytics.product_df[...] *= 100`` as a side
+    # effect of ``build_product_analytics``.  Don't scale them again.
     if "maturity_date" in t.columns:
         t["maturity_date"] = pd.to_datetime(t["maturity_date"]).dt.strftime("%d %b %Y")
     return t, ref

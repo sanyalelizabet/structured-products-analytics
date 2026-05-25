@@ -20,6 +20,9 @@ from typing import Callable
 
 from src.linalg import safe_cholesky
 from src.reverse_convertible import barrier_levels
+from src.autocallable_reverse_convertible import (
+    vectorised_autocallable_rc_summary,
+)
 
 log = logging.getLogger(__name__)
 
@@ -125,6 +128,17 @@ def european_brc_payoff(
 
 DEFAULT_VOL = 0.15               # annualised vol when an ISIN has no vol estimate
 DEFAULT_RISK_FREE_RATE = 0.02    # rate when a currency has no rate
+
+
+def _is_autocallable(row: pd.Series) -> bool:
+    """True for autocallable BRCs, which require path-dependent pricing.
+
+    Autocallables redeem early when the worst-of underlying clears the trigger
+    on an observation date, so they cannot be priced with the European payoff
+    and a single maturity discount; the pricer routes them to a per-path
+    discounted valuation instead.
+    """
+    return str(row.get("product_type", "")).upper() == "AC_BRC"
 
 
 # ---------------------------------------------------------------------------
@@ -292,12 +306,12 @@ class MonteCarloPricer:
 
         paths, dates = self.simulate_paths(row, vol_map, risk_free_rate, corr_matrix)
 
-        payoffs        = payoff_fn(paths, dates, row)            # (n_paths,)
-        discount       = np.exp(-risk_free_rate * T_remaining)
-        pv_paths       = payoffs * discount
-
-        fair_value = float(np.mean(pv_paths))
-        std_error  = float(np.std(pv_paths) / np.sqrt(self.n_paths))
+        # Discounting is centralised in ``_fv_from_paths`` so that path-dependent
+        # products (autocallables) discount each path to its own cashflow date
+        # rather than uniformly to maturity.
+        fair_value, std_error = self._fv_from_paths(
+            paths, dates, payoff_fn, row, risk_free_rate, T_remaining,
+        )
 
         return {
             "fair_value":     fair_value,
@@ -375,14 +389,57 @@ class MonteCarloPricer:
         Lets :meth:`compute_greeks` reprice for delta (scaled spot) and theta
         (shifted T) without re-running ``simulate_paths``.
 
+        Autocallables are discounted per path to their own redemption date (the
+        early-call date, or maturity if never called); every other product is
+        discounted uniformly to maturity.  Routing both through this one method
+        keeps fair value and the bump-and-reprice Greeks on a single model.
+
         Returns ``(fair_value, std_error)``.
         """
-        payoffs    = payoff_fn(paths, dates, row)
-        discount   = np.exp(-risk_free_rate * T_remaining)
-        pv_paths   = payoffs * discount
+        if _is_autocallable(row):
+            pv_paths = self._autocallable_path_pv(paths, dates, row, risk_free_rate)
+        else:
+            payoffs  = payoff_fn(paths, dates, row)
+            pv_paths = payoffs * np.exp(-risk_free_rate * T_remaining)
         fair_value = float(np.mean(pv_paths))
         std_error  = float(np.std(pv_paths) / np.sqrt(self.n_paths))
         return fair_value, std_error
+
+    def _autocallable_path_pv(
+        self,
+        paths: np.ndarray,
+        dates: pd.DatetimeIndex,
+        row: pd.Series,
+        risk_free_rate: float,
+    ) -> np.ndarray:
+        """Per-path present value of an autocallable BRC.
+
+        Evaluates the path-dependent payoff with the same engine the stress
+        views use (:func:`vectorised_autocallable_rc_summary`), then discounts
+        each path to *its* cashflow date: the early-call date on called paths,
+        or maturity on paths that run to the end.  This is what makes the fair
+        value methodologically correct for autocallables, rather than pricing
+        them as plain European notes.
+        """
+        summary    = vectorised_autocallable_rc_summary(row, paths, dates)
+        payoffs    = np.asarray(summary["total_payoff"], dtype=float)
+        autocalled = np.asarray(summary["autocalled"], dtype=bool)
+        call_date  = summary["call_date"]                      # object array
+
+        today    = pd.Timestamp.today().normalize()
+        maturity = pd.Timestamp(row["maturity_date"])
+
+        # Year-fraction (ACT/360, consistent with the rest of the pricer) from
+        # today to each path's cashflow date.
+        days = np.array(
+            [
+                ((call_date[p] if autocalled[p] else maturity) - today).days
+                for p in range(payoffs.shape[0])
+            ],
+            dtype=float,
+        )
+        tau = np.maximum(days / 360.0, 0.0)
+        return payoffs * np.exp(-risk_free_rate * tau)
 
     # ------------------------------------------------------------------
     # Greeks — bump and reprice
@@ -607,12 +664,13 @@ class MonteCarloPricer:
             for isin, name, delta, vega in zip(
                 g["isins"], g["underlyings"], g["delta"], g["vega"]
             ):
+                delta_rounded = round(delta, 2)
                 greeks_rows.append({
                     "product_id":  row["product_id"],
                     "currency":    row["currency"],
                     "isin":        isin,
                     "underlying":  name,
-                    "delta_1pct":  round(delta, 2),
+                    "delta_1pct":  delta_rounded,
                     "vega_1pp":    round(vega, 2),
                     "theta":       round(g["theta"], 2),
                     "rho":         round(g["rho"], 2),
@@ -621,7 +679,7 @@ class MonteCarloPricer:
 
                 if isin not in delta_agg:
                     delta_agg[isin] = {"underlying": name, "currency": row["currency"], "total": 0.0}
-                delta_agg[isin]["total"] += delta
+                delta_agg[isin]["total"] += delta_rounded
 
         greeks_df = pd.DataFrame(greeks_rows)
 
@@ -658,9 +716,11 @@ class MonteCarloPricer:
         ptype = str(row.get("product_type", "")).upper()
         if ptype == "CPN":
             return capital_protection_note_payoff
-        # NOTE: AC_BRC currently falls through to the European BRC payoff;
-        # autocallable Monte Carlo support is a separate piece of work
-        # (would mirror ``vectorised_autocallable_rc_summary``).
+        # AC_BRC is path-dependent: ``price``/``_fv_from_paths`` detect it via
+        # ``_is_autocallable`` and value it with a per-path discounted autocall
+        # model, so the payoff function returned here is unused for it.  The
+        # European payoff is kept as a harmless default (and is what the
+        # autocall engine itself applies to paths that run to maturity).
         style = str(row.get("type_style", "european")).lower()
         if style == "european":
             return european_brc_payoff

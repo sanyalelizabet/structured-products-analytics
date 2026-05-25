@@ -23,6 +23,31 @@ def _make_product(row, price_db=None):
     return ReverseConvertible(row, price_db=price_db)
 
 
+# Columns that :meth:`PortfolioAnalytics.build_product_analytics` emits as
+# *fractions* (e.g. 0.05 for 5%) but every display surface labels and renders as
+# *percentages*. The display layer scales them once, here, so that a column
+# headed "(%)" always carries a percentage value. ``weight_pct`` is intentionally
+# absent: it is already expressed in percent at the analytics layer.
+PERCENT_DISPLAY_COLUMNS: tuple[str, ...] = (
+    "return_pct", "return_pa", "ytm", "ytm_today", "distance_to_barrier",
+)
+
+
+def scale_display_units(product_df: pd.DataFrame) -> pd.DataFrame:
+    """Scale the fractional rate columns of a product-analytics frame to percent.
+
+    Mutates ``product_df`` in place (so callers holding the same frame, such as
+    ``analytics.product_df``, observe the percentages) and returns it for
+    convenience. Columns not present are skipped. The set of scaled columns is
+    :data:`PERCENT_DISPLAY_COLUMNS`; keeping it in one place guarantees that the
+    percentage convention is identical across every view.
+    """
+    for column in PERCENT_DISPLAY_COLUMNS:
+        if column in product_df.columns:
+            product_df[column] *= 100.0
+    return product_df
+
+
 class PortfolioAnalytics:
 
     def __init__(self, portfolio: pd.DataFrame, reference_currency: str = "CHF",

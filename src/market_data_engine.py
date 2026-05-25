@@ -30,6 +30,23 @@ def _parallel_map(fn, items, max_workers: int = _DEFAULT_MAX_WORKERS):
     with ThreadPoolExecutor(max_workers=min(max_workers, len(items))) as pool:
         return list(pool.map(fn, items))
 
+
+def _append_rows(db: pd.DataFrame, rows: pd.DataFrame) -> pd.DataFrame:
+    """Append non-empty rows while avoiding pandas empty-frame concat warnings."""
+    if rows.empty:
+        return db.copy()
+    if db.empty:
+        return rows.copy()
+    return pd.concat([db, rows], ignore_index=True)
+
+
+def _append_records(db: pd.DataFrame, records: list[dict]) -> pd.DataFrame:
+    """Append record dicts to a DB frame without concat warnings on empty DBs."""
+    if not records:
+        return db.copy()
+    return _append_rows(db, pd.DataFrame(records))
+
+
 class MarketDataEngine:
 
     MASTER_COLUMNS = ["isin", "ticker", "code", "exchange", "name", "type", "country", "currency"]
@@ -182,9 +199,8 @@ class MarketDataEngine:
         results = _parallel_map(_fetch_one, to_fetch, max_workers=max_workers)
         rows = [r for r in results if r is not None]
 
-        new_df = pd.DataFrame(rows)
-        if not new_df.empty:
-            db = pd.concat([db, new_df], ignore_index=True)
+        if rows:
+            db = _append_records(db, rows)
             db = db.drop_duplicates(subset=["isin", "date"], keep="last")
             self.save_db(db)
 
@@ -331,8 +347,7 @@ class MarketDataEngine:
         rows = [r for r in results if r is not None]
 
         if rows:
-            new_df = pd.DataFrame(rows)
-            db = pd.concat([db, new_df], ignore_index=True)
+            db = _append_records(db, rows)
             db = db.drop_duplicates(subset=["currency", "tenor", "date"], keep="last")
             db = db.sort_values(["currency", "tenor", "date"]).reset_index(drop=True)
             self.save_rates_db(db)
@@ -493,8 +508,7 @@ class MarketDataEngine:
             rows.extend(batch)
 
         if rows:
-            new_df = pd.DataFrame(rows)
-            db = pd.concat([db, new_df], ignore_index=True)
+            db = _append_records(db, rows)
             db = db.drop_duplicates(subset=["isin", "date"], keep="last")
             db = db.sort_values(["isin", "date"]).reset_index(drop=True)
             self.save_db(db)
@@ -613,11 +627,7 @@ class MarketDataEngine:
                      len(purged_isins), purged_isins)
 
         if rows or purged_isins:
-            new_df = pd.DataFrame(rows) if rows else pd.DataFrame(
-                columns=["date", "isin", "ticker", "price"]
-            )
-
-            db = pd.concat([db, new_df], ignore_index=True)
+            db = _append_records(db, rows)
             db["date"] = pd.to_datetime(db["date"]).dt.normalize()
 
             db = db.drop_duplicates(subset=["isin", "date"], keep="last")
@@ -821,7 +831,7 @@ class MarketDataEngine:
                         ~options_db["isin"].isin(new_df["isin"].unique())
                     ]
 
-                options_db = pd.concat([options_db, new_df], ignore_index=True)
+                options_db = _append_rows(options_db, new_df)
                 for col in ["volume", "open_interest"]:
                     options_db[col] = options_db[col].astype("Int64")
                 options_db = options_db.sort_values(["isin", "expiry", "type", "strike"]).reset_index(drop=True)
