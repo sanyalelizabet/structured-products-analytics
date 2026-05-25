@@ -280,12 +280,37 @@ portfolio_currency = portfolio_source.get_reference_currency()
 # --- Main title — always shows which portfolio is being analysed --------
 st.title(f"Structured Products Analytics")
 st.markdown(
-    f"<div style='color:#aaa; margin-top:-0.4rem; margin-bottom:1rem;'>"
+    f"<div style='color:#aaa; margin-top:-0.4rem; margin-bottom:0.5rem;'>"
     f"Portfolio: <b>{portfolio_name}</b>  ·  "
     f"Reference currency: <b>{portfolio_currency}</b>"
     f"</div>",
     unsafe_allow_html=True,
 )
+
+# --- Per-view orientation — a brief account of what the active view -----
+# presents, so the reader knows what is being shown before engaging with
+# the figures.  Phrased as standing descriptions of each analytical lens.
+VIEW_INTROS = {
+    "Product": (
+        "Examine a single product in detail — its payoff, its current "
+        "valuation, and the status of its barrier and coupon levels."
+    ),
+    "Stress Testing": (
+        "Assess how the portfolio's value would respond to adverse market "
+        "moves."
+    ),
+    "Factor Stress": (
+        "Identify the portfolio's exposure to the main market drivers."
+    ),
+}
+_active_view = st.session_state.get("active_view", "Portfolio")
+_view_intro = VIEW_INTROS.get(_active_view)
+if _view_intro:
+    st.markdown(
+        f"<div style='color:#888; margin-bottom:1.2rem; max-width:60rem; "
+        f"line-height:1.5;'>{_view_intro}</div>",
+        unsafe_allow_html=True,
+    )
 
 st.sidebar.image(str(logo_path), width=160)
 
@@ -322,7 +347,7 @@ st.sidebar.markdown("---")
 
 # --- Section 2: Analytics views — buttons (matches Portfolio section) ----
 st.sidebar.markdown("### Analytics")
-analytics_views = ["Product", "Portfolio", "Stress Testing", "Factor Stress"]
+analytics_views = ["Portfolio", "Product", "Stress Testing", "Factor Stress"]
 
 if "active_view" not in st.session_state:
     st.session_state["active_view"] = analytics_views[0]

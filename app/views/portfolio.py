@@ -13,12 +13,21 @@ Layout
 """
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 from matplotlib.colors import LinearSegmentedColormap
+
+from app.formatting import chf
+from app.ai_insights import (
+    build_portfolio_page_payload,
+    generate_portfolio_insight,
+    payload_hash,
+)
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -67,9 +76,10 @@ def render(analytics, df, greeks_df, pf_delta, valuation_date):
     _render_kpi_strip(analytics, df)
     _render_quick_stats(analytics, df)
     st.markdown("---")
+    _render_portfolio_page_insights(analytics, df, greeks_df, pf_delta, valuation_date)
     _render_maturity(analytics)
     st.markdown("---")
-    _render_holdings(analytics, df)
+    _render_holdings(analytics, df, greeks_df, pf_delta, valuation_date)
     st.markdown("---")
     _render_concentration(analytics)
     st.markdown("---")
@@ -77,6 +87,8 @@ def render(analytics, df, greeks_df, pf_delta, valuation_date):
 
 
 from app.views._layout import fit_height as _fit_height
+
+log = logging.getLogger(__name__)
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -115,7 +127,7 @@ def _signed(value, currency=None, fmt="{:,.0f}"):
     if value is None or (isinstance(value, float) and np.isnan(value)):
         return "—"
     sign = "+" if value > 0 else ("−" if value < 0 else "")
-    body = fmt.format(abs(value))
+    body = fmt.format(abs(value)).replace(",", "'")
     if currency:
         return f"{sign}{body} {currency}"
     return f"{sign}{body}"
@@ -149,8 +161,8 @@ def _render_kpi_strip(analytics, df):
         unsafe_allow_html=True,
     )
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Total Notional", f"{notional:,.0f} {ref}")
-    c2.metric("MTM Value",      f"{mtm_value:,.0f} {ref}")
+    c1.metric("Total Notional", f"{chf(notional)} {ref}")
+    c2.metric("MTM Value",      f"{chf(mtm_value)} {ref}")
     c3.metric("MTM PnL",        _signed(mtm_pnl, ref),
               delta=_signed(mtm_pnl, ref))
     c4.metric("MTM Return",
@@ -168,7 +180,7 @@ def _render_kpi_strip(analytics, df):
         unsafe_allow_html=True,
     )
     d1, d2, d3, d4 = st.columns(4)
-    d1.metric("Proj. Payoff",   f"{proj_payoff:,.0f} {ref}")
+    d1.metric("Proj. Payoff",   f"{chf(proj_payoff)} {ref}")
     d2.metric("Proj. PnL",      _signed(proj_pnl, ref),
               delta=_signed(proj_pnl, ref))
     d3.metric("Proj. Return",   f"{proj_return:+.2f} %",
@@ -220,9 +232,7 @@ def _render_quick_stats(analytics, df):
 # Holdings table — gradient-coloured for at-a-glance risk read
 # ──────────────────────────────────────────────────────────────────────────
 
-def _render_holdings(analytics, df):
-    st.markdown("### Holdings")
-
+def _build_holdings_table(analytics, df) -> tuple[pd.DataFrame, str]:
     ref = analytics.reference_currency
     t   = analytics.product_df.copy()
     t["cost_ref"]   = t.apply(lambda r: analytics.convert_to_reference(r["total_cost"],   r["currency"]), axis=1)
@@ -248,6 +258,13 @@ def _render_holdings(analytics, df):
     # effect of ``build_product_analytics``.  Don't scale it again.
     if "maturity_date" in t.columns:
         t["maturity_date"] = pd.to_datetime(t["maturity_date"]).dt.strftime("%d %b %Y")
+    return t, ref
+
+
+def _render_holdings(analytics, df, greeks_df, pf_delta, valuation_date):
+    t, ref = _build_holdings_table(analytics, df)
+
+    st.markdown("### Holdings")
 
     rename = {
         "product_id":          "Product",
@@ -268,14 +285,14 @@ def _render_holdings(analytics, df):
     t = t.rename(columns=rename)
 
     fmt = {
-        "Notional":         "{:,.0f}",
-        f"Cost {ref}":      "{:,.0f}",
+        "Notional":         lambda v: chf(v, 2),
+        f"Cost {ref}":      lambda v: chf(v, 2),
         "Weight %":         "{:+.2f}",
-        f"Payoff {ref}":    "{:,.0f}",
-        f"PnL {ref}":       "{:+,.0f}",
+        f"Payoff {ref}":    lambda v: chf(v, 2),
+        f"PnL {ref}":       lambda v: chf(v, 2, signed=True),
         "Return %":         "{:+.2f}",
         "Dist. to Barrier %": "{:+.1f}",
-        "Fair Value":       "{:,.2f}",
+        "Fair Value":       lambda v: chf(v, 2),
         "Fair Value %":     "{:+.2f}",
     }
 
@@ -293,8 +310,56 @@ def _render_holdings(analytics, df):
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# Underlying concentration
+# Gemini insight display
 # ──────────────────────────────────────────────────────────────────────────
+
+def _render_portfolio_page_insights(
+    analytics,
+    df: pd.DataFrame,
+    greeks_df: pd.DataFrame,
+    pf_delta: pd.DataFrame,
+    valuation_date,
+):
+    open_key = "holdings_ai_open"
+    is_open = bool(st.session_state.get(open_key, False))
+    label = "Hide Gemini AI insight" if is_open else "Show Gemini AI insight"
+    if st.button(label, key="holdings_ai_toggle"):
+        st.session_state[open_key] = not is_open
+        st.rerun()
+
+    if not st.session_state.get(open_key, False):
+        return
+
+    t, ref = _build_holdings_table(analytics, df)
+    insight_payload = build_portfolio_page_payload(
+        holdings_table=t,
+        reference_currency=ref,
+        analytics=analytics,
+        product_df=df,
+        greeks_df=greeks_df,
+        pf_delta=pf_delta,
+        valuation_date=valuation_date,
+    )
+    hash_key = payload_hash(insight_payload)
+
+    with st.container(border=True):
+        st.caption("Gemini AI insight")
+        if st.session_state.get("holdings_ai_hash") != hash_key:
+            with st.spinner("Generating Gemini AI insight..."):
+                try:
+                    st.session_state["holdings_ai_insight"] = generate_portfolio_insight(
+                        insight_payload,
+                    )
+                    st.session_state["holdings_ai_hash"] = hash_key
+                except Exception:  # noqa: BLE001
+                    log.exception("Portfolio Gemini insight generation failed")
+                    st.error("Gemini AI insight is temporarily unavailable.")
+                    return
+
+        insight = st.session_state.get("holdings_ai_insight")
+        if insight:
+            st.markdown(insight)
+
 
 def _render_concentration(analytics):
     st.markdown("### Underlying Concentration")
@@ -343,7 +408,7 @@ def _render_concentration(analytics):
             y=bar_df["underlying"],
             orientation="h",
             marker_color=colors,
-            text=[f"{v:,.0f}" for v in bar_df["allocated_cost_ref"]],
+            text=[chf(v, 2) for v in bar_df["allocated_cost_ref"]],
             textposition="outside",
             hovertemplate=(
                 "<b>%{y}</b><br>"
@@ -358,6 +423,7 @@ def _render_concentration(analytics):
             xaxis_title=f"Cost ({ref})",
             yaxis=dict(autorange="reversed"),
             showlegend=False,
+            separators=".'",
         )
         st.plotly_chart(fig_bar, width="stretch")
         st.caption(
@@ -408,8 +474,8 @@ def _render_concentration(analytics):
         ut = ut.rename(columns=rename).round(2)
         styled = (
             ut.style
-            .format({f"Allocated Cost {ref}": "{:,.0f}",
-                      "Spot":                  "{:,.2f}",
+            .format({f"Allocated Cost {ref}": lambda v: chf(v, 2),
+                      "Spot":                  lambda v: chf(v, 2),
                       "Weight %":              "{:.2f}",
                       "Min Dist. to Barrier %":"{:+.1f}",
                       "Avg Dist. to Barrier %":"{:+.1f}"})
@@ -491,9 +557,9 @@ def _render_maturity(analytics):
         m = m.rename(columns=rename).round(2)
         styled = (
             m.style
-            .format({f"Cost {ref}": "{:,.0f}",
-                      f"Payoff {ref}": "{:,.0f}",
-                      f"PnL {ref}": "{:+,.0f}"})
+            .format({f"Cost {ref}": lambda v: chf(v, 2),
+                      f"Payoff {ref}": lambda v: chf(v, 2),
+                      f"PnL {ref}": lambda v: chf(v, 2, signed=True)})
             .background_gradient(cmap=DIVERGING_CMAP, subset=[f"PnL {ref}"],
                                  vmin=-(m[f"PnL {ref}"].abs().max() or 1),
                                  vmax= (m[f"PnL {ref}"].abs().max() or 1))
@@ -547,9 +613,9 @@ def _render_risk(greeks_df, pf_delta):
                 return -1, 1
 
         styled = g.style.format(
-            {c: "{:+,.2f}" for c in ["Δ (1% spot)", "ν (1pp vol)",
-                                       "θ (daily)", "ρ (1bp rate)",
-                                       "corr (1pp)"]
+            {c: (lambda v: chf(v, 2, signed=True))
+             for c in ["Δ (1% spot)", "ν (1pp vol)",
+                       "θ (daily)", "ρ (1bp rate)", "corr (1pp)"]
              if c in g.columns},
             na_rep="—",
         )
@@ -581,7 +647,7 @@ def _delta_bar(pf_delta):
         y=pf["underlying"],
         orientation="h",
         marker_color=colors,
-        text=[f"{v:+,.0f}" for v in pf["total_delta_1pct"]],
+        text=[chf(v, 2, signed=True) for v in pf["total_delta_1pct"]],
         textposition="outside",
         hovertemplate=(
             "<b>%{y}</b><br>"
@@ -590,6 +656,7 @@ def _delta_bar(pf_delta):
     ))
     fig.update_layout(
         template="plotly_dark",
+        separators=".'",
         height=max(260, 38 * len(pf)),
         margin=dict(t=10, b=10, l=10, r=80),
         xaxis_title="FV change per 1 % spot move",

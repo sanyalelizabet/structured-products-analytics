@@ -23,6 +23,7 @@ import hashlib
 
 from app import portfolio_source as ps
 from app import portfolio_storage as storage
+from app.formatting import chf
 from src.portfolio_entry import (
     ALL_TYPES,
     FIELDS,
@@ -343,7 +344,7 @@ def _render_product_card(idx: int, row: dict) -> None:
             meta_cols = st.columns(3)
             meta_cols[0].caption(f"Maturity: **{maturity}**")
             if notional is not None and not _is_empty(notional):
-                meta_cols[1].caption(f"Notional: **{notional:,.0f} {ccy}**")
+                meta_cols[1].caption(f"Notional: **{chf(notional, 2)} {ccy}**")
             else:
                 meta_cols[1].caption(":red[Notional: —]")
 

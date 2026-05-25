@@ -85,10 +85,10 @@ TRAILING_WINDOW_DAYS: int = 252  # 1 year
 # Vol-aware stress override. Realized MKT volatility above the threshold marks a
 # stress regime (→ bear) regardless of trend, and bull requires calm (vol below
 # it). The window is ~1 trading month; the threshold (annualised) is a common
-# stress marker (~VIX 25). The classifier accepts an external vol signal too, so
+# stress marker (~VIX 20). The classifier accepts an external vol signal too, so
 # a forward-looking gauge (e.g. VIX) can be substituted for realized vol.
 VOL_WINDOW_DAYS: int = 21
-STRESS_VOL_THRESHOLD: float = 0.25  # annualised volatility
+STRESS_VOL_THRESHOLD: float = 0.20  # annualised volatility
 
 # Clip annualised drifts to a sane band — short concentrated moves can produce
 # implausible annualised means.

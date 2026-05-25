@@ -3,6 +3,8 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 
+from app.formatting import chf
+
 
 # Palette — kept in sync with ``app/views/portfolio.py``.
 _LINE_PALETTE = [
@@ -28,6 +30,8 @@ def render(portfolio, df, analytics, valuation_date, vol_map, beta_map):
     overview_display = portfolio[overview_cols].copy()
     overview_display["coupon"] = overview_display["coupon"] * 100
     overview_display = overview_display.merge(fv_cols, on="product_id", how="left")
+    overview_display["notional"]   = overview_display["notional"].map(lambda v: chf(v, 2))
+    overview_display["fair_value"] = overview_display["fair_value"].map(lambda v: chf(v, 2))
 
     st.dataframe(
         overview_display,
@@ -37,11 +41,11 @@ def render(portfolio, df, analytics, valuation_date, vol_map, beta_map):
             "product_id":     st.column_config.TextColumn("Product ID",      width="medium"),
             "product_type":   st.column_config.TextColumn("Type",            width="small"),
             "underlyings":    st.column_config.ListColumn("Underlyings",     width="medium"),
-            "notional":       st.column_config.NumberColumn("Notional",      width="small", format="%.0f"),
+            "notional":       st.column_config.TextColumn("Notional",        width="small"),
             "currency":       st.column_config.TextColumn("CCY",             width="small"),
             "coupon":         st.column_config.NumberColumn("Coupon (%)",    width="small", format="%.2f"),
             "maturity_date":  st.column_config.TextColumn("Maturity",        width="small"),
-            "fair_value":     st.column_config.NumberColumn("Fair Value",    width="small", format="%.2f"),
+            "fair_value":     st.column_config.TextColumn("Fair Value",      width="small"),
             "fair_value_pct": st.column_config.NumberColumn("Fair Value (%)", width="small", format="%.2f"),
         }
     )
@@ -80,10 +84,10 @@ def render(portfolio, df, analytics, valuation_date, vol_map, beta_map):
     col1, col2, col3 = st.columns(3)
     col1.metric(
         "Projected P&L (flat spot)",
-        f"{row['pnl']:,.2f}",
-        delta=f"{row['pnl_delta']:+,.2f} vs yesterday" if row["pnl_delta"] is not None else None
+        chf(row['pnl'], 2),
+        delta=f"{chf(row['pnl_delta'], 2, signed=True)} vs yesterday" if row["pnl_delta"] is not None else None
     )
-    col2.metric("Total Payoff", f"{row['total_payoff']:,.2f}")
+    col2.metric("Total Payoff", chf(row['total_payoff'], 2))
     col3.metric("Days to Expiry", f"{int(row['days_to_expiry'])}")
 
     is_cpn = str(row["product_type"]).upper() == "CPN"
@@ -163,7 +167,7 @@ def render(portfolio, df, analytics, valuation_date, vol_map, beta_map):
             if isinstance(x, (int, float, np.floating)):
                 if pd.isna(x):
                     return "n/a"
-                return f"{x:.2f}"
+                return chf(x, 2)
             return str(x)
 
         detail["Value"] = detail["Value"].apply(_fmt)
@@ -290,9 +294,9 @@ def _render_term_sheet(prod_row):
     maturity = _row_get(prod_row, "maturity_date")
 
     terms = [
-        ("Denomination",       f"{denom:,.2f}" if isinstance(denom, (int, float)) else denom),
+        ("Denomination",       chf(denom, 2) if isinstance(denom, (int, float)) else denom),
         ("Position units",     units),
-        ("Total notional",     f"{notional:,.2f}" if isinstance(notional, (int, float)) else notional),
+        ("Total notional",     chf(notional, 2) if isinstance(notional, (int, float)) else notional),
         ("Day count",          day_count),
         ("Initial fixing",     init_fix),
         ("Purchase date",      purchase),
@@ -322,10 +326,10 @@ def _render_term_sheet(prod_row):
     if ptype == "CPN":
         ip = _row_get(prod_row, "issue_price")
         if ip is not None:
-            terms.append(("Issue price", f"{ip:,.2f}"))
+            terms.append(("Issue price", chf(ip, 2)))
         cp_amt = _row_get(prod_row, "capital_protection_amount")
         if cp_amt is not None:
-            terms.append(("Capital protection", f"{cp_amt:,.2f}"))
+            terms.append(("Capital protection", chf(cp_amt, 2)))
         pp = _row_get(prod_row, "protection_pct")
         if pp is not None:
             terms.append(("Protection level", f"{pp * 100:.2f}%"))

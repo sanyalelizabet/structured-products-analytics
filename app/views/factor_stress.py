@@ -15,13 +15,21 @@ Layout
 """
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+from app.formatting import chf
 from app.views._layout import fit_height as _fit_height
 from data.factor_scenarios import FACTOR_SCENARIO_PRESETS
+from app.ai_insights import (
+    build_factor_stress_payload,
+    generate_factor_stress_insight,
+    payload_hash,
+)
 from src.factor_engine import FACTORS
 from src.factor_premiums import (
     ESTIMATION_LOOKBACK_YEARS, PREMIUM_METHODS, compute_factor_premiums,
@@ -68,6 +76,8 @@ _ASSET_PALETTE = [
 _SHOCK_COLOR = _NEGATIVE
 
 _SAMPLER_KEY = "factor_noise_sampler"
+
+log = logging.getLogger(__name__)
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -194,6 +204,18 @@ possible P&L.
 
     # ── Portfolio-level tables ───────────────────────────────────────────
     st.markdown("---")
+    _render_factor_stress_ai_insight(
+        res=res,
+        portfolio=portfolio,
+        loadings=loadings,
+        ui_scenario=ui_scenario,
+        preset_name=preset_name,
+        preset=preset,
+        fx_rates=fx_rates,
+        reference_currency=reference_currency,
+        premiums_by_method=premiums_by_method,
+        premium_method=premium_method,
+    )
     _render_portfolio_summary(res)
     _render_product_detail(res)
 
@@ -638,7 +660,7 @@ def _plot_pnl_histogram(samples: np.ndarray, x_title: str):
         fig.add_vline(
             x=value,
             line=dict(color=color, width=1.5, dash="dash"),
-            annotation_text=f"{label}: {value:,.0f}",
+            annotation_text=f"{label}: {chf(value, 2)}",
             annotation_position="top",
             annotation_font=dict(color=color, size=10),
         )
@@ -648,15 +670,16 @@ def _plot_pnl_histogram(samples: np.ndarray, x_title: str):
         xaxis_title=x_title,
         yaxis_title="Number of paths",
         showlegend=False,
+        separators=".'",
     )
     st.plotly_chart(fig, width="stretch")
 
     c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Mean P&L",      f"{mean:,.0f}")
-    c2.metric("Median P&L",    f"{median:,.0f}")
-    c3.metric("5% P&L",        f"{p5:,.0f}")
-    c4.metric("95% P&L",       f"{p95:,.0f}")
-    c5.metric("ES (worst 5%)", f"{es5:,.0f}")
+    c1.metric("Mean P&L",      chf(mean, 2))
+    c2.metric("Median P&L",    chf(median, 2))
+    c3.metric("5% P&L",        chf(p5, 2))
+    c4.metric("95% P&L",       chf(p95, 2))
+    c5.metric("ES (worst 5%)", chf(es5, 2))
 
 
 def _render_aggregate_pnl(samples_by_ccy, fx_rates, reference_currency):
@@ -851,27 +874,67 @@ def _isin_label(portfolio: pd.DataFrame, isin: str) -> str:
 # Bottom tables
 # ──────────────────────────────────────────────────────────────────────────
 
+def _render_factor_stress_ai_insight(**kwargs):
+    open_key = "factor_stress_ai_open"
+    is_open = bool(st.session_state.get(open_key, False))
+    label = "Hide Gemini AI insight" if is_open else "Show Gemini AI insight"
+    if st.button(label, key="factor_stress_ai_toggle"):
+        st.session_state[open_key] = not is_open
+        st.rerun()
+
+    if not st.session_state.get(open_key, False):
+        return
+
+    insight_payload = build_factor_stress_payload(**kwargs)
+    hash_key = payload_hash(insight_payload)
+
+    with st.container(border=True):
+        st.caption("Gemini AI insight")
+        if st.session_state.get("factor_stress_ai_hash") != hash_key:
+            with st.spinner("Generating Gemini AI insight..."):
+                try:
+                    st.session_state["factor_stress_ai_insight"] = (
+                        generate_factor_stress_insight(insight_payload)
+                    )
+                    st.session_state["factor_stress_ai_hash"] = hash_key
+                except Exception:  # noqa: BLE001
+                    log.exception("Factor Stress Gemini insight generation failed")
+                    st.error("Gemini AI insight is temporarily unavailable.")
+                    return
+
+        insight = st.session_state.get("factor_stress_ai_insight")
+        if insight:
+            st.markdown(insight)
+
+
 def _render_portfolio_summary(res):
     st.markdown("### Portfolio Stress Summary")
     pf = res["pf_scenario_per_ccy"].copy().round(2)
+    pf = pf[[
+        "currency", "n_products", "underlyings", "total_cost",
+        "pnl_mean", "pnl_median", "pnl_p5", "pnl_p95", "pnl_es5",
+        "portfolio_return_mean_pct", "portfolio_return_p5_pct",
+    ]].rename(columns={
+        "currency":                    "Currency",
+        "n_products":                  "Products",
+        "underlyings":                 "Worst Underlyings",
+        "total_cost":                  "Total Cost",
+        "pnl_mean":                    "PnL Mean",
+        "pnl_median":                  "PnL Median",
+        "pnl_p5":                      "PnL 5%",
+        "pnl_p95":                     "PnL 95%",
+        "pnl_es5":                     "ES (worst 5%)",
+        "portfolio_return_mean_pct":   "Return Mean (%)",
+        "portfolio_return_p5_pct":     "Return 5% (%)",
+    })
+    money = {"Total Cost": False, "PnL Mean": True, "PnL Median": True,
+             "PnL 5%": True, "PnL 95%": True, "ES (worst 5%)": True}
+    styled = pf.style.format(
+        {col: (lambda v, s=signed: chf(v, 2, signed=s))
+         for col, signed in money.items() if col in pf.columns}
+    )
     st.dataframe(
-        pf[[
-            "currency", "n_products", "underlyings", "total_cost",
-            "pnl_mean", "pnl_median", "pnl_p5", "pnl_p95", "pnl_es5",
-            "portfolio_return_mean_pct", "portfolio_return_p5_pct",
-        ]].rename(columns={
-            "currency":                    "Currency",
-            "n_products":                  "Products",
-            "underlyings":                 "Worst Underlyings",
-            "total_cost":                  "Total Cost",
-            "pnl_mean":                    "PnL Mean",
-            "pnl_median":                  "PnL Median",
-            "pnl_p5":                      "PnL 5%",
-            "pnl_p95":                     "PnL 95%",
-            "pnl_es5":                     "ES (worst 5%)",
-            "portfolio_return_mean_pct":   "Return Mean (%)",
-            "portfolio_return_p5_pct":     "Return 5% (%)",
-        }),
+        styled,
         width="stretch", hide_index=True,
         height=_fit_height(len(pf)),
     )
@@ -880,25 +943,31 @@ def _render_portfolio_summary(res):
 def _render_product_detail(res):
     st.markdown("### Product-Level Stress Results")
     df = res["product_df"].copy().round(2)
+    df = df[[
+        "product_id", "currency", "worst_underlying", "settlement_type",
+        "barrier_breach_freq",
+        "pnl_mean", "pnl_median", "pnl_p5", "pnl_p95",
+        "return_mean_pct", "return_p5_pct",
+    ]].rename(columns={
+        "product_id":          "Product ID",
+        "currency":            "Currency",
+        "worst_underlying":    "Worst (mode)",
+        "settlement_type":     "Settlement (mode)",
+        "barrier_breach_freq": "Barrier Breach Freq",
+        "pnl_mean":            "PnL Mean",
+        "pnl_median":          "PnL Median",
+        "pnl_p5":              "PnL 5%",
+        "pnl_p95":             "PnL 95%",
+        "return_mean_pct":     "Return Mean (%)",
+        "return_p5_pct":       "Return 5% (%)",
+    })
+    styled = df.style.format(
+        {col: (lambda v: chf(v, 2, signed=True))
+         for col in ["PnL Mean", "PnL Median", "PnL 5%", "PnL 95%"]
+         if col in df.columns}
+    )
     st.dataframe(
-        df[[
-            "product_id", "currency", "worst_underlying", "settlement_type",
-            "barrier_breach_freq",
-            "pnl_mean", "pnl_median", "pnl_p5", "pnl_p95",
-            "return_mean_pct", "return_p5_pct",
-        ]].rename(columns={
-            "product_id":          "Product ID",
-            "currency":            "Currency",
-            "worst_underlying":    "Worst (mode)",
-            "settlement_type":     "Settlement (mode)",
-            "barrier_breach_freq": "Barrier Breach Freq",
-            "pnl_mean":            "PnL Mean",
-            "pnl_median":          "PnL Median",
-            "pnl_p5":              "PnL 5%",
-            "pnl_p95":             "PnL 95%",
-            "return_mean_pct":     "Return Mean (%)",
-            "return_p5_pct":       "Return 5% (%)",
-        }),
+        styled,
         width="stretch", hide_index=True,
         height=_fit_height(len(df)),
     )
@@ -913,20 +982,27 @@ def _render_delivered_stocks(res):
     df = delivered.copy()
     df["return_pct"] = df["return_pct"] * 100
     df = df.round(2)
+    df = df.rename(columns={
+        "delivered_underlying":  "Delivered Underlying",
+        "total_shares":          "Total Shares (mean)",
+        "strike":                "Strike (mean)",
+        "price":                 "Final Spot (mean)",
+        "currency":              "Currency",
+        "market_value":          "Market Value",
+        "total_fractional_cash": "Fractional Cash",
+        "total_value_incl_cash": "Total Value",
+        "cost":                  "Cost",
+        "pnl":                   "PnL",
+        "return_pct":            "Return (%)",
+    })
+    money = {"Market Value": False, "Fractional Cash": False,
+             "Total Value": False, "Cost": False, "PnL": True}
+    styled = df.style.format(
+        {col: (lambda v, s=signed: chf(v, 2, signed=s))
+         for col, signed in money.items() if col in df.columns}
+    )
     st.dataframe(
-        df.rename(columns={
-            "delivered_underlying":  "Delivered Underlying",
-            "total_shares":          "Total Shares (mean)",
-            "strike":                "Strike (mean)",
-            "price":                 "Final Spot (mean)",
-            "currency":              "Currency",
-            "market_value":          "Market Value",
-            "total_fractional_cash": "Fractional Cash",
-            "total_value_incl_cash": "Total Value",
-            "cost":                  "Cost",
-            "pnl":                   "PnL",
-            "return_pct":            "Return (%)",
-        }),
+        styled,
         width="stretch", hide_index=True,
         height=_fit_height(len(df)),
     )
@@ -935,11 +1011,15 @@ def _render_delivered_stocks(res):
 def _render_cash_positions(res):
     st.markdown("### Cash Positions (mean across paths)")
     cash = res["cash_positions"].copy().round(2)
+    cash = cash.rename(columns={
+        "currency":   "Currency",
+        "total_cash": "Mean Cash Redemption",
+    })
+    styled = cash.style.format(
+        {"Mean Cash Redemption": lambda v: chf(v, 2)}
+    )
     st.dataframe(
-        cash.rename(columns={
-            "currency":   "Currency",
-            "total_cash": "Mean Cash Redemption",
-        }),
+        styled,
         width="stretch", hide_index=True,
         height=_fit_height(len(cash)),
     )

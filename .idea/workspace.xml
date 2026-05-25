@@ -5,48 +5,14 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="1520bd93-a383-4b6f-9585-88160e9993e4" name="Changes" comment="">
-      <change beforePath="$PROJECT_DIR$/app/config.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/config.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/portfolio_source.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/portfolio_source.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/app/portfolio_storage.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/portfolio_storage.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/app/streamlit_app.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/streamlit_app.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/app/views/factor_stress.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/views/factor_stress.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/app/views/portfolio.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/views/portfolio.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/app/views/portfolio_entry.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/views/portfolio_entry.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/app/views/product.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/views/product.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/data/factor_premiums.csv" beforeDir="false" afterPath="$PROJECT_DIR$/data/factor_premiums.csv" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/data/factor_scenarios.py" beforeDir="false" afterPath="$PROJECT_DIR$/data/factor_scenarios.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/data/options.csv" beforeDir="false" afterPath="$PROJECT_DIR$/data/options.csv" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/data/portfolio.py" beforeDir="false" afterPath="$PROJECT_DIR$/data/portfolio.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/data/prices.csv" beforeDir="false" afterPath="$PROJECT_DIR$/data/prices.csv" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/data/risk_free_rates.csv" beforeDir="false" afterPath="$PROJECT_DIR$/data/risk_free_rates.csv" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/notebooks/term_sheet_extraction.ipynb" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/autocallable_reverse_convertible.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/autocallable_reverse_convertible.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/capital_protection_note.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/capital_protection_note.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/correlation_engine.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/correlation_engine.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/factor_engine.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/factor_engine.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/factor_loadings_engine.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/factor_loadings_engine.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/factor_premiums.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/factor_premiums.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/factor_scenario_engine.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/factor_scenario_engine.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/market_data_engine.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/market_data_engine.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/portfolio_analytics.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/portfolio_analytics.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/portfolio_entry.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/portfolio_entry.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/pricing/black_scholes.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/pricing/black_scholes.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/pricing/monte_carlo.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/pricing/monte_carlo.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/reverse_convertible.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/reverse_convertible.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/scenario_archetypes.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/scenario_archetypes.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/scenario_engine.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/scenario_engine.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/temp.py" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/term_sheet_extractor.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/term_sheet_extractor.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tests/test_autocallable_reverse_convertible.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_autocallable_reverse_convertible.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tests/test_factor_premiums.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_factor_premiums.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tests/test_monte_carlo.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_monte_carlo.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tests/test_named_scenarios_behavior.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_named_scenarios_behavior.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tests/test_paths_and_returns.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_paths_and_returns.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tests/test_portfolio_analytics.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_portfolio_analytics.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tests/test_purchase_date_and_schedule.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_purchase_date_and_schedule.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tests/test_recovery_horizon.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_recovery_horizon.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tests/test_reverse_convertible.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_reverse_convertible.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tests/test_scenario_archetypes.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_scenario_archetypes.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/app/views/stress_testing.py" beforeDir="false" afterPath="$PROJECT_DIR$/app/views/stress_testing.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/docs/factor_premium_methodology.md" beforeDir="false" afterPath="$PROJECT_DIR$/docs/factor_premium_methodology.md" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -169,7 +135,7 @@
       <workItem from="1776532839831" duration="25848000" />
       <workItem from="1777121704216" duration="9282000" />
       <workItem from="1777203959566" duration="42492000" />
-      <workItem from="1778918605647" duration="36049000" />
+      <workItem from="1778918605647" duration="40764000" />
     </task>
     <servers />
   </component>

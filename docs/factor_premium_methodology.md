@@ -35,33 +35,80 @@ market structure.
 
 ## 2. Regime classification
 
-The market timeline is partitioned, once and jointly, into the three regimes by
-reference to the market factor alone; the same daily classification is shared by
-every factor, and classification is never performed factor by factor. Two
-characteristics of the market are taken into account.
+Each trading day is assigned to exactly one of the three regimes by reference to
+the market factor alone. The classification is computed once from MKT and is
+shared unchanged by every factor. The assignment rests on three daily
+measurements of the market.
 
-First, a *trend* characteristic is obtained from the trailing twelve-month
-cumulative MKT log-return. A day is provisionally assigned to the bear, flat, or
-bull band according to whether this quantity falls below −5%, between −5% and
-+10%, or at or above +10%, respectively.
+The first measurement is the *trend*, the twelve-month cumulative MKT
+log-return.
 
-Second, a *stress* characteristic is introduced so that abrupt drawdowns, which
-the slow trailing-return measure is too sluggish to register, are not
-mis-classified. A day is deemed to be under *down-stress* when volatility is
-elevated — the realised one-month annualised volatility of the market, or an
-externally supplied gauge such as the VIX, exceeding 25% — and the recent
-one-month return is simultaneously negative. The requirement that the recent
-return be negative is essential: volatility is direction-agnostic, and were
-high-volatility rebound days admitted to the bear regime they would contaminate
-its conditional mean with positive returns.
+The second is a *down-stress* condition, which holds when market volatility is
+elevated — the realised one-month annualised volatility of the market, or the
+VIX if provided, exceeding 20%. The recent one-month return is additionally
+taken into account.
 
-The two characteristics are combined as follows. A day is classified as bear if
-it lies in the bear trend band or is a down-stress day; as bull only if it lies
-in the bull trend band and volatility is not elevated, so that a turbulent
-melt-up is treated as flat rather than as a clean bull; and as flat otherwise.
-The volatility signal is configurable, which permits a forward-looking measure
-to be substituted for the realised default without altering the surrounding
-logic.
+The conjunction with a negative recent return is deliberate: volatility is
+direction-agnostic, and were high-volatility rebound days admitted to the bear
+regime they would contaminate its conditional mean with positive returns.
+
+A day is assigned to the bear regime whenever its trend falls below −5% or the
+down-stress condition holds; failing that, to the bull regime when its trend is
+at least +10% and volatility is not elevated; and to the flat regime otherwise.
+Resolving the bear condition first is what allows an abrupt drawdown to be
+recognised even before the slow trailing-return trend has turned — the very
+transition that the trend measure, on its own, is too sluggish to register. The
+calm requirement attached to the bull regime ensures, symmetrically, that a
+turbulent melt-up, a market rising under elevated volatility, is treated as flat
+rather than as a clean bull. The volatility signal is configurable, so that a
+forward-looking measure may be substituted for the realised default without
+altering the surrounding logic.
+
+Formally, let $r^{12\mathrm{m}}_t$ denote the trailing twelve-month cumulative
+MKT log-return, $r^{1\mathrm{m}}_t$ the trailing one-month return, and
+$\sigma_t$ the volatility signal (realised one-month annualised volatility, or
+the VIX if supplied), with stress threshold $\sigma^\star = 20\%$. Define the
+elevated-volatility and down-stress indicators
+
+```math
+V_t = \mathbf{1}\left[\sigma_t > \sigma^\star\right],
+\qquad
+D_t = V_t \cdot \mathbf{1}\left[r^{1\mathrm{m}}_t < 0\right].
+```
+
+The regime of day $t$ is then
+
+```math
+\mathrm{regime}(t) =
+\begin{cases}
+\text{bear}, & \text{if } r^{12\mathrm{m}}_t < -5\% \ \text{ or } \ D_t = 1, \\
+\text{bull}, & \text{else if } r^{12\mathrm{m}}_t \geq +10\% \ \text{ and } \ V_t = 0, \\
+\text{flat}, & \text{otherwise.}
+\end{cases}
+```
+
+The ordering of the cases encodes the precedence: the bear condition is tested
+first and therefore overrides an otherwise-bullish trend on a down-stress day.
+
+The rule is illustrated by the representative cases below, in which the trend is
+the trailing twelve-month MKT return, "elevated" denotes volatility above the
+20% threshold, and the recent return is the trailing one-month figure that
+enters the down-stress condition.
+
+| Trend (12m) | Volatility | Recent return (1m) | Regime | Rationale |
+|---|---|---|---|---|
+| +15% | not elevated | +2% | bull | strong trend under calm conditions |
+| +15% | elevated | +2% | flat | rising but turbulent — not a clean bull |
+| +3% | not elevated | +1% | flat | trend in the central band |
+| −8% | not elevated | −1% | bear | trend below the −5% bear threshold |
+| +12% | elevated | −4% | bear | down-stress holds and takes precedence over the bull trend |
+| +1% | elevated | +3% | flat | turbulent but rising, so not down-stress, and the trend is too weak for bull |
+
+The fifth and sixth rows isolate the role of the down-stress condition: an
+elevated-volatility day is classified as bear only when the recent return is
+also negative, and a high trend is overridden in that event, whereas an
+elevated-volatility day with a positive recent return carries no stress
+implication and is judged on trend alone.
 
 ## 3. Estimation of the conditional premium
 
