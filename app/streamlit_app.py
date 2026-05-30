@@ -173,6 +173,39 @@ def fetch_realised_vols(_portfolio, portfolio_key: str):
         from data.reference_data import vol_map as vol_map_static
         return vol_map_static
 
+
+@st.cache_data(ttl=_TTL_DAILY)
+def fetch_vol_surfaces(_portfolio, portfolio_key: str):
+    """Per-(ISIN, listed expiry) implied-volatility surfaces.
+
+    The function caches the slice-by-slice SVI calibrations performed by
+    :meth:`MarketDataEngine.build_vol_surface_map`. It is currently
+    additive — no view or pricer consumes it in Stage 1 — and is
+    provided as the foundation for the Stage 2 term-structure object
+    and the Stage 3 pricer migration.
+
+    The cache key follows the same ``portfolio_key`` convention as the
+    sibling ``fetch_implied_vols`` and ``fetch_realised_vols``: the
+    surfaces are refreshed whenever the portfolio composition changes
+    (different active ISINs) and at the daily TTL boundary.
+
+    Returns
+    -------
+    dict
+        ``{ isin: { expiry_iso: VolSliceSurface } }``. The dictionary
+        is empty if no options data is available; ISINs without chain
+        coverage are absent rather than mapped to empty inner dicts.
+    """
+    _ = portfolio_key
+    engine = get_market_engine()
+    try:
+        return engine.build_vol_surface_map(_portfolio)
+    except Exception as e:
+        st.warning(f"Could not build vol surface map; downstream surface-aware "
+                   f"analytics will fall back to constant vol. {e}")
+        return {}
+
+
 @st.cache_data(ttl=_TTL_INTRADAY)
 def build_product_analytics(_portfolio, _db, reference_currency: str,
                             portfolio_key: str, fx_as_of: str = "", _fx_map=None):
@@ -468,6 +501,10 @@ beta_map             = build_beta_map(portfolio, portfolio_key=pkey)
 
 vol_map_implied      = fetch_implied_vols(portfolio, portfolio_key=pkey)
 vol_map_realised     = fetch_realised_vols(portfolio, portfolio_key=pkey)
+# Stage 1: per-(isin, expiry) SVI slice surfaces. Populated but not yet
+# consumed by the pricer or any view; the term-structure assembly (Stage 2)
+# and surface-aware pricing (Stage 3) build on this object.
+vol_surfaces         = fetch_vol_surfaces(portfolio, portfolio_key=pkey)
 
 risk_free_rates      = fetch_risk_free_rates(portfolio, portfolio_key=pkey)
 

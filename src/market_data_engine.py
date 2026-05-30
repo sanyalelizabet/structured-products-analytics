@@ -1075,6 +1075,150 @@ class MarketDataEngine:
 
         return vol_map
 
+    def build_vol_surface_map(self, portfolio, valuation_date=None):
+        """Build per-(ISIN, listed expiry) implied-volatility slice surfaces.
+
+        For every underlying in the portfolio the method assembles, from
+        the stored options chain in ``options.csv``, one
+        :class:`VolSliceSurface` per available expiry. Each slice is the
+        product of the full Stage 1 calibration pipeline: SVI fit,
+        butterfly and wing-bound arbitrage gates, data-quality gate, and
+        the chain-proxy or constant-volatility fallback when any of
+        those checks fail. The decision and reason are recorded on the
+        returned slice so that the user interface can badge the result
+        without re-running the calibration.
+
+        Stage 1 simplifications
+        -----------------------
+        The forward price at each expiry is approximated by the spot
+        price of the underlying (i.e. ``F = S``). This is the same
+        convention adopted by the existing ATM vol map and is acceptable
+        for SVI calibration because the smile-translation parameter
+        ``m`` absorbs any small offset between the true forward and the
+        spot. Risk-free rate drift and dividend yield will be
+        incorporated in Stage 2 when the term structure of the surface
+        is assembled. Likewise, only out-of-the-money options are
+        retained per expiry — out-of-the-money calls above the spot,
+        out-of-the-money puts below the spot — to avoid the
+        early-exercise bid-ask distortion that affects in-the-money
+        American equity options.
+
+        Parameters
+        ----------
+        portfolio : pd.DataFrame
+            Portfolio rows; must expose an ``underlying_isins`` column.
+        valuation_date : pd.Timestamp or str, optional
+            As-of date used to compute the tenor of each expiry. When
+            ``None`` the most recent ``fetch_date`` available in the
+            options database is used.
+
+        Returns
+        -------
+        dict
+            ``{ isin: { expiry_iso: VolSliceSurface } }``. ISINs for
+            which no option chain is available are absent from the
+            outer dictionary rather than mapped to an empty inner one,
+            so that callers can detect missing data unambiguously.
+        """
+        # Local import to avoid a hard dependency from market_data_engine
+        # on the pricing layer when it is imported in lightweight
+        # contexts (notebooks, data-collection scripts).
+        from src.pricing.vol_surface import VolSliceSurface
+
+        if not self.options_path.exists():
+            log.warning("options.csv not found; vol surface map is empty")
+            return {}
+
+        options_db = pd.read_csv(self.options_path)
+        if options_db.empty:
+            return {}
+
+        price_db = self.load_db()
+        if price_db.empty:
+            log.warning("price DB empty; cannot determine spots for vol surfaces")
+            return {}
+
+        # As-of: explicit argument wins, then the most recent fetch_date
+        # recorded in the options DB.
+        if valuation_date is None:
+            valuation_date = pd.to_datetime(options_db["fetch_date"]).max()
+        else:
+            valuation_date = pd.Timestamp(valuation_date)
+
+        # Active-portfolio ISINs: every distinct underlying referenced
+        # in any row of the portfolio.
+        portfolio_isins = sorted({
+            isin
+            for _, row in portfolio.iterrows()
+            for isin in row["underlying_isins"]
+        })
+
+        surfaces: dict[str, dict[str, "VolSliceSurface"]] = {}
+
+        for isin in portfolio_isins:
+            isin_options = options_db[options_db["isin"] == isin]
+            if isin_options.empty:
+                continue
+
+            # Spot from the most recent quote in the price DB.
+            isin_prices = price_db[price_db["isin"] == isin].sort_values("date")
+            if isin_prices.empty:
+                continue
+            spot = float(isin_prices.iloc[-1]["price"])
+            if spot <= 0.0 or not np.isfinite(spot):
+                continue
+
+            isin_slices: dict[str, "VolSliceSurface"] = {}
+            for expiry_iso, expiry_options in isin_options.groupby("expiry"):
+                expiry_ts = pd.Timestamp(expiry_iso)
+                tenor_years = (expiry_ts - valuation_date).days / 365.25
+                if tenor_years <= 0.0:
+                    continue   # expired
+
+                # OTM filter: keep calls with K > spot and puts with K < spot.
+                # Discard rows with missing/invalid IV or bid-ask quotes.
+                clean = expiry_options[
+                    (expiry_options["iv"].between(0.01, 5.0))
+                    & (expiry_options["strike"] > 0.0)
+                    & (expiry_options["bid"] > 0.0)
+                    & (expiry_options["ask"] >= expiry_options["bid"])
+                ].copy()
+                otm = clean[
+                    ((clean["type"] == "call") & (clean["strike"] >= spot))
+                    | ((clean["type"] == "put") & (clean["strike"] <= spot))
+                ]
+                if otm.empty:
+                    continue
+
+                # Deduplicate by strike: keep the row with the tighter
+                # bid-ask spread when both a call and a put are present
+                # at the same strike (typically straddle-of-the-money).
+                otm = otm.assign(spread=otm["ask"] - otm["bid"])
+                otm = (otm.sort_values("spread")
+                          .drop_duplicates(subset="strike", keep="first")
+                          .sort_values("strike"))
+
+                strikes = otm["strike"].to_numpy(dtype=float)
+                ivs = otm["iv"].to_numpy(dtype=float)
+                bid_asks = (otm["ask"] - otm["bid"]).to_numpy(dtype=float)
+                mids = ((otm["ask"] + otm["bid"]) / 2.0).to_numpy(dtype=float)
+
+                slice_surface = VolSliceSurface.from_chain(
+                    isin=isin,
+                    T=tenor_years,
+                    forward=spot,   # Stage 1 simplification: F = S
+                    strikes=strikes,
+                    implied_vols=ivs,
+                    bid_asks=bid_asks,
+                    mids=mids,
+                )
+                isin_slices[str(expiry_iso)] = slice_surface
+
+            if isin_slices:
+                surfaces[isin] = isin_slices
+
+        return surfaces
+
     def build_isin_ticker_map(self, isins):
         """
         Build { isin: ticker } from securities_master_data.csv for a list of ISINs.

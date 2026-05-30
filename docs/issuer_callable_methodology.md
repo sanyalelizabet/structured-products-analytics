@@ -25,7 +25,8 @@ optionality for the holder**.
 The autocall is *mechanical*: redemption is triggered automatically when the
 worst-of level is at or above a contractual trigger on an observation date. It
 fires in benign states (high underlyings) and is, if anything, favourable to the
-holder.
+holder, although it also terminates the product early and removes the opportunity
+to receive future coupons.
 
 The issuer call is *discretionary and adversarial*: the issuer exercises it to
 **minimise the value of the note to the holder**. A rational issuer redeems at
