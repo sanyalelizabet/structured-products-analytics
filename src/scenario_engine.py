@@ -41,10 +41,12 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from src.barrier import sample_knock_in
 from src.linalg import safe_cholesky
 from src.noise_sampler import NoiseSampler
 from src.reverse_convertible import (
     ReverseConvertible,
+    barrier_levels,
     vectorised_european_rc_summary,
 )
 
@@ -243,6 +245,24 @@ class ScenarioEngine:
 
     # ─────────────────────────────────────────────────────── per-product run
 
+    def _american_breach_mask(self, row, price_paths, date_range, isins, sampler):
+        """Per-path continuous (American) knock-in mask for a barrier RC.
+
+        The diffusion variance of each step is the one this engine assumes when
+        it generates the paths — ``σ_i² Δt`` with ``σ_i`` the per-asset vol and
+        ``Δt`` the business-day gap (the mean-reversion and shock terms are
+        drift, not diffusion, and are excluded).  Knock-ins are sampled at the
+        Brownian-bridge rate using uniforms vended by the sampler, so the run
+        stays reproducible under Common Random Numbers.
+        """
+        vols     = np.array([self.get_vol(i) for i in isins])           # (n_assets,)
+        barriers = barrier_levels(row["initial_levels"], row.get("barrier_pct"))
+        # Interval year-fractions over the grid (n_days - 1,), ACT/360.
+        dt_gap   = np.diff(date_range.values) / np.timedelta64(1, "D") / 360.0
+        step_var = (vols[None, :] ** 2) * dt_gap[:, None]               # (n_steps, n_assets)
+        uniforms = sampler.knock_in_uniform(row["product_id"], price_paths.shape[0])
+        return sample_knock_in(price_paths, barriers, step_var, uniforms)
+
     def _run_product(self, row, sampler, scenario, corr_df=None):
         corr_matrix = self.get_corr_subset(row, corr_df)
         price_paths, date_range, path_summary = self.build_shock_paths(
@@ -267,14 +287,46 @@ class ScenarioEngine:
         # ``product_type`` — autocallables need the full path to evaluate
         # their observation dates, while plain BRCs only need the terminal.
         ptype = str(row.get("product_type", "")).upper()
-        if ptype == "AC_BRC":
+        if ptype == "IC_BRC":
+            from src.issuer_callable_reverse_convertible import (
+                vectorised_issuer_callable_rc_summary,
+            )
+            # Issuer call solved by optimal exercise; American knock-in (if any)
+            # is sampled continuously, European observed at maturity.
+            rf = float(self.risk_free_rates.get(row["currency"], 0.0))
+            mask = (
+                self._american_breach_mask(row, price_paths, date_range, isins, sampler)
+                if str(row.get("type_style", "european")).lower() == "american"
+                else None
+            )
+            v = vectorised_issuer_callable_rc_summary(
+                row, price_paths, date_range, rf, breach_mask=mask,
+            )
+        elif ptype == "AC_BRC":
             from src.autocallable_reverse_convertible import (
                 vectorised_autocallable_rc_summary,
             )
-            v = vectorised_autocallable_rc_summary(row, price_paths, date_range)
+            # American autocallable: paths that run to maturity observe the
+            # barrier continuously; called paths redeem at par regardless.
+            mask = (
+                self._american_breach_mask(row, price_paths, date_range, isins, sampler)
+                if str(row.get("type_style", "european")).lower() == "american"
+                else None
+            )
+            v = vectorised_autocallable_rc_summary(
+                row, price_paths, date_range, uncalled_breach_mask=mask,
+            )
         elif ptype == "CPN":
             from src.capital_protection_note import vectorised_cpn_summary
             v = vectorised_cpn_summary(row, final_prices)
+        elif str(row.get("type_style", "european")).lower() == "american":
+            # Continuously-monitored barrier: knock-in is sampled over the whole
+            # path with the model's own per-step diffusion variance (σ_i² Δt),
+            # at the bridge-correct rate, then settled at maturity on the worst-of.
+            breach_mask = self._american_breach_mask(
+                row, price_paths, date_range, isins, sampler,
+            )
+            v = vectorised_european_rc_summary(row, final_prices, breach_mask=breach_mask)
         else:
             v = vectorised_european_rc_summary(row, final_prices)
         pnl              = v["pnl"]
@@ -295,6 +347,7 @@ class ScenarioEngine:
         return {
             "product_id":         row["product_id"],
             "product_type":       row["product_type"],
+            "type_style":         row.get("type_style", "European"),
             "currency":           row["currency"],
             "position_units":     row["position_units"],
             "notional":           row["notional"],
@@ -378,9 +431,12 @@ class ScenarioEngine:
                 "currency":     ccy,
                 "n_products":   int((product_df["currency"] == ccy).sum()),
                 "total_cost":   cost,
-                "underlyings":  sorted(set(
-                    product_df.loc[product_df["currency"] == ccy, "worst_underlying"]
-                )),
+                "underlyings":  sorted(
+                    str(x)
+                    for x in product_df.loc[
+                        product_df["currency"] == ccy, "worst_underlying"
+                    ].dropna().unique()
+                ),
                 "pnl_mean":   float(samples.mean()),
                 "pnl_median": float(np.median(samples)),
                 "pnl_p5":     float(np.percentile(samples, 5)),

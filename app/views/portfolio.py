@@ -71,7 +71,7 @@ PLOTLY_DIVERGING_SCALE = [
 ]
 
 
-def render(analytics, df, greeks_df, pf_delta, valuation_date):
+def render(analytics, df, greeks_df, pf_delta, valuation_date, corr_df=None):
     _render_header(analytics, valuation_date)
     _render_kpi_strip(analytics, df)
     _render_quick_stats(analytics, df)
@@ -81,7 +81,7 @@ def render(analytics, df, greeks_df, pf_delta, valuation_date):
     st.markdown("---")
     _render_holdings(analytics, df, greeks_df, pf_delta, valuation_date)
     st.markdown("---")
-    _render_concentration(analytics)
+    _render_concentration(analytics, corr_df)
     st.markdown("---")
     _render_risk(greeks_df, pf_delta)
 
@@ -360,7 +360,7 @@ def _render_portfolio_page_insights(
             st.markdown(insight)
 
 
-def _render_concentration(analytics):
+def _render_concentration(analytics, corr_df=None):
     st.markdown("### Underlying Concentration")
 
     u = analytics.underlying_lookthrough().copy()
@@ -485,6 +485,75 @@ def _render_concentration(analytics):
         st.dataframe(styled, width="stretch", hide_index=True,
                      height=_fit_height(len(ut)))
 
+    _render_correlation_matrix(analytics, corr_df, u)
+
+
+def _render_correlation_matrix(analytics, corr_df, underlying_df):
+    with st.expander("Correlation matrix"):
+
+        if corr_df is None or corr_df.empty:
+            st.info(
+                "Correlation data is unavailable. Multi-underlying analytics "
+                "will fall back to identity correlation where required."
+            )
+            return
+
+        corr = corr_df.copy()
+        corr.index = corr.index.astype(str)
+        corr.columns = corr.columns.astype(str)
+
+        lookup = (
+            underlying_df[["isin", "underlying"]]
+            .dropna(subset=["isin"])
+            .drop_duplicates("isin")
+            .assign(isin=lambda x: x["isin"].astype(str))
+        )
+        label_map = {
+            row["isin"]: _correlation_label(row["underlying"], row["isin"])
+            for _, row in lookup.iterrows()
+        }
+
+        isins = [
+            isin for isin in lookup["isin"].tolist()
+            if isin in corr.index and isin in corr.columns
+        ]
+        if len(isins) < 2:
+            st.info("At least two covered underlyings are needed for a matrix.")
+            return
+
+        sub = corr.loc[isins, isins].astype(float).clip(-1.0, 1.0).fillna(0.0)
+        np.fill_diagonal(sub.values, 1.0)
+        labels = [label_map.get(isin, isin) for isin in isins]
+
+        off_diag = sub.to_numpy(copy=True)
+        mask = ~np.eye(len(sub), dtype=bool)
+        if np.allclose(off_diag[mask], 0.0):
+            st.warning(
+                "This matrix is effectively identity. That usually means "
+                "correlations were defaulted or there was insufficient overlap."
+            )
+
+        numeric = sub.copy()
+        numeric.index = labels
+        numeric.columns = labels
+        styled_matrix = (
+            numeric.style
+            .format("{:.2f}")
+            .background_gradient(cmap=DIVERGING_CMAP, vmin=-1, vmax=1)
+        )
+        st.dataframe(
+            styled_matrix,
+            width="stretch",
+            height=_fit_height(len(numeric)),
+        )
+
+
+def _correlation_label(underlying, isin):
+    name = str(underlying).strip() if pd.notna(underlying) else str(isin)
+    if len(name) > 24:
+        name = name[:21] + "..."
+    return f"{name} ({str(isin)[-4:]})"
+
 
 def _dtb_color(value):
     """Map distance-to-barrier (%) → palette colour."""
@@ -516,8 +585,10 @@ def _render_maturity(analytics):
         bar_df["maturity_date"] = pd.to_datetime(bar_df["maturity_date"])
         bar_df = bar_df.sort_values("maturity_date")
         bar_df["mat_label"] = bar_df["maturity_date"].dt.strftime("%b %Y")
+        # Two-line in-bar label: product type on the first row, the underlying(s)
+        # on the second, so long basket names stay readable inside the bar.
         bar_df["product_label"] = (
-            bar_df["product_type"] + " · " + bar_df["underlyings"]
+            bar_df["product_type"] + "<br>" + bar_df["underlyings"]
         )
 
         fig = px.bar(

@@ -135,8 +135,24 @@ def mock_client():
 
 
 @pytest.fixture
-def engine(mock_client, tmp_path):
-    return MarketDataEngine(client=mock_client, db_path=str(tmp_path / "prices.csv"))
+def mock_snb():
+    """SNB SARON client stub — latest rate per tenor (decimals already)."""
+    c = MagicMock()
+    c.get_saron_rates.return_value = {
+        "ON": {"date": pd.Timestamp("2025-01-15"), "yield_pct": -0.0492, "yield": -0.000492},
+        "1M": {"date": pd.Timestamp("2025-01-15"), "yield_pct": -0.0432, "yield": -0.000432},
+        "3M": {"date": pd.Timestamp("2025-01-15"), "yield_pct": -0.0482, "yield": -0.000482},
+        "6M": {"date": pd.Timestamp("2025-01-15"), "yield_pct": -0.0482, "yield": -0.000482},
+    }
+    return c
+
+
+@pytest.fixture
+def engine(mock_client, mock_snb, tmp_path):
+    # Inject both providers so no test touches the network: EOD for the majors,
+    # SNB for CHF SARON.
+    return MarketDataEngine(client=mock_client, snb_client=mock_snb,
+                            db_path=str(tmp_path / "prices.csv"))
 
 
 class TestRatesDbIo:
@@ -195,12 +211,10 @@ class TestFetchLatestRates:
         assert db.iloc[0]["yield"] == pytest.approx(0.0410)
 
     def test_multiple_currencies_independent(self, engine, mock_client):
-        # GBOND_TICKERS has ("CHF", "3M") → "CH10Y.GBOND" while DEFAULT_TENORS
-        # picks "10Y" for CHF, so the default-tenor lookup misses and CHF is
-        # intentionally skipped.  The other three currencies fetch normally.
+        # The majors come from EOD GBOND; CHF comes from SNB SARON (mocked in
+        # the fixture).  All four currencies should be present.
         def fake_quote(ticker):
-            yields = {"US3M.GBOND": 4.35, "CH10Y.GBOND": 0.5,
-                      "DE3M.GBOND": 2.5,  "UK3M.GBOND": 4.5}
+            yields = {"US3M.GBOND": 4.35, "DE3M.GBOND": 2.5, "UK3M.GBOND": 4.5}
             return {
                 "ticker": ticker,
                 "yield_pct": yields[ticker],
@@ -210,7 +224,44 @@ class TestFetchLatestRates:
         mock_client.get_bond_yield.side_effect = fake_quote
 
         db = engine.fetch_latest_rates(["USD", "CHF", "EUR", "GBP"])
-        assert set(db["currency"]) == {"USD", "EUR", "GBP"}
+        assert set(db["currency"]) == {"USD", "CHF", "EUR", "GBP"}
+        # CHF must never be fetched from EOD GBOND.
+        assert "CH10Y.GBOND" not in set(db["ticker"])
+
+    def test_chf_sourced_from_snb_saron(self, engine, mock_snb):
+        db = engine.fetch_latest_rates(["CHF"])
+        chf = db[db["currency"] == "CHF"]
+        assert set(chf["tenor"]) == {"ON", "1M", "3M", "6M"}
+        assert set(chf["ticker"]) == {
+            "SARON.SNB", "SARON1M.SNB", "SARON3M.SNB", "SARON6M.SNB",
+        }
+        assert mock_snb.get_saron_rates.called
+
+    def test_stale_chf_gbond_rows_are_purged(self, engine, mock_snb):
+        # A legacy mislabeled CHF/3M row sourced from the EOD CH10Y point.
+        engine.save_rates_db(pd.DataFrame([{
+            "date": pd.Timestamp("2025-01-17"),       # later than the SARON date
+            "currency": "CHF", "tenor": "3M", "ticker": "CH10Y.GBOND",
+            "yield_pct": 5.6, "yield": 0.056,
+        }]))
+        engine.fetch_latest_rates(["CHF"])
+        db = engine.load_rates_db()
+        # The stale GBOND-sourced CHF row is gone; only SARON remains.
+        assert "CH10Y.GBOND" not in set(db["ticker"])
+        rate = engine.build_risk_free_rate_map(["CHF"], tenor="3M")["CHF"]
+        assert rate == pytest.approx(-0.000482)       # SARON 3M, not 0.056
+
+    def test_snb_failure_falls_back_without_stale_value(self, engine, mock_snb):
+        mock_snb.get_saron_rates.side_effect = NetworkError("SNB down")
+        # Seed a stale CHF GBOND row; on SNB failure it must still be purged so
+        # CHF degrades to "no row" (→ static anchor upstream) not a wrong value.
+        engine.save_rates_db(pd.DataFrame([{
+            "date": pd.Timestamp("2025-01-17"),
+            "currency": "CHF", "tenor": "3M", "ticker": "CH10Y.GBOND",
+            "yield_pct": 5.6, "yield": 0.056,
+        }]))
+        engine.fetch_latest_rates(["CHF"])
+        assert engine.build_risk_free_rate_map(["CHF"], tenor="3M") == {}
 
 
 class TestBuildRiskFreeRateMap:

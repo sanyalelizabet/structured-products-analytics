@@ -86,6 +86,30 @@ def test_portfolio_page_payload_is_stable_json_with_no_value_errors():
     parsed = json.loads(payload_1)
     assert parsed["reference_currency"] == "CHF"
     assert payload_hash(payload_1) == payload_hash(payload_2)
+    # Barrier observation style is exposed per holding (and explained in units)
+    # so the insight can describe American (continuous) vs European barriers.
+    assert "barrier_observation" in parsed["units"]
+    assert all("barrier_observation" in h for h in parsed["holdings"])
+
+
+def test_portfolio_payload_reports_american_barrier_observation():
+    portfolio = make_portfolio()
+    portfolio.loc[0, "type_style"] = "American"
+    analytics = PortfolioAnalytics(portfolio)
+    product_df = analytics.build_product_analytics()
+    holdings, ref = _portfolio_holdings_table(analytics, product_df)
+    greeks_df = pd.DataFrame({"product_id": [], "currency": [], "isin": [],
+                              "underlying": [], "delta_1pct": []})
+    pf_delta = pd.DataFrame({"isin": [], "underlying": [], "total_delta_1pct": []})
+
+    payload = build_portfolio_page_payload(
+        holdings_table=holdings, reference_currency=ref, analytics=analytics,
+        product_df=product_df, greeks_df=greeks_df, pf_delta=pf_delta,
+        valuation_date=pd.Timestamp("2026-05-25"),
+    )
+    obs = {h["product_id"]: h["barrier_observation"]
+           for h in json.loads(payload)["holdings"]}
+    assert obs.get("BRC001") == "American"
 
 
 def test_stress_testing_payload_handles_array_like_values_without_value_error():

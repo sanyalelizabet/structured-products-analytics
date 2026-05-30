@@ -112,6 +112,10 @@ def build_portfolio_page_payload(
         "fair_value", "fair_value_pct",
     ]
     payload = holdings_table[cols].copy()
+    # Barrier observation style per product (European = final-fixing only,
+    # American = continuously monitored), mapped from the analytics frame.
+    _ts = analytics.product_df.set_index("product_id")["type_style"]
+    payload["barrier_observation"] = payload["product_id"].map(_ts)
     payload = payload.sort_values("cost_ref", ascending=False)
     payload = payload.round({
         "total_notional": 2,
@@ -216,6 +220,18 @@ def build_portfolio_page_payload(
                 "distance_to_barrier": "percent",
                 "fair_value_pct": "percent of notional",
                 "greeks": "fair-value change in product currency for stated bump",
+                "barrier_observation": (
+                    "European = barrier checked only at final fixing (maturity); "
+                    "American = barrier monitored continuously over the product's "
+                    "life, so it can knock in any time and carries more downside risk"
+                ),
+                "product_type": (
+                    "BRC = barrier reverse convertible; MBRC = worst-of basket BRC; "
+                    "AC_BRC = autocallable (auto-redeems early when the underlyings "
+                    "are high, favourable to the holder); IC_BRC = issuer-callable "
+                    "(the issuer may redeem early at par at its discretion, which "
+                    "caps the holder's upside); CPN = capital-protection note"
+                ),
             },
             "derived_summary": summary,
             "portfolio_metrics": pf_metrics,
@@ -249,7 +265,11 @@ Use the Portfolio page JSON and derived_summary to write exactly 4 sentences:
 1. Give the overall portfolio read: healthy, mixed, or under pressure, and why.
 2. Explain the main structured-product risk: barrier distance, concentration in
    a few products or underlyings, short maturity clustering, or issuer/credit
-   exposure if visible.
+   exposure if visible. Where a holding's barrier_observation is "American",
+   note that its barrier is watched continuously (not only at maturity), so it
+   carries more knock-in risk than an otherwise-identical European one. Where a
+   holding's product_type is "IC_BRC", note that the issuer may call it early at
+   par, which caps the holder's upside.
 3. Explain dependency between holdings: products linked to shares that may move
    together can lose diversification benefit; discuss correlation qualitatively
    unless exact correlation numbers are supplied.
@@ -634,6 +654,15 @@ def build_stress_testing_payload(
             "returns": "percent",
             "asset_paths": "normalised price, initial level = 100",
             "correlation": "historical realised correlation used by the path engine",
+            "type_style": (
+                "barrier observation: European = checked at maturity only, "
+                "American = monitored continuously over the life (more knock-in risk)"
+            ),
+            "product_type": (
+                "AC_BRC = autocallable (auto-redeems early when underlyings are "
+                "high); IC_BRC = issuer-callable (issuer may redeem early at par "
+                "at its discretion, capping the holder's upside)"
+            ),
         },
         "portfolio_stress_summary": _safe_records(res["pf_scenario_per_ccy"].round(4)),
         "whole_portfolio_reference_summary": _safe_records(res["pf_scenario_ref"].round(4))
@@ -852,6 +881,15 @@ def build_factor_stress_payload(
             "returns": "percent",
             "loadings": "estimated sensitivity of each underlying to each factor",
             "decomposition": "median-path log-return contribution in percent",
+            "type_style": (
+                "barrier observation: European = checked at maturity only, "
+                "American = monitored continuously over the life (more knock-in risk)"
+            ),
+            "product_type": (
+                "AC_BRC = autocallable (auto-redeems early when underlyings are "
+                "high); IC_BRC = issuer-callable (issuer may redeem early at par "
+                "at its discretion, capping the holder's upside)"
+            ),
         },
         "portfolio_stress_summary": _safe_records(res["pf_scenario_per_ccy"].round(4)),
         "whole_portfolio_reference_summary": reference_summary,

@@ -84,3 +84,47 @@ class TestBuildFxRateMap:
         fx, as_of = engine.build_fx_rate_map("CHF")
         assert fx == {}
         assert as_of is None
+
+
+def _hist(rows):
+    """Build a long-form FX-history DataFrame for ``get_history`` mocks."""
+    return pd.DataFrame(rows, columns=["date", "base", "quote", "rate"])
+
+
+class TestFetchFxHistory:
+    def test_first_call_back_fills_full_window(self, engine, fx_client):
+        # First call to an empty DB pulls the whole [today-years, today] window.
+        fx_client.get_history.return_value = _hist([
+            {"date": pd.Timestamp("2025-01-02"), "base": "USD", "quote": "CHF", "rate": 0.91},
+            {"date": pd.Timestamp("2025-01-03"), "base": "USD", "quote": "CHF", "rate": 0.92},
+        ])
+        db = engine.fetch_fx_history("USD", years=5)
+        assert fx_client.get_history.call_count == 1
+        # Persisted, with the base→base self-row added at every fetched date.
+        assert set(db["quote"]) >= {"CHF", "USD"}
+        assert ((db["quote"] == "USD") & (db["rate"] == 1.0)).any()
+
+    def test_second_call_only_fetches_tail(self, engine, fx_client):
+        # Seed an existing history ending on 2025-01-03.
+        engine.save_fx_db(_hist([
+            {"date": pd.Timestamp("2025-01-02"), "base": "USD", "quote": "CHF", "rate": 0.91},
+            {"date": pd.Timestamp("2025-01-03"), "base": "USD", "quote": "CHF", "rate": 0.92},
+        ]))
+        fx_client.get_history.return_value = _hist([
+            {"date": pd.Timestamp("2025-01-04"), "base": "USD", "quote": "CHF", "rate": 0.93},
+        ])
+        engine.fetch_fx_history("USD", years=5)
+        # The client must have been asked only for the tail (from_date > 2025-01-03).
+        from_date, to_date = fx_client.get_history.call_args[0][1:3]
+        assert str(from_date) >= "2025-01-04"
+        # No historical rows were re-downloaded.
+        assert fx_client.get_history.call_count == 1
+
+    def test_api_failure_uses_existing_db(self, engine, fx_client):
+        engine.save_fx_db(_hist([
+            {"date": pd.Timestamp("2025-01-02"), "base": "USD", "quote": "CHF", "rate": 0.91},
+        ]))
+        fx_client.get_history.side_effect = NetworkError("down")
+        db = engine.fetch_fx_history("USD", years=5)
+        # Old row still present, nothing crashed.
+        assert len(db) == 1 and db.iloc[0]["rate"] == pytest.approx(0.91)

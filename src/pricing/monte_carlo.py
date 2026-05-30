@@ -23,6 +23,11 @@ from src.reverse_convertible import barrier_levels
 from src.autocallable_reverse_convertible import (
     vectorised_autocallable_rc_summary,
 )
+from src.issuer_callable_reverse_convertible import (
+    vectorised_issuer_callable_rc_summary,
+)
+from src.barrier import continuous_survival_prob, sample_knock_in
+from src.noise_sampler import _stable_isin_seed
 
 log = logging.getLogger(__name__)
 
@@ -139,6 +144,26 @@ def _is_autocallable(row: pd.Series) -> bool:
     discounted valuation instead.
     """
     return str(row.get("product_type", "")).upper() == "AC_BRC"
+
+
+def _is_issuer_callable(row: pd.Series) -> bool:
+    """True for issuer-callable BRCs, valued by optimal-exercise (LSM)."""
+    return str(row.get("product_type", "")).upper() == "IC_BRC"
+
+
+_BARRIER_PRODUCT_TYPES = {"BRC", "MBRC", "AC_BRC", "IC_BRC"}
+
+
+def _is_american(row: pd.Series) -> bool:
+    """True for barrier products observed continuously (American style).
+
+    ``type_style == "american"`` selects continuous monitoring; only barrier
+    products carry a barrier, so capital-protection notes (CPN) never qualify.
+    """
+    return (
+        str(row.get("type_style", "european")).lower() == "american"
+        and str(row.get("product_type", "")).upper() in _BARRIER_PRODUCT_TYPES
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -310,7 +335,7 @@ class MonteCarloPricer:
         # products (autocallables) discount each path to its own cashflow date
         # rather than uniformly to maturity.
         fair_value, std_error = self._fv_from_paths(
-            paths, dates, payoff_fn, row, risk_free_rate, T_remaining,
+            paths, dates, payoff_fn, row, risk_free_rate, T_remaining, vol_map,
         )
 
         return {
@@ -383,21 +408,36 @@ class MonteCarloPricer:
         row: pd.Series,
         risk_free_rate: float,
         T_remaining: float,
+        vol_map: dict,
     ) -> tuple[float, float]:
         """Discount a payoff applied to a precomputed path tensor.
 
         Lets :meth:`compute_greeks` reprice for delta (scaled spot) and theta
         (shifted T) without re-running ``simulate_paths``.
 
-        Autocallables are discounted per path to their own redemption date (the
-        early-call date, or maturity if never called); every other product is
-        discounted uniformly to maturity.  Routing both through this one method
-        keeps fair value and the bump-and-reprice Greeks on a single model.
+        Dispatch by observation style, all on one model so that fair value and
+        the bump-and-reprice Greeks never diverge:
+
+        * **Autocallable** — discounted per path to its own redemption date
+          (early-call date, or maturity if never called).
+        * **American barrier** — continuously-monitored knock-in via the
+          Brownian-bridge survival probability, discounted to maturity.
+        * **European** — the payoff function with a single maturity discount.
 
         Returns ``(fair_value, std_error)``.
         """
-        if _is_autocallable(row):
-            pv_paths = self._autocallable_path_pv(paths, dates, row, risk_free_rate)
+        if _is_issuer_callable(row):
+            pv_paths = self._issuer_callable_path_pv(
+                paths, dates, row, risk_free_rate, vol_map,
+            )
+        elif _is_autocallable(row):
+            pv_paths = self._autocallable_path_pv(
+                paths, dates, row, risk_free_rate, vol_map,
+            )
+        elif _is_american(row):
+            pv_paths = self._american_barrier_pv(
+                paths, dates, row, risk_free_rate, T_remaining, vol_map,
+            )
         else:
             payoffs  = payoff_fn(paths, dates, row)
             pv_paths = payoffs * np.exp(-risk_free_rate * T_remaining)
@@ -405,12 +445,61 @@ class MonteCarloPricer:
         std_error  = float(np.std(pv_paths) / np.sqrt(self.n_paths))
         return fair_value, std_error
 
+    def _american_barrier_pv(
+        self,
+        paths: np.ndarray,
+        dates: pd.DatetimeIndex,
+        row: pd.Series,
+        risk_free_rate: float,
+        T_remaining: float,
+        vol_map: dict,
+    ) -> np.ndarray:
+        """Per-path present value of a continuously-monitored barrier RC.
+
+        The down-barrier is live throughout the life, so the knock-in is valued
+        with the Brownian-bridge survival probability
+        (:func:`src.barrier.continuous_survival_prob`) rather than a single
+        maturity check.  Redemption blends the survived (par) and knocked-in
+        (worst-of conversion) outcomes by that probability — a deterministic,
+        lower-variance valuation that keeps the Greeks stable under CRN.
+        """
+        notional = float(row["notional"])
+        strikes  = np.array([float(k) for k in row["strike"]])
+        barriers = barrier_levels(row["initial_levels"], row.get("barrier_pct"))
+        isins    = list(row["underlying_isins"])
+        vols     = np.array([vol_map.get(i, DEFAULT_VOL) for i in isins])
+
+        # Monitor over the simulated business-day grid.  Using the grid points
+        # (rather than prepending today's spot) keeps every monitored level
+        # inside ``paths``, so the spot-bump Greeks — which scale ``paths`` —
+        # stay exact; the dropped today→first-grid-day sub-interval is ~1 day
+        # and immaterial to the knock-in probability.
+        dt = np.maximum(
+            np.diff(dates.values) / np.timedelta64(1, "D") / 360.0, 0.0,
+        )  # length n_steps - 1, matching prices = paths
+
+        p_survive  = continuous_survival_prob(paths, barriers, vols, dt)
+
+        terminal   = paths[:, -1, :]
+        worst_perf = (terminal / strikes).min(axis=1)
+        redemption = p_survive * notional + (1.0 - p_survive) * notional * worst_perf
+
+        T_total = (
+            pd.Timestamp(row["maturity_date"]) -
+            pd.Timestamp(row["initial_fixing_date"])
+        ).days / 360.0
+        coupon  = notional * float(row["coupon"]) * T_total
+
+        payoff = redemption + coupon
+        return payoff * np.exp(-risk_free_rate * T_remaining)
+
     def _autocallable_path_pv(
         self,
         paths: np.ndarray,
         dates: pd.DatetimeIndex,
         row: pd.Series,
         risk_free_rate: float,
+        vol_map: dict,
     ) -> np.ndarray:
         """Per-path present value of an autocallable BRC.
 
@@ -420,8 +509,21 @@ class MonteCarloPricer:
         or maturity on paths that run to the end.  This is what makes the fair
         value methodologically correct for autocallables, rather than pricing
         them as plain European notes.
+
+        Under American (continuous) observation the paths that run to maturity
+        carry a continuously-monitored knock-in: it is sampled per path against
+        the Brownian-bridge survival probability, using uniforms fixed by the
+        pricer seed and product id so the bump-and-reprice Greeks reuse the same
+        draws.  An autocalled path redeems at par regardless of the barrier, so
+        the mask only affects uncalled paths.
         """
-        summary    = vectorised_autocallable_rc_summary(row, paths, dates)
+        uncalled_breach_mask = None
+        if _is_american(row):
+            uncalled_breach_mask = self._sampled_american_mask(paths, dates, row, vol_map)
+
+        summary    = vectorised_autocallable_rc_summary(
+            row, paths, dates, uncalled_breach_mask=uncalled_breach_mask,
+        )
         payoffs    = np.asarray(summary["total_payoff"], dtype=float)
         autocalled = np.asarray(summary["autocalled"], dtype=bool)
         call_date  = summary["call_date"]                      # object array
@@ -440,6 +542,69 @@ class MonteCarloPricer:
         )
         tau = np.maximum(days / 360.0, 0.0)
         return payoffs * np.exp(-risk_free_rate * tau)
+
+    def _issuer_callable_path_pv(
+        self,
+        paths: np.ndarray,
+        dates: pd.DatetimeIndex,
+        row: pd.Series,
+        risk_free_rate: float,
+        vol_map: dict,
+    ) -> np.ndarray:
+        """Per-path present value of an issuer-callable BRC.
+
+        The barrier knock-in is resolved to a definite per-path indicator
+        (continuous bridge-sampled for American observation, terminal for
+        European) because the optimal-exercise regression works on realised
+        cashflows.  The issuer's optimal call is solved by Longstaff–Schwartz in
+        :func:`vectorised_issuer_callable_rc_summary`; each path is then
+        discounted to its own termination date (the call date, or maturity).
+        """
+        if _is_american(row):
+            breach_mask = self._sampled_american_mask(paths, dates, row, vol_map)
+        else:
+            strikes  = np.array([float(k) for k in row["strike"]])  # noqa: F841 (clarity)
+            barriers = barrier_levels(row["initial_levels"], row.get("barrier_pct"))
+            terminal = paths[:, -1, :]
+            breach_mask = (terminal <= barriers[None, :]).any(axis=1)
+
+        summary    = vectorised_issuer_callable_rc_summary(
+            row, paths, dates, risk_free_rate, breach_mask=breach_mask,
+        )
+        payoffs    = np.asarray(summary["total_payoff"], dtype=float)
+        called     = np.asarray(summary["issuer_called"], dtype=bool)
+        call_date  = summary["call_date"]
+
+        today    = pd.Timestamp.today().normalize()
+        maturity = pd.Timestamp(row["maturity_date"])
+        days = np.array(
+            [
+                ((call_date[p] if called[p] else maturity) - today).days
+                for p in range(payoffs.shape[0])
+            ],
+            dtype=float,
+        )
+        tau = np.maximum(days / 360.0, 0.0)
+        return payoffs * np.exp(-risk_free_rate * tau)
+
+    def _sampled_american_mask(
+        self, paths: np.ndarray, dates: pd.DatetimeIndex, row: pd.Series, vol_map: dict,
+    ) -> np.ndarray:
+        """Sampled continuous knock-in mask for fair-value autocallable pricing.
+
+        Uses the model's per-step variance (σ_i² Δt of the pricing GBM) and a
+        Brownian-bridge survival probability, then draws one uniform per path.
+        The uniforms are fixed by ``(seed, product_id)`` so every bump-and-reprice
+        Greek evaluation reuses identical draws.
+        """
+        isins    = list(row["underlying_isins"])
+        vols     = np.array([vol_map.get(i, DEFAULT_VOL) for i in isins])
+        barriers = barrier_levels(row["initial_levels"], row.get("barrier_pct"))
+        dt       = np.maximum(np.diff(dates.values) / np.timedelta64(1, "D") / 360.0, 0.0)
+        step_var = (vols[None, :] ** 2) * dt[:, None]
+        rng      = np.random.default_rng(_stable_isin_seed(str(row["product_id"]), self.seed))
+        uniforms = rng.random(paths.shape[0])
+        return sample_knock_in(paths, barriers, step_var, uniforms)
 
     # ------------------------------------------------------------------
     # Greeks — bump and reprice
@@ -512,6 +677,7 @@ class MonteCarloPricer:
         )
         base_fv, base_se = self._fv_from_paths(
             paths_base, dates_base, payoff_fn, row, risk_free_rate, T_remaining,
+            vol_map,
         )
 
         isins  = list(row["underlying_isins"])
@@ -532,9 +698,11 @@ class MonteCarloPricer:
 
             fv_up, _ = self._fv_from_paths(
                 paths_up, dates_base, payoff_fn, row, risk_free_rate, T_remaining,
+                vol_map,
             )
             fv_dn, _ = self._fv_from_paths(
                 paths_dn, dates_base, payoff_fn, row, risk_free_rate, T_remaining,
+                vol_map,
             )
             # FV change for a 1 % spot move (central diff over ±1 %)
             deltas.append((fv_up - fv_dn) / 2)
@@ -564,6 +732,7 @@ class MonteCarloPricer:
             T_tm1     = max((dates_base[-2] - today).days / 360, 0.0)
             fv_tm1, _ = self._fv_from_paths(
                 paths_tm1, dates_tm1, payoff_fn, row, risk_free_rate, T_tm1,
+                vol_map,
             )
             theta     = fv_tm1 - base_fv
         else:
@@ -721,8 +890,13 @@ class MonteCarloPricer:
         # model, so the payoff function returned here is unused for it.  The
         # European payoff is kept as a harmless default (and is what the
         # autocall engine itself applies to paths that run to maturity).
+        # American (continuous) barrier products are valued in
+        # ``_american_barrier_pv`` (detected via ``_is_american``); like the
+        # autocall case the payoff function returned here is unused for them,
+        # but the European payoff is a safe default for any code path that does
+        # call it.
         style = str(row.get("type_style", "european")).lower()
-        if style == "european":
+        if style in ("european", "american"):
             return european_brc_payoff
         raise NotImplementedError(
             f"No payoff function registered for type_style='{style}'. "

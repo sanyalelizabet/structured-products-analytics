@@ -38,7 +38,7 @@ class BetaEngine:
     def build_beta_map(
         self,
         isin_ticker_map: dict,
-        years: int = 3,
+        years: int = 5,
         force_refresh: bool = False,
     ) -> dict[str, float]:
         """Return ``{isin: β_MKT}``. Defaults to 1.0 on insufficient data."""

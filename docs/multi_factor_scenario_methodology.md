@@ -123,6 +123,14 @@ expected shortfall, and the standard deviation, and is aggregated to currency
 and reference-currency levels by path-wise summation, preserving the dependence
 induced by the shared factor and idiosyncratic draws.
 
+A barrier product observed continuously (American observation) has its knock-in
+determined over the whole simulated path rather than at maturity alone. The
+Brownian-bridge correction is applied with this engine's own per-step diffusion
+variance — the systematic part $\beta_i^\top \Sigma_f \beta_i\,\Delta t$ plus the
+idiosyncratic part — and one definite knock-in outcome is sampled per path so the
+loss distribution is preserved; see the barrier-observation methodology note.
+European observation (the default) uses the terminal fixing only.
+
 ## 8. Common random numbers
 
 All randomness — both the factor innovations and the idiosyncratic residuals —

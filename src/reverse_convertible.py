@@ -24,8 +24,10 @@ def barrier_levels(initial_levels, barrier_pct) -> np.ndarray:
     return np.asarray([float(x) for x in initial_levels], dtype=float) * bp
 
 
-def vectorised_european_rc_summary(row, final_prices: np.ndarray) -> dict:
-    """Vectorised per-path summary for European reverse convertibles.
+def vectorised_european_rc_summary(
+    row, final_prices: np.ndarray, breach_mask: np.ndarray | None = None,
+) -> dict:
+    """Vectorised per-path summary for reverse convertibles.
 
     Pure-numpy equivalent of looping ``ReverseConvertible(...).summary()`` over
     a ``(N, n_assets)`` terminal-price tensor.
@@ -38,6 +40,11 @@ def vectorised_european_rc_summary(row, final_prices: np.ndarray) -> dict:
         :class:`ReverseConvertible` needs for ``total_cost`` / ``coupon_payment``.
     final_prices : np.ndarray
         Terminal underlying prices, shape ``(n_paths, n_assets)``.
+    breach_mask : np.ndarray of bool, optional
+        Per-path knock-in indicator, shape ``(n_paths,)``.  When provided it
+        overrides the default European (final-fixing) observation — used to feed
+        a continuously-monitored (American) knock-in determined upstream from the
+        full path.  When ``None`` the barrier is observed at final fixing only.
 
     Returns
     -------
@@ -61,9 +68,15 @@ def vectorised_european_rc_summary(row, final_prices: np.ndarray) -> dict:
     worst_idx   = np.argmin(perfs, axis=1)                            # (N,)
     worst_perf  = perfs[np.arange(N), worst_idx]                      # (N,)
 
-    # European barrier observation at final fixing: breach if ANY underlying's
-    # terminal level is at or below its barrier (= initial_level × barrier_pct).
-    breached    = (final_prices <= barriers[None, :]).any(axis=1)     # (N,)
+    if breach_mask is not None:
+        # Continuous (American) observation: knock-in determined over the whole
+        # path upstream.  Settlement still occurs at maturity on the worst-of.
+        breached = np.asarray(breach_mask, dtype=bool)
+    else:
+        # European barrier observation at final fixing: breach if ANY
+        # underlying's terminal level is at or below its barrier
+        # (= initial_level × barrier_pct).
+        breached = (final_prices <= barriers[None, :]).any(axis=1)    # (N,)
 
     # Redemption: par if the barrier held, else worst-of conversion at strike.
     redemption    = np.where(breached, notional * worst_perf, notional)
@@ -329,8 +342,17 @@ class ReverseConvertible:
         ]
     
     def barrier_breached(self):
-        if self.type_style.lower() != "european":
-            raise NotImplementedError("Only European style implemented.")
+        # This deterministic analytics path projects a single flat outcome
+        # (current spots held to maturity), so there is no intermediate price
+        # path to monitor: continuous (American) and European observation
+        # coincide — both reduce to checking the projected terminal level
+        # against the barrier.  Continuous monitoring only changes the answer
+        # in the stochastic Monte Carlo / scenario engines, which model paths.
+        style = self.type_style.lower()
+        if style not in ("european", "american"):
+            raise NotImplementedError(
+                f"Barrier observation style {self.type_style!r} not supported."
+            )
         return any(self.barrier_breaches_final())
     
     def redemption(self):

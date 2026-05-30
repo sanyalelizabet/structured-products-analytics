@@ -61,7 +61,7 @@ class FactorLoadingsEngine:
         self,
         isin_ticker_map: dict,
         factors: Iterable[str] | None = None,
-        years: int = 3,
+        years: int = 5,
         force_refresh: bool = False,
         min_obs: int = 252,
     ) -> dict[str, dict]:

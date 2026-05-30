@@ -8,6 +8,7 @@ from pandas.tseries.offsets import BDay
 
 from src.exceptions import DataFetchError
 from src.frankfurter_client import FrankfurterClient
+from src.snb_client import SNBClient
 
 log = logging.getLogger(__name__)
 
@@ -66,31 +67,42 @@ class MarketDataEngine:
     # Default GBOND ticker per (currency, tenor).  Extend by inserting
     # additional tenors as needed.
     #
-    # CHF uses the 10Y Confederation bond because EOD's GBOND virtual
-    # exchange does not carry CH3M (returns 404 on history, all-"NA" on
-    # real-time).  CH10Y is the only reliable point on the Swiss curve
-    # available through this feed.
+    # CHF is intentionally absent: EOD's GBOND virtual exchange does not carry
+    # a usable CH3M point, so the Swiss risk-free rate is sourced from the SNB
+    # SARON complex instead (see ``_fetch_saron_rows`` / :class:`SNBClient`).
     GBOND_TICKERS = {
         ("USD", "3M"):  "US3M.GBOND",
-        ("CHF", "3M"): "CH10Y.GBOND",
         ("EUR", "3M"):  "DE3M.GBOND",
         ("GBP", "3M"):  "UK3M.GBOND",
     }
 
     # Per-currency preferred tenor — used when a caller doesn't pin one
-    # explicitly.  Keep this aligned with GBOND_TICKERS.
+    # explicitly.  CHF uses the SARON 3M compound rate (sourced from SNB);
+    # the majors use their 3M GBOND yield.
     DEFAULT_TENORS = {
         "USD": "3M",
-        "CHF": "10Y",
+        "CHF": "3M",
         "EUR": "3M",
         "GBP": "3M",
     }
 
-    def __init__(self, client, db_path="data/prices.csv", fx_client=None):
+    # SNB SARON tickers persisted into the rates DB (provenance), per tenor.
+    SARON_TICKERS = {
+        "ON": "SARON.SNB",
+        "1M": "SARON1M.SNB",
+        "3M": "SARON3M.SNB",
+        "6M": "SARON6M.SNB",
+    }
+
+    def __init__(self, client, db_path="data/prices.csv", fx_client=None,
+                 snb_client=None):
         self.client = client
         # FX provider — injected for testing/substitution; defaults to
         # Frankfurter. Same role the EOD ``client`` plays for prices/yields.
         self.fx_client = fx_client if fx_client is not None else FrankfurterClient()
+        # CHF risk-free provider — SNB SARON. Injected for testing; same role
+        # the EOD ``client`` plays for the majors' GBOND yields.
+        self.snb_client = snb_client if snb_client is not None else SNBClient()
         self.db_path = Path(db_path)
         self.master_path  = self.db_path.parent / "securities_master_data.csv"
         self.options_path = self.db_path.parent / "options.csv"
@@ -257,17 +269,19 @@ class MarketDataEngine:
 
     def fetch_latest_rates(self, currencies, tenor: str | None = None,
                            max_workers: int = _DEFAULT_MAX_WORKERS) -> pd.DataFrame:
-        """Refresh latest GBOND yields for ``currencies``.
+        """Refresh latest risk-free yields for ``currencies``.
 
-        ``tenor`` is the point on the curve to fetch.  When ``None``
-        (default) each currency uses its preferred tenor from
-        :attr:`DEFAULT_TENORS` — which is "3M" for USD/EUR/GBP and
-        "10Y" for CHF, since EOD does not carry CH3M.
+        CHF is sourced from the SNB SARON complex (overnight + 1M/3M/6M
+        compound) and the majors (USD/EUR/GBP) from their EOD GBOND yields.
+
+        ``tenor`` is the GBOND point to fetch for the majors.  When ``None``
+        (default) each uses its preferred tenor from :attr:`DEFAULT_TENORS`
+        (3M).  It does not apply to CHF, whose SARON tenors are fixed.
 
         Behaviour mirrors :meth:`fetch_latest_prices`:
         * Skip the API call when the previous business day is already in
           the DB for that (ccy, tenor).
-        * Skip when EOD's quote date is already in the DB.
+        * Skip when the quote date is already in the DB.
         * On any API failure, log and continue — the DB itself is the
           fallback (last available row remains the active rate).
 
@@ -277,12 +291,34 @@ class MarketDataEngine:
         db = self.load_rates_db()
         prev_trading_day = (pd.Timestamp.today() - BDay(1)).normalize()
 
+        # One-time, self-healing migration: CHF risk-free moved from EOD GBOND
+        # (the CH10Y point, mislabeled as 3M) to the SNB SARON complex.  Drop any
+        # stale GBOND-sourced CHF rows so they cannot win the latest-date
+        # selection over SARON — and so that, if SNB is unreachable, CHF falls
+        # back to the static anchor rather than a wrong stored value.
+        purged = False
+        if not db.empty:
+            stale = (
+                (db["currency"] == "CHF")
+                & db["ticker"].astype(str).str.contains("GBOND", na=False)
+            )
+            if stale.any():
+                db = db[~stale].reset_index(drop=True)
+                purged = True
+
+        # CHF risk-free comes from SNB SARON, not EOD GBOND.
+        saron_rows = (
+            self._fetch_saron_rows(db) if "CHF" in currencies else []
+        )
+
         # Pre-filter: build the list of (ccy, tenor, ticker) triples that
         # still need a network call.  Any ticker not in GBOND_TICKERS or
         # already up-to-date is dropped here so the thread pool only fires
-        # for real work.
+        # for real work.  CHF is handled above via SNB and skipped here.
         to_fetch: list[tuple[str, str, str]] = []
         for ccy in currencies:
+            if ccy == "CHF":
+                continue
             ccy_tenor = tenor or self.DEFAULT_TENORS.get(ccy, "3M")
             ticker = self.GBOND_TICKERS.get((ccy, ccy_tenor))
             if ticker is None:
@@ -344,15 +380,51 @@ class MarketDataEngine:
             }
 
         results = _parallel_map(_fetch_one, to_fetch, max_workers=max_workers)
-        rows = [r for r in results if r is not None]
+        rows = saron_rows + [r for r in results if r is not None]
 
         if rows:
             db = _append_records(db, rows)
             db = db.drop_duplicates(subset=["currency", "tenor", "date"], keep="last")
+
+        # Persist when new rows arrived or the stale-CHF purge changed the DB.
+        if rows or purged:
             db = db.sort_values(["currency", "tenor", "date"]).reset_index(drop=True)
             self.save_rates_db(db)
 
         return db
+
+    def _fetch_saron_rows(self, db: pd.DataFrame) -> list[dict]:
+        """Fetch the latest SARON rates from SNB as rates-DB records.
+
+        Returns one record per tenor (ON / 1M / 3M / 6M) for any observation
+        not already stored for that (CHF, tenor, date).  On any SNB failure the
+        DB is the fallback — we log and return no new rows.
+        """
+        try:
+            rates = self.snb_client.get_saron_rates()
+        except DataFetchError as e:
+            log.warning("SARON fetch from SNB failed: %s", e)
+            return []
+
+        have_chf = (not db.empty) and (db["currency"] == "CHF").any()
+        rows: list[dict] = []
+        for tenor, obs in rates.items():
+            quote_date = pd.Timestamp(obs["date"]).normalize()
+            if have_chf and (
+                (db["currency"] == "CHF")
+                & (db["tenor"] == tenor)
+                & (db["date"] == quote_date)
+            ).any():
+                continue
+            rows.append({
+                "date":      quote_date,
+                "currency":  "CHF",
+                "tenor":     tenor,
+                "ticker":    self.SARON_TICKERS.get(tenor, f"SARON{tenor}.SNB"),
+                "yield_pct": obs["yield_pct"],
+                "yield":     obs["yield"],
+            })
+        return rows
 
     def build_risk_free_rate_map(
         self, currencies, tenor: str | None = None,
@@ -361,8 +433,8 @@ class MarketDataEngine:
 
         Reads the rates DB and picks the latest row per requested
         currency.  When ``tenor`` is ``None``, the per-currency default
-        from :attr:`DEFAULT_TENORS` is used (3M for most majors, 10Y for
-        CHF since EOD doesn't carry CH3M).
+        from :attr:`DEFAULT_TENORS` is used (3M for all currencies — for CHF
+        this resolves to the SARON 3M compound rate sourced from SNB).
 
         Yields are returned as **decimals** (e.g. ``0.0435``) — same
         convention as the legacy static dict.  Currencies with no rows
@@ -430,6 +502,61 @@ class MarketDataEngine:
 
         new_df = pd.DataFrame(rows)
         db = new_df if db.empty else pd.concat([db, new_df], ignore_index=True)
+        db = db.drop_duplicates(subset=["base", "quote", "date"], keep="last")
+        db = db.sort_values(["base", "quote", "date"]).reset_index(drop=True)
+        self.save_fx_db(db)
+        return db
+
+    def fetch_fx_history(self, base: str, years: int = 5) -> pd.DataFrame:
+        """Incrementally back-fill daily FX history for ``base`` into the
+        shared ``fx_rates.csv``.
+
+        On the first call for ``base`` the full ``[today - years, today]``
+        window is fetched in a single Frankfurter request (one response carries
+        every quote currency at once).  Every subsequent call resolves the most
+        recent ``date`` already stored for ``base`` and asks Frankfurter only
+        for the tail beyond that — no historical rows are re-downloaded.
+
+        Schema is the same long-form table that :meth:`fetch_latest_fx` writes
+        (``date, base, quote, rate``), so the *latest-rate* consumers
+        (``build_fx_rate_map``) continue to work unchanged on the extended DB.
+
+        On any client failure we log and return the existing DB — the stored
+        history is the fallback.  Returns the full DB.
+        """
+        db = self.load_fx_db()
+        today = pd.Timestamp.today().normalize()
+
+        base_db = db[db["base"] == base] if not db.empty else db
+        if base_db.empty:
+            from_date = (today - pd.DateOffset(years=years)).normalize()
+        else:
+            last = pd.Timestamp(base_db["date"].max()).normalize()
+            from_date = last + pd.Timedelta(days=1)
+
+        if from_date > today:
+            return db                                       # cache already current
+
+        try:
+            new_df = self.fx_client.get_history(
+                base, from_date.date(), today.date(),
+            )
+        except DataFetchError as e:
+            log.warning("FX history fetch failed for base %s (%s); using stored.",
+                        base, e)
+            return db
+        if new_df.empty:
+            return db
+
+        # Frankfurter omits the base→base self-row; add it at every fetched date
+        # so ``build_fx_rate_map`` lookups for (base, base) keep returning 1.0.
+        self_rows = pd.DataFrame([
+            {"date": d, "base": base, "quote": base, "rate": 1.0}
+            for d in new_df["date"].unique()
+        ])
+        new_df = pd.concat([new_df, self_rows], ignore_index=True)
+
+        db = _append_rows(db, new_df)
         db = db.drop_duplicates(subset=["base", "quote", "date"], keep="last")
         db = db.sort_values(["base", "quote", "date"]).reset_index(drop=True)
         self.save_fx_db(db)
@@ -974,6 +1101,23 @@ class MarketDataEngine:
                 pass
 
         return result
+
+    def build_isin_currency_map(self, isins) -> dict[str, str]:
+        """Build ``{isin: native_currency}`` from the securities master.
+
+        Mirrors :meth:`build_isin_ticker_map` — only includes ISINs that have a
+        row with a non-empty ``currency`` in the master CSV; the caller decides
+        how to handle missing entries (typically by treating them as already in
+        the target currency, i.e. no translation).
+        """
+        if not self.master_path.exists():
+            return {}
+        master = pd.read_csv(self.master_path)
+        if "currency" not in master.columns:
+            return {}
+        sub = master[["isin", "currency"]].dropna()
+        sub = sub[sub["isin"].isin(set(isins))]
+        return {row["isin"]: str(row["currency"]).upper() for _, row in sub.iterrows()}
 
 
 

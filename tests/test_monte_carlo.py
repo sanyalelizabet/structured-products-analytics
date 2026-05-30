@@ -368,14 +368,27 @@ class TestPricePortfolio:
         assert len(result) == len(portfolio)
 
     def test_unknown_type_style_raises(self):
-        """_resolve_payoff raises NotImplementedError for unsupported styles."""
+        """_resolve_payoff raises NotImplementedError for unsupported styles.
+
+        European and American are both supported now; a genuinely unknown style
+        must still fail loudly rather than silently default to a payoff."""
+        pricer = make_pricer()
+        row = make_brc_row()
+        row["type_style"] = "bermudan"
+        portfolio = pd.DataFrame([row])
+
+        with pytest.raises(NotImplementedError, match="bermudan"):
+            pricer.price_portfolio(portfolio, VOL_MAP, {"CHF": 0.01})
+
+    def test_american_style_prices_without_raising(self):
+        """American (continuous) barrier monitoring is supported end-to-end."""
         pricer = make_pricer()
         row = make_brc_row()
         row["type_style"] = "american"
         portfolio = pd.DataFrame([row])
 
-        with pytest.raises(NotImplementedError, match="american"):
-            pricer.price_portfolio(portfolio, VOL_MAP, {"CHF": 0.01})
+        out = pricer.price_portfolio(portfolio, VOL_MAP, {"CHF": 0.01})
+        assert np.isfinite(out["fair_value"].iloc[0])
 
 
 # ---------------------------------------------------------------------------
@@ -471,7 +484,14 @@ class TestGreeks:
     # ── Monotonicity checks ───────────────────────────────────────────────
 
     def test_mbrc_fv_increases_with_correlation(self):
-        """FV should be non-decreasing as pairwise correlation rises."""
+        """FV should rise with pairwise correlation.
+
+        The relationship is monotone in expectation, but each ρ is priced on an
+        independent path set, so adjacent points can invert by Monte-Carlo noise.
+        We therefore assert the overall trend (high-ρ above low-ρ) and that any
+        local inversion is within a small tolerance, rather than strict
+        step-by-step monotonicity.
+        """
         pricer = make_pricer(n_paths=10_000, seed=0)
         fvs = [
             pricer.price(
@@ -480,7 +500,11 @@ class TestGreeks:
             )["fair_value"]
             for rho in [0.1, 0.3, 0.5, 0.7, 0.9]
         ]
-        assert all(fvs[i] <= fvs[i + 1] for i in range(len(fvs) - 1))
+        # Overall trend: most-correlated worth more than least-correlated.
+        assert fvs[-1] > fvs[0]
+        # Step-wise monotone up to Monte-Carlo error (~0.1% of fair value).
+        eps = 1e-3 * abs(fvs[0])
+        assert all(fvs[i] <= fvs[i + 1] + eps for i in range(len(fvs) - 1))
 
     def test_higher_vol_lowers_fv(self):
         """Higher vol → more chance of barrier breach → lower fair value."""

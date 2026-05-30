@@ -197,6 +197,26 @@ def build_corr_matrix(_portfolio, portfolio_key: str):
     isin_ticker_map = engine.build_isin_ticker_map(isins)
     return CorrelationEngine(engine).build_corr_matrix(isin_ticker_map, years=_ESTIMATION_YEARS)
 
+
+@st.cache_data(ttl=_TTL_DAILY)
+def build_display_corr_matrix(_portfolio, portfolio_key: str, target_ccy: str = "USD"):
+    """Investor-view correlation: prices translated to ``target_ccy`` first.
+
+    Used by the Portfolio view's correlation panel only — the stress and factor
+    engines keep using the native-return correlation produced by
+    :func:`build_corr_matrix`.  Cross-currency baskets show the joint risk a
+    single-currency investor actually experiences, with FX co-movement baked in.
+    """
+    _ = portfolio_key
+    engine = get_market_engine()
+    isins = list({isin for _, row in _portfolio.iterrows() for isin in row["underlying_isins"]})
+    isin_ticker_map   = engine.build_isin_ticker_map(isins)
+    isin_currency_map = engine.build_isin_currency_map(isins)
+    return CorrelationEngine(engine).build_translated_corr_matrix(
+        isin_ticker_map, isin_currency_map,
+        target_ccy=target_ccy, years=_ESTIMATION_YEARS,
+    )
+
 @st.cache_data(ttl=_TTL_DAILY)
 def build_beta_map(_portfolio, portfolio_key: str):
     _ = portfolio_key
@@ -540,7 +560,17 @@ if view == "Product":
     product.render(portfolio, df, analytics, valuation_date, vol_map, beta_map)
 
 elif view == "Portfolio":
-    portfolio_view.render(analytics, df, greeks_df, pf_delta, valuation_date)
+    # The portfolio view's correlation panel is the investor view: prices
+    # translated to a single currency (USD) before correlating, so the matrix
+    # reflects the joint risk a single-currency investor actually experiences.
+    # The stress and factor engines (below) keep using native ``corr_df``.
+    display_corr_df = build_display_corr_matrix(
+        portfolio, portfolio_key=pkey, target_ccy="USD",
+    )
+    portfolio_view.render(
+        analytics, df, greeks_df, pf_delta, valuation_date,
+        corr_df=display_corr_df,
+    )
 
 elif view == "Stress Testing":
     stress_testing.render(

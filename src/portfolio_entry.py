@@ -25,8 +25,8 @@ from typing import Any, Callable, Iterable
 # ──────────────────────────────────────────────────────────────────────────
 
 # Which product types this field applies to.  None = always.
-ALL_TYPES = {"BRC", "MBRC", "AC_BRC", "CPN"}
-BARRIER_TYPES = {"BRC", "MBRC", "AC_BRC"}
+ALL_TYPES = {"BRC", "MBRC", "AC_BRC", "IC_BRC", "CPN"}
+BARRIER_TYPES = {"BRC", "MBRC", "AC_BRC", "IC_BRC"}
 
 # Human-readable product names.  Single source of truth for any UI that
 # surfaces product types to end users (entry form, product detail view,
@@ -36,6 +36,7 @@ PRODUCT_TYPE_FULL_NAME: dict[str, str] = {
     "BRC":    "Barrier Reverse Convertible (BRC)",
     "MBRC":   "Multi-asset Barrier RC, worst-of (MBRC)",
     "AC_BRC": "Autocallable Barrier RC (AC_BRC)",
+    "IC_BRC": "Issuer-Callable Barrier RC (IC_BRC)",
     "CPN":    "Capital Protection Note (CPN)",
 }
 
@@ -66,13 +67,16 @@ FIELDS: list[Field] = [
     # ----- Identification --------------------------------------------------
     Field("product_type", "Product type", "choice", choices=list(sorted(ALL_TYPES)),
           help="BRC = Barrier RC, MBRC = Multi-asset worst-of, "
-               "AC_BRC = Autocallable, CPN = Capital Protection."),
+               "AC_BRC = Autocallable, IC_BRC = Issuer-Callable, "
+               "CPN = Capital Protection."),
     Field("product_id",   "Product ID (ISIN)", "str",
           placeholder="e.g. CH1537766565",
           help="12-character ISIN printed on the term sheet."),
-    Field("type_style",   "Settlement style", "choice",
+    Field("type_style",   "Barrier observation", "choice",
           choices=["European", "American"], default="European",
-          help="European = exercised at maturity only. Almost always European."),
+          help="European = barrier observed at final fixing only. "
+               "American = barrier monitored continuously over the life "
+               "(more conservative). Most retail barriers are European."),
     Field("currency",     "Currency", "choice",
           choices=["CHF", "USD", "EUR", "GBP"], default="CHF",
           help="Trading and settlement currency of the certificate."),
@@ -144,6 +148,14 @@ FIELDS: list[Field] = [
           applies_to={"AC_BRC"}, required=False, default="false",
           choices=["false", "true"],
           help="If true, any missed coupons accumulate and are paid at the next trigger date."),
+
+    # ----- IC_BRC only ----------------------------------------------------
+    Field("issuer_call_dates",    "Issuer call dates", "list_iso_date",
+          applies_to={"IC_BRC"}, required=False,
+          placeholder="e.g. 2026-11-25, 2027-02-25",
+          help="Comma-separated YYYY-MM-DD optional redemption dates on which the "
+               "issuer may call the note at par. The issuer is modelled as "
+               "exercising optimally (to minimise the note's value)."),
 
     # ----- CPN-specific ---------------------------------------------------
     Field("protection_pct",    "Capital protection (as a fraction)", "float",
@@ -442,6 +454,7 @@ _SECTION_HEADERS = {
     "initial_fixing_date":  "\n---Dates---",
     "barrier_pct":          "\n---Barrier terms---",
     "autocall_obs_dates":   "\n---Autocall terms---",
+    "issuer_call_dates":    "\n---Issuer-call terms---",
     "protection_pct":       "\n---CPN payoff terms---",
     "capital_protection_amount": "\n---Optional CPN disclosures---",
 }

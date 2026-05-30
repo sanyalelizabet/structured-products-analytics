@@ -44,10 +44,11 @@ import hashlib
 import numpy as np
 import pandas as pd
 
+from src.barrier import sample_knock_in
 from src.factor_engine import FACTORS
 from src.linalg import safe_cholesky
 from src.noise_sampler import NoiseSampler
-from src.reverse_convertible import vectorised_european_rc_summary
+from src.reverse_convertible import barrier_levels, vectorised_european_rc_summary
 
 
 _PERCENTILES = [5, 95]
@@ -66,7 +67,7 @@ class FactorScenarioEngine:
         mean_reversion_kappa: float = 0.5,
         n_paths: int = 100,
         noise_sampler: NoiseSampler | None = None,
-        years_for_factor_stats: int = 3,
+        years_for_factor_stats: int = 5,
         premiums=None,
     ):
         self.portfolio    = portfolio
@@ -363,6 +364,38 @@ class FactorScenarioEngine:
 
     # ─────────────────────────────────────────────────────── per-product run
 
+    def _american_breach_mask(self, row, price_paths, date_range, isins, sampler):
+        """Per-path continuous (American) knock-in mask for a barrier RC.
+
+        The per-step diffusion variance is the one the factor model assumes when
+        it generates the asset paths: a *systematic* part ``βᵢᵀ Σ_f βᵢ · Δt`` —
+        with ``Σ_f = diag(σ_f)·Corr_f·diag(σ_f)`` the annualised factor
+        covariance the engine uses (``factor_vol_ser`` and the factor-correlation
+        Cholesky ``L_factor``) — plus an *idiosyncratic* part
+        ``(σ_idio·λ)² / 252`` per step (matching the engine's fixed daily idio
+        step).  Drift, mean-reversion and shocks are excluded.  Knock-ins are
+        sampled at the Brownian-bridge rate with sampler-vended uniforms (CRN).
+        """
+        K = len(self.factor_codes)
+        beta = np.zeros((len(isins), K))
+        idio_vols = np.zeros(len(isins))
+        for i, isin in enumerate(isins):
+            for k, code in enumerate(self.factor_codes):
+                beta[i, k] = self.get_loading(isin, code)
+            idio_vols[i] = self.get_idio_vol(isin)
+
+        fvols = np.array([float(self.factor_vol_ser.loc[c]) for c in self.factor_codes])
+        # Annualised factor covariance: diag(σ_f) · Corr_f · diag(σ_f).
+        Vf = (fvols[:, None] * fvols[None, :]) * (self.L_factor @ self.L_factor.T)
+        sys_var  = np.einsum("ik,kl,il->i", beta, Vf, beta)            # (n_assets,) annualised
+        idio_var = (idio_vols * self.idio_lambda) ** 2 / 252.0          # (n_assets,) per step
+
+        barriers = barrier_levels(row["initial_levels"], row.get("barrier_pct"))
+        dt_gap   = np.diff(date_range.values) / np.timedelta64(1, "D") / 360.0   # (n_steps,)
+        step_var = sys_var[None, :] * dt_gap[:, None] + idio_var[None, :]        # (n_steps, n_assets)
+        uniforms = sampler.knock_in_uniform(row["product_id"], price_paths.shape[0])
+        return sample_knock_in(price_paths, barriers, step_var, uniforms)
+
     def _run_product(self, row, factor_returns, date_range, sampler):
         """Compute aggregated per-product P&L over all paths."""
         price_paths, isins, spots = self._project_assets(row, factor_returns, sampler)
@@ -385,14 +418,46 @@ class FactorScenarioEngine:
         # autocallables need the full path to evaluate observation dates,
         # while plain BRCs only need the terminal slice.
         ptype = str(row.get("product_type", "")).upper()
-        if ptype == "AC_BRC":
+        if ptype == "IC_BRC":
+            from src.issuer_callable_reverse_convertible import (
+                vectorised_issuer_callable_rc_summary,
+            )
+            # Issuer call solved by optimal exercise; American knock-in (if any)
+            # is sampled continuously, European observed at maturity.
+            rf = float(self.risk_free_rates.get(row["currency"], 0.0))
+            mask = (
+                self._american_breach_mask(row, price_paths, date_range, isins, sampler)
+                if str(row.get("type_style", "european")).lower() == "american"
+                else None
+            )
+            v = vectorised_issuer_callable_rc_summary(
+                row, price_paths, date_range, rf, breach_mask=mask,
+            )
+        elif ptype == "AC_BRC":
             from src.autocallable_reverse_convertible import (
                 vectorised_autocallable_rc_summary,
             )
-            v = vectorised_autocallable_rc_summary(row, price_paths, date_range)
+            # American autocallable: paths that run to maturity observe the
+            # barrier continuously; called paths redeem at par regardless.
+            mask = (
+                self._american_breach_mask(row, price_paths, date_range, isins, sampler)
+                if str(row.get("type_style", "european")).lower() == "american"
+                else None
+            )
+            v = vectorised_autocallable_rc_summary(
+                row, price_paths, date_range, uncalled_breach_mask=mask,
+            )
         elif ptype == "CPN":
             from src.capital_protection_note import vectorised_cpn_summary
             v = vectorised_cpn_summary(row, final_prices)
+        elif str(row.get("type_style", "european")).lower() == "american":
+            # Continuously-monitored barrier: knock-in sampled over the whole
+            # path with the factor model's own per-step diffusion variance
+            # (systematic βᵀΣ_fβ·Δt + idiosyncratic), at the bridge-correct rate.
+            breach_mask = self._american_breach_mask(
+                row, price_paths, date_range, isins, sampler,
+            )
+            v = vectorised_european_rc_summary(row, final_prices, breach_mask=breach_mask)
         else:
             v = vectorised_european_rc_summary(row, final_prices)
         pnl              = v["pnl"]
@@ -415,6 +480,7 @@ class FactorScenarioEngine:
             # identifiers
             "product_id":         row["product_id"],
             "product_type":       row["product_type"],
+            "type_style":         row.get("type_style", "European"),
             "currency":           row["currency"],
             "position_units":     row["position_units"],
             "notional":           row["notional"],
@@ -525,9 +591,12 @@ class FactorScenarioEngine:
                     "currency":           ccy,
                     "n_products":         int((product_df["currency"] == ccy).sum()),
                     "total_cost":         cost,
-                    "underlyings":        sorted(set(
-                        product_df.loc[product_df["currency"] == ccy, "worst_underlying"]
-                    )),
+                    "underlyings":        sorted(
+                        str(x)
+                        for x in product_df.loc[
+                            product_df["currency"] == ccy, "worst_underlying"
+                        ].dropna().unique()
+                    ),
                     "pnl_mean":   float(samples.mean()),
                     "pnl_median": float(np.median(samples)),
                     "pnl_p5":     float(np.percentile(samples, 5)),

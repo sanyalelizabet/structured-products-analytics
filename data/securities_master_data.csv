@@ -1,4 +1,6 @@
 isin,ticker,code,exchange,name,type,country,currency
+CA06849F1080,ABR0.F,ABR0,F,BARRICK MINING CORP.,Common Stock,Germany,EUR
+CA06849F1080,B.US,B,US,Barrick Mining Corporation,Common Stock,USA,USD
 CH0012005267,0QLR.LSE,0QLR,LSE,Novartis AG,Common Stock,UK,GBP
 CH0012005267,NOT.STU,NOT,STU,NOVARTIS N (NOT.SG),Common Stock,Germany,EUR
 CH0012005267,NOVN.SW,NOVN,SW,Novartis AG,Common Stock,Switzerland,CHF
@@ -24,6 +26,7 @@ CH0432492467,2U3.STU,2U3,STU,Alcon Inc,Common Stock,Germany,EUR
 CH0432492467,ALC.SW,ALC,SW,Alcon AG,Common Stock,Switzerland,CHF
 CH0432492467,ALC.US,ALC,US,Alcon AG,Common Stock,USA,USD
 CH0432492467,2U3.XETRA,2U3,XETRA,Alcon Inc.,Common Stock,Germany,EUR
+GB00BRXH2664,HT3.F,HT3,F,Anglogold Ashanti,Common Stock,Germany,EUR
 US0079031078,AMD.F,AMD,F,Advanced Micro Devices Inc,Common Stock,Germany,EUR
 US0079031078,AMD.HM,AMD,HM,Advanced Micro Devices Inc,Common Stock,Germany,EUR
 US0079031078,AMD.STU,AMD,STU,Advanced Micro Devices Inc,Common Stock,Germany,EUR
@@ -52,6 +55,11 @@ US1912161007,CCC3.F,CCC3,F,The Coca-Cola Company,Common Stock,Germany,EUR
 US1912161007,CCC3.STU,CCC3,STU,The Coca-Cola Company,Common Stock,Germany,EUR
 US1912161007,KO.US,KO,US,The Coca-Cola Company,Common Stock,USA,USD
 US1912161007,CCC3.XETRA,CCC3,XETRA,The Coca-Cola Company,Common Stock,Germany,EUR
+US6516391066,NEM.F,NEM,F,Nemetschek SE,Common Stock,Germany,EUR
+US6516391066,NMM.F,NMM,F,Newmont Corporation,Common Stock,Germany,EUR
+US6516391066,NMM.STU,NMM,STU,Newmont Corporation,Common Stock,Germany,EUR
+US6516391066,NEM.US,NEM,US,Newmont Goldcorp Corp,Common Stock,USA,USD
+US6516391066,NMM.XETRA,NMM,XETRA,Newmont Corporation,Common Stock,Germany,EUR
 US67066G1040,NVD.DU,NVD,DU,NVIDIA Corporation,Common Stock,Germany,EUR
 US67066G1040,NVD.F,NVD,F,NVIDIA Corporation,Common Stock,Germany,EUR
 US67066G1040,NVD.HA,NVD,HA,NVIDIA Corporation,Common Stock,Germany,EUR
@@ -60,3 +68,4 @@ US67066G1040,NVD.MU,NVD,MU,NVIDIA Corporation,Common Stock,Germany,EUR
 US67066G1040,NVD.STU,NVD,STU,NVIDIA Corporation,Common Stock,Germany,EUR
 US67066G1040,NVDA.US,NVDA,US,NVIDIA Corporation,Common Stock,USA,USD
 US67066G1040,NVD.XETRA,NVD,XETRA,NVIDIA Corporation,Common Stock,Germany,EUR
+CH0012032048,ROP.SW,ROP,SW,Roche Holding AG,Common Stock,Switzerland,CHF

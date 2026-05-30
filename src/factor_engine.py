@@ -117,17 +117,17 @@ class FactorEngine:
 
     # --------------------------------------------------------- cov / corr
 
-    def factor_cov(self, years: int | None = 3) -> pd.DataFrame:
+    def factor_cov(self, years: int | None = 5) -> pd.DataFrame:
         """Annualised factor covariance matrix from daily log-returns."""
         r = self.build_returns(years=years)
         return r.cov() * 252
 
-    def factor_corr(self, years: int | None = 3) -> pd.DataFrame:
+    def factor_corr(self, years: int | None = 5) -> pd.DataFrame:
         """Factor correlation matrix from daily log-returns."""
         r = self.build_returns(years=years)
         return r.corr()
 
-    def factor_vol(self, years: int | None = 3) -> pd.Series:
+    def factor_vol(self, years: int | None = 5) -> pd.Series:
         """Annualised factor volatility from daily log-returns."""
         r = self.build_returns(years=years)
         return r.std() * np.sqrt(252)

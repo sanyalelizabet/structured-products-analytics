@@ -161,9 +161,20 @@ class TestBarrier:
         assert rc.barrier_breaches_final() == [False, False]
         assert rc.barrier_breached() is False
 
-    def test_barrier_breached_raises_for_non_european(self):
+    def test_american_matches_european_on_flat_projection(self):
+        # On this deterministic analytics path (flat spot to maturity) there is
+        # no intermediate price path, so continuous (American) observation
+        # reduces to the European terminal check — it must not raise, and must
+        # agree with the European result.
+        row_eur = make_brc_row(); row_eur["type_style"] = "european"
+        row_am  = make_brc_row(); row_am["type_style"]  = "american"
+        eur = ReverseConvertible(row_eur).barrier_breached()
+        am  = ReverseConvertible(row_am).barrier_breached()
+        assert am == eur
+
+    def test_barrier_breached_raises_for_unknown_style(self):
         row = make_brc_row()
-        row["type_style"] = "american"
+        row["type_style"] = "bermudan"
         rc = ReverseConvertible(row)
         with pytest.raises(NotImplementedError):
             rc.barrier_breached()

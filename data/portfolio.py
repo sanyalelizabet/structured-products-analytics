@@ -290,4 +290,47 @@ p7 = {
 }
 
 
-portfolio = pd.DataFrame([p1, p2, p3, p4, p5, p6, p7])
+# =========================================================================
+# p8 — Issuer-Callable Barrier Reverse Convertible, worst-of gold miners (JPM)
+# =========================================================================
+# Term sheet XS3338647111: 1-year 15.50% p.a. Callable BRC on a worst-of basket
+# of AngloGold Ashanti / Barrick / Newmont, USD 1'000 denomination.  Knock-In is
+# continuously monitored intra-day at 52% of initial (→ type_style "American",
+# barrier_pct 0.52); put strike = 100% of initial.  The Issuer may redeem at par
+# on two Optional Redemption Dates (25 Nov 2026, 25 Feb 2027) — modelled as an
+# optimal (value-minimising) issuer call.  Held 10 × USD 1'000 = USD 10'000.
+p8 = {
+    "product_id":              "XS3338647111",
+    "product_type":            "IC_BRC",
+    "type_style":              "American",   # continuous intra-day knock-in
+    "issuer":                  "J.P. Morgan Structured Products B.V.",
+    "issuer_rating":           "",
+    "issuer_country":          "NL",
+    "guarantor":               "JPMorgan Chase Bank, N.A.",
+    "guarantor_rating":        "Aa2",
+    "underlyings":             ["AngloGold Ashanti", "Barrick Mining", "Newmont"],
+    "underlying_isins":        ["GB00BRXH2664", "CA06849F1080", "US6516391066"],
+    "currency":                "USD",
+    "denomination":            1000,
+    "position_units":          10,
+    "notional":                10000,
+    "cost_price":              1.00,
+    "initial_levels":          [93.47, 40.60, 109.85],
+    "current_spots":           [93.47, 40.60, 109.85],
+    "current_spot_dates":      [None, None, None],
+    "strike":                  [93.47, 40.60, 109.85],   # Put Strike = 100% of initial
+    "barrier_pct":             0.52,                       # Knock-In = 52% of initial
+    "coupon":                  0.155,                      # 15.50% p.a., quarterly
+    "initial_fixing_date":     "2026-05-18",
+    "purchase_date":           "2026-05-28",               # Issue Date
+    "maturity_date":           "2027-05-25",
+    "coupon_dates":            ["2026-08-25", "2026-11-25",
+                                 "2027-02-25", "2027-05-25"],
+    "day_count":               "30/360",
+    "barrier_breached":        False,
+    # Issuer-callable: optional redemption (at par) dates — modelled as optimal.
+    "issuer_call_dates":       ["2026-11-25", "2027-02-25"],
+}
+
+
+portfolio = pd.DataFrame([p1, p2, p3, p4, p5, p6, p7, p8])

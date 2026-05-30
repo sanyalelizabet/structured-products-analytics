@@ -27,6 +27,7 @@ def vectorised_autocallable_rc_summary(
     row,
     price_paths: np.ndarray,
     date_range: pd.DatetimeIndex,
+    uncalled_breach_mask: np.ndarray | None = None,
 ) -> dict:
     """Vectorised payoff for an autocallable barrier reverse convertible.
 
@@ -47,6 +48,14 @@ def vectorised_autocallable_rc_summary(
     date_range : pd.DatetimeIndex
         Business-day grid corresponding to the ``n_days`` axis of
         ``price_paths``.
+
+    uncalled_breach_mask : np.ndarray of bool, optional
+        Per-path knock-in indicator, shape ``(n_paths,)``, for **American
+        (continuous)** barrier observation.  An autocalled path redeems at par
+        regardless of the barrier, so the mask only affects paths that run to
+        maturity: when supplied, those paths settle with this continuously
+        determined breach instead of the European final-fixing check.  When
+        ``None`` the uncalled paths use European observation.
 
     Returns
     -------
@@ -155,7 +164,14 @@ def vectorised_autocallable_rc_summary(
         uncalled_idx = np.flatnonzero(~autocalled)
         terminal_uncalled = price_paths[uncalled_idx, t_idx_terminal, :]
 
-        v = vectorised_european_rc_summary(row, terminal_uncalled)
+        # American observation: the uncalled paths carry a continuously
+        # determined knock-in (computed upstream over the full path); European
+        # observation falls back to the terminal-fixing check.
+        if uncalled_breach_mask is not None:
+            um = np.asarray(uncalled_breach_mask, dtype=bool)[uncalled_idx]
+            v = vectorised_european_rc_summary(row, terminal_uncalled, breach_mask=um)
+        else:
+            v = vectorised_european_rc_summary(row, terminal_uncalled)
 
         pnl[uncalled_idx]              = v["pnl"]
         return_pct[uncalled_idx]       = v["return_pct"]

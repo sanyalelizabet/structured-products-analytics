@@ -109,6 +109,13 @@ autocallable, or capital-protection note), yielding a per-path P&L and return.
 The product-level distribution is summarised by its mean, median, the 5th and
 95th percentiles, the 5 % expected shortfall, and the standard deviation.
 
+Where a barrier product is observed continuously (American observation), the
+knock-in is determined over the whole simulated path rather than at maturity
+alone, using the Brownian-bridge correction with this engine's own per-step
+diffusion variance and sampling one definite outcome per path so the loss
+distribution is preserved; see the barrier-observation methodology note. European
+observation (the default) uses the terminal fixing only.
+
 Portfolio aggregation is performed by summing the per-path P&L vectors across
 products within each currency, preserving the dependence structure induced by
 the shared random draws. Where a reference currency and a table of exchange

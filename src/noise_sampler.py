@@ -76,6 +76,23 @@ class NoiseSampler:
         """Standardised factor innovations, shape ``(n_paths, n_days, K)``."""
         return self.Z_factor
 
+    def knock_in_uniform(self, key: str, n_paths: int | None = None) -> np.ndarray:
+        """Reproducible ``U(0,1)`` draws for a continuous-barrier knock-in.
+
+        Keyed by ``key`` (e.g. a product id) so each product gets an independent
+        stream, derived from the master seed exactly like the idiosyncratic
+        blocks.  This keeps the engine a pure consumer of the sampler (no
+        engine-side seeding) and lets :meth:`regenerate` refresh the breach draws
+        together with the path noise.
+
+        Returns
+        -------
+        np.ndarray, shape ``(n_paths,)`` — one uniform per path.
+        """
+        n = self.n_paths if n_paths is None else int(n_paths)
+        rng = np.random.default_rng(_stable_isin_seed(f"knockin:{key}", self.seed))
+        return rng.random(n)
+
     def idio_noise_for(self, isins: Iterable[str]) -> np.ndarray:
         """Stack per-ISIN idio noise for a subset, in the requested order.
 
