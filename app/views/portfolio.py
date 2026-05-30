@@ -523,7 +523,7 @@ def _render_correlation_matrix(analytics, corr_df, underlying_df):
 
         sub = corr.loc[isins, isins].astype(float).clip(-1.0, 1.0).fillna(0.0)
         sub_arr = sub.to_numpy(dtype=float, copy=True)
-        np.fill_diagonal(sub_arr.values, 1.0)
+        np.fill_diagonal(sub_arr, 1.0)
         sub = pd.DataFrame(sub_arr, index=sub.index, columns=sub.columns)
         labels = [label_map.get(isin, isin) for isin in isins]
 
