@@ -3,7 +3,7 @@ Tests for EODClient — all HTTP calls are mocked.
 """
 import pytest
 from unittest.mock import patch, MagicMock
-from src.eod_client import EODClient
+from src.market_data.eod_client import EODClient
 from src.exceptions import DataUnavailableError
 
 

@@ -7,7 +7,7 @@ import requests
 from unittest.mock import MagicMock
 
 from src.exceptions import DataUnavailableError, NetworkError
-from src.snb_client import SNBClient
+from src.market_data.snb_client import SNBClient
 
 
 # A faithful slice of the SNB ``;``-delimited CSV: metadata header, a blank

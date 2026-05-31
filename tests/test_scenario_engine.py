@@ -15,8 +15,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.scenario_engine import ScenarioEngine
-from src.noise_sampler import NoiseSampler
+from src.risk.scenario_engine import ScenarioEngine
+from src.numerics.noise_sampler import NoiseSampler
 from tests.conftest import (
     make_portfolio, make_brc_row, make_mbrc_row,
     BETA_MAP, VOL_MAP, SCENARIOS,

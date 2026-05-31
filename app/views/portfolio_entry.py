@@ -24,7 +24,7 @@ import hashlib
 from app import portfolio_source as ps
 from app import portfolio_storage as storage
 from app.formatting import chf
-from src.portfolio_entry import (
+from src.portfolio.portfolio_entry import (
     ALL_TYPES,
     FIELDS,
     Field,
@@ -474,7 +474,7 @@ def _render_pdf_quickfill() -> None:
 
         # New file: run extraction once.
         try:
-            from src.term_sheet_extractor import extract_term_sheet, validate
+            from src.ingestion.term_sheet_extractor import extract_term_sheet, validate
             with st.spinner(f"Extracting from {uploaded.name}…"):
                 row = extract_term_sheet(pdf_bytes)
         except RuntimeError as e:

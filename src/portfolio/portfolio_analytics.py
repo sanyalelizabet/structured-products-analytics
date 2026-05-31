@@ -3,8 +3,8 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 from scipy.optimize import brentq
-from src.reverse_convertible import ReverseConvertible
-from src.capital_protection_note import CapitalProtectionNote
+from src.pricing.products.reverse_convertible import ReverseConvertible
+from src.pricing.products.capital_protection_note import CapitalProtectionNote
 
 log = logging.getLogger(__name__)
 

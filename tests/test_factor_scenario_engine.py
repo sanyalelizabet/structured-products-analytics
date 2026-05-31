@@ -18,10 +18,10 @@ import pandas as pd
 import pytest
 from unittest.mock import MagicMock
 
-from src.factor_engine import FACTORS, FactorEngine
-from src.factor_scenario_engine import FactorScenarioEngine
-from src.market_data_engine import MarketDataEngine
-from src.noise_sampler import NoiseSampler
+from src.risk.factor_engine import FACTORS, FactorEngine
+from src.risk.factor_scenario_engine import FactorScenarioEngine
+from src.market_data.market_data_engine import MarketDataEngine
+from src.numerics.noise_sampler import NoiseSampler
 from tests.conftest import make_brc_row, make_mbrc_row
 
 
@@ -399,7 +399,7 @@ class TestScenarioPresets:
 
     def test_every_event_uses_known_factor_codes(self):
         from data.factor_scenarios import FACTOR_SCENARIO_PRESETS
-        from src.factor_engine import FACTORS as FACTOR_UNIVERSE
+        from src.risk.factor_engine import FACTORS as FACTOR_UNIVERSE
         for name, preset in FACTOR_SCENARIO_PRESETS.items():
             for ev in preset.get("events", []):
                 shock_keys = set(ev.get("factor_shock", {}).keys())
@@ -409,7 +409,7 @@ class TestScenarioPresets:
 
     def test_every_event_uses_known_recovery_archetype(self):
         from data.factor_scenarios import FACTOR_SCENARIO_PRESETS
-        from src.scenario_archetypes import EVENT_RECOVERY_ARCHETYPES
+        from src.risk.scenario_archetypes import EVENT_RECOVERY_ARCHETYPES
         for name, preset in FACTOR_SCENARIO_PRESETS.items():
             for ev in preset.get("events", []):
                 if "recovery" in ev:
@@ -418,7 +418,7 @@ class TestScenarioPresets:
 
     def test_every_preset_uses_known_initial_market_state(self):
         from data.factor_scenarios import FACTOR_SCENARIO_PRESETS
-        from src.scenario_archetypes import INITIAL_MARKET_STATES
+        from src.risk.scenario_archetypes import INITIAL_MARKET_STATES
         for name, preset in FACTOR_SCENARIO_PRESETS.items():
             state = preset.get("initial_market_state")
             if state is not None:

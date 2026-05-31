@@ -16,11 +16,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.reverse_convertible import ReverseConvertible
-from src.scenario_engine import ScenarioEngine
-from src.market_data_engine import MarketDataEngine
-from src.correlation_engine import CorrelationEngine
-from src.noise_sampler import NoiseSampler
+from src.pricing.products.reverse_convertible import ReverseConvertible
+from src.risk.scenario_engine import ScenarioEngine
+from src.market_data.market_data_engine import MarketDataEngine
+from src.risk.correlation_engine import CorrelationEngine
+from src.numerics.noise_sampler import NoiseSampler
 from tests.conftest import (
     make_brc_row, make_mbrc_row, make_portfolio,
     BETA_MAP, VOL_MAP,

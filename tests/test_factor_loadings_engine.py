@@ -12,9 +12,9 @@ import pandas as pd
 import pytest
 from unittest.mock import MagicMock
 
-from src.market_data_engine import MarketDataEngine
-from src.factor_engine import FACTORS, FactorEngine
-from src.factor_loadings_engine import FactorLoadingsEngine
+from src.market_data.market_data_engine import MarketDataEngine
+from src.risk.factor_engine import FACTORS, FactorEngine
+from src.risk.factor_loadings_engine import FactorLoadingsEngine
 
 
 # ──────────────────────────────────────────────────────────────────────────

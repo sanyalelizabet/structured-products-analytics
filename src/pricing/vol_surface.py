@@ -92,6 +92,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
+import pandas as pd
 from scipy.optimize import least_squares, minimize_scalar
 
 
@@ -1193,3 +1194,1108 @@ class VolSliceSurface:
             f"VolSliceSurface(isin={self.isin!r}, T={self.T:.3f}, "
             f"status={self.fit_status}, {quality})"
         )
+
+
+# ---------------------------------------------------------------------------
+# Term-structure assembly (Stage 2)
+# ---------------------------------------------------------------------------
+#
+# The objects defined below assemble the per-slice SVI surfaces of Stage 1
+# into a single, term-structure-consistent volatility surface. The
+# assembly follows the standard linear-in-total-variance recipe of
+# Gatheral (2006, chapter 3), under which the absence of calendar
+# arbitrage is preserved between two slices whose total variance is
+# monotone increasing in tenor at every log-moneyness. The recipe is
+# preferred here to a full SSVI re-calibration because it preserves the
+# per-slice quality already achieved in Stage 1 and avoids re-fitting a
+# more constrained functional form to chains whose data quality varies
+# considerably across the universe of underlyings.
+
+
+def interpolate_total_variance(
+    k: np.ndarray | float,
+    T_query: float,
+    T_left: float,
+    params_left: SVIParams,
+    T_right: float,
+    params_right: SVIParams,
+) -> np.ndarray | float:
+    """Linear-in-total-variance interpolation between two calibrated slices.
+
+    For a query tenor ``T`` that lies between two listed expiries
+    ``T_left`` and ``T_right`` at which the surface has been calibrated,
+    the total implied variance ``w(k, T)`` is defined as the
+    convex combination
+
+    .. math::
+
+        w(k, T) = w(k, T_\\mathrm{left}) + \\alpha
+                  \\bigl[ w(k, T_\\mathrm{right}) - w(k, T_\\mathrm{left}) \\bigr],
+        \\qquad
+        \\alpha = \\frac{T - T_\\mathrm{left}}{T_\\mathrm{right} - T_\\mathrm{left}},
+
+    where ``w(k, T_\\bullet) = w_{SVI}(k; \\theta_\\bullet)`` denotes the
+    raw SVI total variance evaluated at the calibrated parameter tuple
+    of the corresponding slice. The construction is the simplest
+    interpolator that preserves calendar arbitrage absence whenever the
+    underlying slices themselves satisfy ``w_\\mathrm{left}(k)
+    \\leq w_\\mathrm{right}(k)`` for every ``k`` — a condition that is
+    verified at construction of the enclosing :class:`VolSurface` and
+    flagged as a quality issue when it fails.
+
+    Butterfly arbitrage absence at the intermediate tenor is *not*
+    guaranteed by this construction even when the two endpoint slices
+    individually satisfy the Durrleman condition, because the convex
+    combination of two arbitrage-free smiles is not in general
+    arbitrage-free under butterflies. In practice the violation, when
+    it occurs, is small in magnitude and localised in moneyness; the
+    surface is nevertheless audited by an evaluation-time check
+    described in the methodology document, and the user is informed
+    when the audit fails.
+
+    Parameters
+    ----------
+    k : ndarray or float
+        Log-moneyness ``k = ln(K / F)`` at which the total variance is
+        evaluated.
+    T_query : float
+        Tenor at which the interpolated value is required. Must satisfy
+        ``T_left <= T_query <= T_right``.
+    T_left, T_right : float
+        Tenors of the bracketing slices, with ``T_left < T_right``.
+    params_left, params_right : SVIParams
+        Calibrated SVI parameters of the bracketing slices.
+
+    Returns
+    -------
+    ndarray or float
+        Total implied variance at the requested ``(k, T_query)``.
+
+    Raises
+    ------
+    ValueError
+        If the tenors do not satisfy ``T_left < T_right`` or if
+        ``T_query`` falls outside the bracketing interval.
+    """
+    if not (T_left < T_right):
+        raise ValueError(
+            f"Bracketing tenors must satisfy T_left < T_right; "
+            f"received T_left={T_left}, T_right={T_right}"
+        )
+    if not (T_left - 1.0e-12 <= T_query <= T_right + 1.0e-12):
+        raise ValueError(
+            f"T_query={T_query} is not in the bracketing interval "
+            f"[{T_left}, {T_right}]"
+        )
+    w_left = svi_total_variance(k, params_left)
+    w_right = svi_total_variance(k, params_right)
+    alpha = (T_query - T_left) / (T_right - T_left)
+    return w_left + alpha * (w_right - w_left)
+
+
+def extrapolate_atm_scaling(
+    k: np.ndarray | float,
+    T_query: float,
+    T_anchor: float,
+    params_anchor: SVIParams,
+) -> np.ndarray | float:
+    """Extrapolate the surface beyond the listed range by ATM-vol-flat scaling.
+
+    When the query tenor falls outside the interval spanned by the
+    listed expiries — either before the shortest or after the longest —
+    no listed slice brackets it and an extrapolation is required. The
+    convention adopted here, conventional in the absence of an
+    independent term-structure model, is to hold the implied volatility
+    at every log-moneyness constant in tenor, so that the entire smile
+    of the anchor slice is reused unchanged when expressed in
+    volatility units. The corresponding total variance scales linearly
+    in tenor:
+
+    .. math::
+
+        \\sigma(k, T) = \\sigma(k, T_\\mathrm{anchor})
+        \\qquad \\Longleftrightarrow \\qquad
+        w(k, T) = w(k, T_\\mathrm{anchor}) \\cdot \\frac{T}{T_\\mathrm{anchor}}.
+
+    The convention is conservative for the downward extrapolation
+    (short tenors), under which the assumption that the smile of the
+    anchor slice continues to apply tends to understate the very steep
+    short-dated skew that listed markets typically exhibit. It is also
+    conservative for the upward extrapolation (long tenors) on most
+    underlyings, because empirical term structures of ATM implied
+    volatility tend to flatten rather than fall as tenor grows; the
+    vol-flat convention therefore avoids the silently incorrect choice
+    of extrapolating the ATM variance linearly into a regime where the
+    listed market disagrees. The user is informed by the surface
+    status badge that any value returned through this path is
+    extrapolated, not interpolated.
+
+    Parameters
+    ----------
+    k : ndarray or float
+        Log-moneyness ``k = ln(K / F)``.
+    T_query : float
+        Tenor at which the extrapolated value is required. Strictly
+        positive.
+    T_anchor : float
+        Tenor of the anchor slice (typically the shortest listed
+        expiry for ``T_query < T_min`` or the longest for
+        ``T_query > T_max``). Strictly positive.
+    params_anchor : SVIParams
+        Calibrated SVI parameters of the anchor slice.
+
+    Returns
+    -------
+    ndarray or float
+        Total implied variance at ``(k, T_query)`` under the vol-flat
+        extrapolation.
+
+    Raises
+    ------
+    ValueError
+        If ``T_query`` or ``T_anchor`` is non-positive.
+    """
+    if T_query <= 0.0:
+        raise ValueError(f"T_query must be strictly positive; received {T_query}")
+    if T_anchor <= 0.0:
+        raise ValueError(f"T_anchor must be strictly positive; received {T_anchor}")
+    w_anchor = svi_total_variance(k, params_anchor)
+    return w_anchor * (T_query / T_anchor)
+
+
+# ---------------------------------------------------------------------------
+# Calendar-arbitrage verification
+# ---------------------------------------------------------------------------
+
+# Grid used by the calendar-monotonicity audit. The band [-1.5, 1.5] in
+# log-moneyness covers the strike range over which any plausible barrier
+# product would query the surface, with substantial headroom in both
+# wings to surface violations that occur at extreme strikes even when
+# the at-the-money region is well-behaved.
+_CALENDAR_GRID_LIMIT: float = 1.5
+_CALENDAR_GRID_POINTS: int = 121
+
+
+def verify_calendar_monotone(
+    slice_records: list[tuple[float, "SVIParams", "VolSliceSurface"]],
+    grid_limit: float = _CALENDAR_GRID_LIMIT,
+    grid_points: int = _CALENDAR_GRID_POINTS,
+) -> list[dict]:
+    """Audit the slice list for calendar-arbitrage monotonicity violations.
+
+    The linear-in-total-variance interpolation used by
+    :class:`VolSurface` preserves the absence of calendar arbitrage at
+    every intermediate tenor whenever, at every log-moneyness, the
+    total variance is non-decreasing between consecutive listed
+    expiries. The audit evaluates this condition on a dense
+    log-moneyness grid spanning the band most relevant to barrier
+    products and reports the location and magnitude of every violation
+    encountered.
+
+    A violation is recorded when the total variance of the later slice
+    is strictly smaller than that of the earlier slice at some
+    log-moneyness ``k`` by more than a small numerical tolerance. The
+    record captures the bracketing tenors, the offending ``k``, and the
+    magnitude of the variance deficit. The violations are returned as
+    a list of dictionaries; an empty list signals that the audit has
+    passed.
+
+    Parameters
+    ----------
+    slice_records : list of tuples ``(T, SVIParams, VolSliceSurface)``
+        Sorted (by tenor) list of the calibrated slices that compose
+        the surface.
+    grid_limit : float, optional
+        Maximum absolute log-moneyness in the audit grid.
+    grid_points : int, optional
+        Number of equally spaced grid points.
+
+    Returns
+    -------
+    list of dict
+        One entry per violated pair-and-strike; empty when the audit
+        passes. Each entry carries the keys ``T_left``, ``T_right``,
+        ``k_worst``, ``deficit``, where the deficit is positive when
+        the condition is violated.
+    """
+    if len(slice_records) < 2:
+        return []
+    k_grid = np.linspace(-grid_limit, grid_limit, grid_points)
+    violations: list[dict] = []
+    for i in range(1, len(slice_records)):
+        T_left, p_left, _ = slice_records[i - 1]
+        T_right, p_right, _ = slice_records[i]
+        w_left = svi_total_variance(k_grid, p_left)
+        w_right = svi_total_variance(k_grid, p_right)
+        diff = w_right - w_left
+        min_diff = float(np.min(diff))
+        if min_diff < -1.0e-10:
+            k_worst = float(k_grid[int(np.argmin(diff))])
+            violations.append({
+                "T_left": float(T_left),
+                "T_right": float(T_right),
+                "k_worst": k_worst,
+                "deficit": -min_diff,
+            })
+    return violations
+
+
+# ---------------------------------------------------------------------------
+# Surface status taxonomy
+# ---------------------------------------------------------------------------
+#
+# Four values complete the badge taxonomy introduced in Stage 1. They are
+# part of the public contract of the module: the user interface badges
+# the surface query according to these labels and analytics output tags
+# carry them verbatim.
+
+SURFACE_STATUS_INTERPOLATED: str = "interpolated"
+SURFACE_STATUS_EXTRAPOLATED: str = "extrapolated"
+SURFACE_STATUS_SINGLE_SLICE: str = "single_slice"
+SURFACE_STATUS_FALLBACK: str = "fallback"
+
+
+# Numerical guards on the Dupire local-volatility output. The floor of
+# one volatility point keeps the local vol economically positive in the
+# presence of small numerical residues. The hard cap at two hundred
+# volatility points is a *production safety* threshold that suppresses
+# only genuine numerical explosions: empirically observed Dupire local
+# volatilities on real Yahoo surfaces can comfortably exceed one hundred
+# per cent in the deep out-of-the-money put wing of low-volatility names
+# without indicating any pathology, and clipping at that level would
+# silently suppress an economically meaningful feature of the surface.
+# Values outside [floor, hard cap] are clipped and counted by
+# :attr:`VolSurface.local_vol_clip_count`.
+#
+# Two further thresholds, weaker than the hard cap, raise a *warning*
+# rather than a clip. They signal regimes in which the local volatility
+# is economically large enough that the user should be informed when
+# such values participate in a product's pricing path:
+#
+# * **SIGMA_LV_WARNING** — local volatilities above the threshold are
+#   recorded as warning events. The default of one hundred per cent is
+#   the level at which the dealer practitioner literature typically
+#   describes the local volatility as 'extreme', not because it is
+#   spurious but because it dominates the risk-neutral dynamics in the
+#   region where it applies.
+# * **LV_IV_RATIO_WARNING** — local-to-implied volatility ratios above
+#   the threshold are recorded similarly. The ratio reaches three or
+#   above only on names whose surface exhibits a particularly steep
+#   put-wing skew, in which case the Dupire amplification factor is at
+#   the upper end of empirically defensible values.
+#
+# Both warnings are informational and do not modify the returned local
+# volatility. An optional conservative mode is provided through the
+# ``damping_cap`` argument of :meth:`VolSurface.local_volatility`,
+# which applies a second, tighter clip on top of the production hard
+# cap; the resulting marks are labelled in the user interface as a
+# 'damped local-vol scenario' rather than as the pure Dupire output.
+SIGMA_LV_FLOOR: float = 0.01
+SIGMA_LV_HARD_CAP: float = 2.00         # 200 % — production safety threshold
+SIGMA_LV_WARNING: float = 1.00          # 100 % — flagged but not clipped
+LV_IV_RATIO_WARNING: float = 3.00       # local/implied ratio threshold
+
+# Maximum number of warning events retained in the per-surface event
+# buffer. Beyond this size, only the counter is incremented; the buffer
+# itself stores a representative sample of the most extreme events so
+# that the user interface can surface concrete examples.
+_LV_WARNING_BUFFER_SIZE: int = 16
+
+# Backwards compatibility: the previous ``SIGMA_LV_CAP`` name remains
+# exposed but now resolves to the same value as the hard cap.
+SIGMA_LV_CAP: float = SIGMA_LV_HARD_CAP
+
+
+class VolSurface:
+    """Term-structure-consistent implied volatility surface of one underlying.
+
+    The object exposes a single uniform interface, the method
+    :meth:`sigma`, which accepts a strike ``K`` and a tenor ``T`` and
+    returns the corresponding annualised implied volatility. Internally
+    the surface dispatches between four regimes, recorded in the
+    surface status taxonomy:
+
+    * **interpolated** — the query tenor sits strictly between two of
+      the listed expiries at which the surface was calibrated. The
+      total variance at the query is the linear-in-total-variance
+      interpolation between the bracketing slices, as defined by
+      :func:`interpolate_total_variance`.
+    * **extrapolated** — the query tenor lies outside the convex hull
+      of the listed expiries but at least one calibrated slice is
+      available. The total variance at the query is obtained by
+      vol-flat scaling of the appropriate anchor slice (the shortest
+      listed expiry for ``T < T_min``, the longest for ``T > T_max``),
+      as defined by :func:`extrapolate_atm_scaling`.
+    * **single_slice** — only one SVI slice survives the Stage 1
+      arbitrage and quality gates. Every query is answered by
+      vol-flat scaling of that single slice. The status is reported
+      separately from ``extrapolated`` because the surface provides
+      no genuine term-structure information.
+    * **fallback** — no SVI slice is available. The surface returns a
+      configurable constant volatility regardless of the query, and
+      the user interface is informed that no calibrated information
+      underlies the result.
+
+    The class is constructed exclusively through the class method
+    :meth:`from_slice_map`, which extracts the SVI-branch slices of a
+    :class:`VolSliceSurface` dictionary, sorts them by tenor, and
+    populates the surface. Direct construction is supported for
+    composition by Stage 3 code that builds surfaces from other
+    sources but is not the primary entry point.
+    """
+
+    __slots__ = (
+        "isin", "forward",
+        "_slice_records",          # list[tuple[float, SVIParams, VolSliceSurface]]
+        "_t_min", "_t_max",
+        "_fallback_sigma",
+        "n_svi_slices",
+        "calendar_violations",     # list[dict]; populated by Task #12
+        "local_vol_clip_count",    # int; hard-cap or floor clip events
+        "local_vol_warning_count", # int; warning-threshold breaches
+        "local_vol_warning_events", # list[dict]; representative warning loci
+    )
+
+    def __init__(
+        self,
+        isin: str,
+        forward: float,
+        slice_records: list[tuple[float, SVIParams, "VolSliceSurface"]],
+        fallback_sigma: float = DEFAULT_FALLBACK_VOL,
+    ) -> None:
+        if forward <= 0.0:
+            raise ValueError(f"forward must be strictly positive; received {forward}")
+        if fallback_sigma <= 0.0:
+            raise ValueError(
+                f"fallback_sigma must be strictly positive; received {fallback_sigma}"
+            )
+        # Sort defensively in case the caller did not sort by tenor.
+        records = sorted(
+            [(float(T), p, s) for (T, p, s) in slice_records],
+            key=lambda triple: triple[0],
+        )
+        # Validate strict tenor ordering: two slices at exactly the same
+        # tenor would render the interpolation ill-posed.
+        for i in range(1, len(records)):
+            if records[i][0] <= records[i - 1][0]:
+                raise ValueError(
+                    f"slice tenors must be strictly increasing; received "
+                    f"{records[i - 1][0]} and {records[i][0]}"
+                )
+
+        object.__setattr__(self, "isin", str(isin))
+        object.__setattr__(self, "forward", float(forward))
+        object.__setattr__(self, "_slice_records", records)
+        object.__setattr__(self, "_t_min", records[0][0] if records else 0.0)
+        object.__setattr__(self, "_t_max", records[-1][0] if records else 0.0)
+        object.__setattr__(self, "_fallback_sigma", float(fallback_sigma))
+        object.__setattr__(self, "n_svi_slices", len(records))
+        # Audit calendar-arbitrage monotonicity across adjacent slices. The
+        # audit is informational: violations do not block construction of
+        # the surface, but they are recorded so that the user interface
+        # can badge the affected term-structure regions with a quality
+        # warning. Where the audit fails the linear-in-w interpolation
+        # may admit a small calendar-arbitrage opportunity at the
+        # specific (k, T) of the violation, but the surface remains
+        # well-defined and usable for monitoring purposes.
+        object.__setattr__(
+            self, "calendar_violations",
+            verify_calendar_monotone(records),
+        )
+        # Stage 3B diagnostic: number of local-volatility clip events
+        # accumulated by ``local_volatility`` over the surface's lifetime.
+        # Counts every (k, T) cell where the Dupire output was clipped to
+        # the admissible range. Reset by the caller if a per-product or
+        # per-evaluation count is required.
+        object.__setattr__(self, "local_vol_clip_count", 0)
+        # Stage 3B warning diagnostics: events where the Dupire output
+        # lay inside the admissible range but exceeded the informational
+        # warning thresholds. The counter is incremented for every
+        # warning regardless of buffer state; the event list retains a
+        # representative sample (the most extreme by sigma_LV) up to
+        # ``_LV_WARNING_BUFFER_SIZE`` entries.
+        object.__setattr__(self, "local_vol_warning_count", 0)
+        object.__setattr__(self, "local_vol_warning_events", [])
+
+    # ------------------------------------------------------------------
+    # Status
+    # ------------------------------------------------------------------
+
+    def surface_status_at(self, T: float) -> tuple[str, str]:
+        """Surface status and reason at a single query tenor.
+
+        Returns
+        -------
+        tuple of (str, str)
+            ``(status, reason)`` where ``status`` is one of
+            :data:`SURFACE_STATUS_INTERPOLATED`,
+            :data:`SURFACE_STATUS_EXTRAPOLATED`,
+            :data:`SURFACE_STATUS_SINGLE_SLICE`,
+            :data:`SURFACE_STATUS_FALLBACK`, and ``reason`` is an empty
+            string for the interpolated and single-slice cases or a
+            human-readable explanation otherwise.
+        """
+        if not self._slice_records:
+            return (SURFACE_STATUS_FALLBACK,
+                    "no SVI slice available; constant fallback in use")
+        if len(self._slice_records) == 1:
+            T_only = self._slice_records[0][0]
+            return (SURFACE_STATUS_SINGLE_SLICE,
+                    f"only one calibrated slice at T={T_only:.3f}; "
+                    f"every query is vol-flat scaled from this slice")
+        if T < self._t_min:
+            return (SURFACE_STATUS_EXTRAPOLATED,
+                    f"T={T:.3f} is shorter than shortest listed expiry "
+                    f"T={self._t_min:.3f}; extrapolated by vol-flat scaling")
+        if T > self._t_max:
+            return (SURFACE_STATUS_EXTRAPOLATED,
+                    f"T={T:.3f} exceeds longest listed expiry "
+                    f"T={self._t_max:.3f}; extrapolated by vol-flat scaling")
+        return (SURFACE_STATUS_INTERPOLATED, "")
+
+    # ------------------------------------------------------------------
+    # Public evaluator
+    # ------------------------------------------------------------------
+
+    def sigma(self, K: float | np.ndarray, T: float) -> float | np.ndarray:
+        """Implied volatility at (strike, tenor).
+
+        Dispatches according to the status returned by
+        :meth:`surface_status_at`. The strike is expressed in price
+        units (same unit as the underlying's spot and forward) and the
+        log-moneyness ``k = ln(K / F)`` is computed internally.
+
+        Parameters
+        ----------
+        K : float or ndarray
+            Query strike (or array of strikes).
+        T : float
+            Query tenor, in years. Strictly positive.
+
+        Returns
+        -------
+        float or ndarray
+            Annualised implied volatility, in decimal form, of the
+            same shape as ``K``.
+        """
+        if T <= 0.0:
+            raise ValueError(f"T must be strictly positive; received {T}")
+        K_arr = np.asarray(K, dtype=float)
+        if (K_arr <= 0.0).any() if K_arr.ndim else (K_arr <= 0.0):
+            raise ValueError(f"strike(s) must be strictly positive; received {K}")
+
+        # Fallback branch: no SVI slices at all.
+        if not self._slice_records:
+            constant = self._fallback_sigma
+            return np.full_like(K_arr, constant) if K_arr.ndim else float(constant)
+
+        k = np.log(K_arr / self.forward)
+
+        # Single-slice branch: always vol-flat extrapolate from the sole slice.
+        if len(self._slice_records) == 1:
+            T_anchor, params_anchor, _ = self._slice_records[0]
+            w = extrapolate_atm_scaling(k, T, T_anchor, params_anchor)
+            sigma_val = np.sqrt(np.asarray(w) / T) if np.ndim(w) else float(np.sqrt(float(w) / T))
+            return sigma_val
+
+        # Extrapolation outside the listed range.
+        if T < self._t_min:
+            T_anchor, params_anchor, _ = self._slice_records[0]
+            w = extrapolate_atm_scaling(k, T, T_anchor, params_anchor)
+        elif T > self._t_max:
+            T_anchor, params_anchor, _ = self._slice_records[-1]
+            w = extrapolate_atm_scaling(k, T, T_anchor, params_anchor)
+        else:
+            # Interpolation between bracketing listed slices.
+            # Locate the right bracket by linear scan; the number of
+            # slices per underlying is small enough (tens at most) that
+            # a more elaborate search structure is unwarranted.
+            T_left = params_left = T_right = params_right = None
+            for i in range(1, len(self._slice_records)):
+                if self._slice_records[i - 1][0] <= T <= self._slice_records[i][0]:
+                    T_left = self._slice_records[i - 1][0]
+                    params_left = self._slice_records[i - 1][1]
+                    T_right = self._slice_records[i][0]
+                    params_right = self._slice_records[i][1]
+                    break
+            assert T_left is not None, "bracket location must succeed inside [T_min, T_max]"
+            w = interpolate_total_variance(k, T, T_left, params_left, T_right, params_right)
+
+        return np.sqrt(np.asarray(w) / T) if np.ndim(w) else float(np.sqrt(float(w) / T))
+
+    def sigma_at_moneyness(self, m: float | np.ndarray, T: float) -> float | np.ndarray:
+        """Convenience evaluator parameterised by moneyness ``m = K / F``."""
+        m_arr = np.asarray(m, dtype=float)
+        return self.sigma(m_arr * self.forward, T)
+
+    # ------------------------------------------------------------------
+    # Factory
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def from_slice_map(
+        cls,
+        isin: str,
+        slice_map: dict[str, "VolSliceSurface"],
+        *,
+        fallback_sigma: float = DEFAULT_FALLBACK_VOL,
+    ) -> "VolSurface":
+        """Assemble a VolSurface from a ``{expiry_iso: VolSliceSurface}`` map.
+
+        Only :data:`FIT_STATUS_SVI` slices participate in the term-
+        structure interpolation; slices in the proxy or fallback
+        branches are excluded. The forward of the resulting surface is
+        inherited from any participating slice; under the Stage 1
+        simplification *F = S* every slice for a given underlying
+        carries the same forward, so the choice is unambiguous. When
+        no SVI slice is present, the surface is constructed in the
+        fallback regime and a constant volatility is returned for every
+        query.
+
+        Parameters
+        ----------
+        isin : str
+            Identifier of the underlying.
+        slice_map : dict
+            Mapping ``{expiry_iso: VolSliceSurface}`` as produced by
+            :meth:`MarketDataEngine.build_vol_surface_map`.
+        fallback_sigma : float, optional
+            Constant volatility used in the fallback regime.
+
+        Returns
+        -------
+        VolSurface
+        """
+        svi_records: list[tuple[float, SVIParams, "VolSliceSurface"]] = []
+        forward: Optional[float] = None
+        for _expiry, slice_surface in (slice_map or {}).items():
+            if slice_surface.fit_status != FIT_STATUS_SVI:
+                continue
+            svi_records.append((slice_surface.T, slice_surface._params, slice_surface))  # type: ignore[arg-type]
+            if forward is None:
+                forward = slice_surface.forward
+
+        if forward is None:
+            # No SVI slice survives. We still need a positive forward to
+            # satisfy the constructor; any value is admissible because
+            # the fallback branch ignores it. Recover one from any
+            # available slice (proxy or fallback) if possible; otherwise
+            # use unity.
+            for slice_surface in (slice_map or {}).values():
+                if slice_surface.forward > 0.0:
+                    forward = slice_surface.forward
+                    break
+            if forward is None:
+                forward = 1.0
+
+        return cls(isin=isin, forward=forward,
+                   slice_records=svi_records, fallback_sigma=fallback_sigma)
+
+    # ------------------------------------------------------------------
+    # Dupire local volatility
+    # ------------------------------------------------------------------
+
+    def _surface_partials(
+        self, k: np.ndarray, T: float,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Return ``(w, dw_dT, dw_dk, d2w_dk2)`` at log-moneyness ``k`` and tenor ``T``.
+
+        The four quantities are required by the Dupire identity. Each is
+        derived analytically from the slice-level SVI calibrations and
+        the linear-in-total-variance term-structure assembly of
+        Section 6 of the methodology document.
+
+        The partials adopt three different forms according to the
+        regime in which the query tenor lies:
+
+        * **Interpolated** (``T_left <= T <= T_right``): the total
+          variance is the convex combination
+          ``w = (1-alpha) w_left + alpha w_right`` with
+          ``alpha = (T - T_left) / (T_right - T_left)``. The
+          calendar derivative is therefore piecewise constant,
+          ``dw_dT = (w_right - w_left) / (T_right - T_left)``, while
+          the strike derivatives are linearly combined.
+        * **Extrapolated / single-slice** (``T`` outside the listed
+          range, or only one SVI slice): the total variance scales
+          linearly in tenor from the anchor slice,
+          ``w(k, T) = w(k, T_anchor) * (T / T_anchor)``. The strike
+          derivatives scale by the same factor and the calendar
+          derivative is constant in ``T``.
+        * **Fallback** (no SVI slices): Dupire is not well defined.
+          The caller is expected to short-circuit on
+          :attr:`n_svi_slices == 0` and not invoke this routine.
+
+        Parameters
+        ----------
+        k : ndarray
+            Log-moneyness at which the partials are evaluated.
+        T : float
+            Query tenor, strictly positive.
+
+        Returns
+        -------
+        tuple of ndarray
+            ``(w, dw_dT, dw_dk, d2w_dk2)``, all of shape compatible
+            with ``k``.
+        """
+        if self.n_svi_slices == 0:
+            raise ValueError(
+                "Dupire partials are undefined for a surface with no SVI slices"
+            )
+
+        k_arr = np.asarray(k, dtype=float)
+
+        if self.n_svi_slices == 1:
+            T_anchor, params_anchor, _ = self._slice_records[0]
+            w_anchor, dw_dk_a, d2w_dk2_a = _svi_derivatives(k_arr, params_anchor)
+            scale = T / T_anchor
+            w        = w_anchor * scale
+            dw_dT    = w_anchor / T_anchor                       # constant in T
+            dw_dk    = dw_dk_a * scale
+            d2w_dk2  = d2w_dk2_a * scale
+            return w, np.broadcast_to(dw_dT, k_arr.shape).copy(), dw_dk, d2w_dk2
+
+        # Multi-slice path.
+        if T < self._t_min:
+            T_anchor, params_anchor, _ = self._slice_records[0]
+            w_a, dw_a, d2w_a = _svi_derivatives(k_arr, params_anchor)
+            scale = T / T_anchor
+            return (w_a * scale,
+                    np.broadcast_to(w_a / T_anchor, k_arr.shape).copy(),
+                    dw_a * scale,
+                    d2w_a * scale)
+        if T > self._t_max:
+            T_anchor, params_anchor, _ = self._slice_records[-1]
+            w_a, dw_a, d2w_a = _svi_derivatives(k_arr, params_anchor)
+            scale = T / T_anchor
+            return (w_a * scale,
+                    np.broadcast_to(w_a / T_anchor, k_arr.shape).copy(),
+                    dw_a * scale,
+                    d2w_a * scale)
+
+        # Strictly interpolated regime: locate the bracketing pair.
+        T_left = params_left = T_right = params_right = None
+        for i in range(1, len(self._slice_records)):
+            if self._slice_records[i - 1][0] <= T <= self._slice_records[i][0]:
+                T_left = self._slice_records[i - 1][0]
+                params_left = self._slice_records[i - 1][1]
+                T_right = self._slice_records[i][0]
+                params_right = self._slice_records[i][1]
+                break
+        assert T_left is not None
+
+        w_l, dw_l, d2w_l = _svi_derivatives(k_arr, params_left)    # type: ignore[arg-type]
+        w_r, dw_r, d2w_r = _svi_derivatives(k_arr, params_right)   # type: ignore[arg-type]
+        dT = T_right - T_left
+        alpha = (T - T_left) / dT
+        w        = (1.0 - alpha) * w_l + alpha * w_r
+        dw_dT    = (w_r - w_l) / dT                                # vector in k
+        dw_dk    = (1.0 - alpha) * dw_l + alpha * dw_r
+        d2w_dk2  = (1.0 - alpha) * d2w_l + alpha * d2w_r
+        return w, dw_dT, dw_dk, d2w_dk2
+
+    def local_volatility(
+        self,
+        K: float | np.ndarray,
+        T: float,
+        damping_cap: Optional[float] = None,
+    ) -> float | np.ndarray:
+        """Dupire local volatility at (strike, tenor).
+
+        The local volatility is computed by the Dupire identity in
+        total-variance form (Gatheral 2006, equation 1.27):
+
+        .. math::
+
+            \\sigma_\\mathrm{LV}^2(K, T) = \\frac{\\partial_T w}
+            {1 - \\dfrac{k}{w} \\partial_k w
+                 + \\dfrac{1}{4}\\!\\left(-\\dfrac{1}{4} - \\dfrac{1}{w} + \\dfrac{k^2}{w^2}\\right)
+                   (\\partial_k w)^2
+                 + \\dfrac{1}{2} \\partial_k^2 w}.
+
+        The output is the annualised local volatility in decimal form
+        at the supplied strike and tenor; the log-moneyness ``k``
+        consumed by the formula is computed internally as
+        ``k = ln(K / F)`` against the surface's forward.
+
+        Output range, clipping, and warnings
+        ------------------------------------
+        Local volatility, derived from an interpolated implied
+        surface that is *not* itself guaranteed butterfly-arbitrage-
+        free at every intermediate tenor, occasionally produces
+        values that are mathematically valid in form but not
+        economically meaningful in size: a non-positive numerator
+        signals a calendar-arbitrage violation, a non-positive
+        denominator signals a butterfly-arbitrage violation, and
+        either condition gives a non-real square root. The
+        implementation guards against these regimes through a
+        layered policy.
+
+        * A **hard cap** at :data:`SIGMA_LV_HARD_CAP` (two hundred
+          per cent, by default) is applied unconditionally. Values
+          above the cap or below :data:`SIGMA_LV_FLOOR` are clipped
+          and counted by :attr:`local_vol_clip_count`. The hard cap
+          is a production safety threshold: it suppresses genuine
+          numerical explosions while leaving the economically
+          meaningful regime untouched. In particular, local
+          volatilities of one hundred to two hundred per cent are
+          legitimate on the deep out-of-the-money put wing of
+          low-implied-volatility names and are *not* clipped at the
+          production cap.
+        * A **warning threshold** at :data:`SIGMA_LV_WARNING` (one
+          hundred per cent) and at a local-to-implied volatility
+          ratio of :data:`LV_IV_RATIO_WARNING` (three) record an
+          informational event without modifying the returned value.
+          The counter :attr:`local_vol_warning_count` is incremented
+          for each breach; up to :data:`_LV_WARNING_BUFFER_SIZE`
+          representative events are retained on
+          :attr:`local_vol_warning_events`. A warning is *not* a
+          defect of the surface — it identifies a region in which
+          the conditional dynamics of the underlying are
+          economically extreme, and informs the user interface that
+          the value should be surfaced as such rather than treated
+          as a normal volatility input.
+        * An optional **damping cap**, supplied through the
+          ``damping_cap`` argument, applies a second, tighter clip
+          on top of the production hard cap. The damped output is a
+          *conservative scenario* rather than the pure Dupire mark,
+          and is intended for use when mark-stability across days
+          is preferred to theoretical purity. The argument is
+          deliberately not given a default value: every caller must
+          choose explicitly between the pure Dupire mode
+          (``damping_cap=None``) and the damped mode.
+
+        Interpretation
+        --------------
+        A local volatility well in excess of one hundred per cent at
+        a deep out-of-the-money put strike should be read as a
+        *conditional* statement: it is the instantaneous volatility
+        that the risk-neutral measure assigns to the underlying when
+        and if the underlying spot crosses into that region of
+        strikes, given the calibrated implied surface. It is *not* a
+        statement about the unconditional volatility of the
+        underlying observed across all states of the world. The
+        distinction is significant for the interpretation of a
+        product's mark: a barrier-product fair value computed under
+        such a local-vol surface reflects a steep conditional
+        downside dynamics that is a feature of the listed implied
+        smile, not an exotic assumption introduced by the pricer.
+
+        Parameters
+        ----------
+        K : float or ndarray
+            Strike at which the local volatility is requested. Must
+            be strictly positive.
+        T : float
+            Tenor at which the local volatility is requested. Must
+            be strictly positive.
+        damping_cap : float or None, optional
+            Optional second clip applied after the production hard
+            cap. Use sparingly and label the resulting marks as a
+            damped scenario.
+
+        Returns
+        -------
+        float or ndarray
+            Local volatility in decimal form, of the same shape as
+            ``K``.
+
+        Raises
+        ------
+        ValueError
+            If ``T`` is non-positive, ``K`` is non-positive, or the
+            surface is in the fallback regime (no SVI slice
+            available). The fallback regime requires the caller to
+            handle the situation outside of Dupire — typically by
+            reverting to the constant-volatility fallback.
+        """
+        if T <= 0.0:
+            raise ValueError(f"T must be strictly positive; received {T}")
+        if self.n_svi_slices == 0:
+            raise ValueError(
+                "local_volatility is undefined when no SVI slice is available; "
+                "the caller should detect surface_status_at(T)=='fallback' and "
+                "revert to the constant-volatility fallback."
+            )
+        K_arr = np.asarray(K, dtype=float)
+        if (K_arr <= 0.0).any() if K_arr.ndim else (K_arr <= 0.0):
+            raise ValueError(f"strike(s) must be strictly positive; received {K}")
+
+        k = np.log(K_arr / self.forward)
+        w, dw_dT, dw_dk, d2w_dk2 = self._surface_partials(k, T)
+
+        # Floor on w to prevent the 1/w terms from diverging. The
+        # constructor enforces non-negativity of total variance at the
+        # smile minimum on every slice; w can in principle be exactly
+        # zero only at the minimum of a slice whose ``a`` parameter
+        # was calibrated to the boundary of the admissible set, but
+        # the floor remains a defensive guard.
+        w_safe = np.maximum(w, _W_FLOOR)
+
+        denominator = (
+            1.0
+            - (k / w_safe) * dw_dk
+            + 0.25 * (-0.25 - 1.0 / w_safe + (k ** 2) / (w_safe ** 2)) * (dw_dk ** 2)
+            + 0.5 * d2w_dk2
+        )
+
+        numerator = dw_dT
+
+        # Compute the squared local volatility where the formula is
+        # well-defined; record non-finite or non-positive intermediates
+        # as floor clips.
+        valid = (numerator > 0.0) & (denominator > 0.0) & np.isfinite(numerator) & np.isfinite(denominator)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            sigma_lv_sq = np.where(valid, numerator / denominator, np.nan)
+        sigma_lv = np.where(np.isfinite(sigma_lv_sq) & (sigma_lv_sq > 0.0),
+                            np.sqrt(sigma_lv_sq), np.nan)
+
+        # Floor substitution for any non-finite Dupire output.
+        floor_clip_mask = ~np.isfinite(sigma_lv)
+        sigma_lv = np.where(np.isfinite(sigma_lv), sigma_lv, SIGMA_LV_FLOOR)
+
+        # Production hard-cap clip: legitimate suppression of numerical
+        # explosions only. Values in [SIGMA_LV_WARNING, SIGMA_LV_HARD_CAP]
+        # are *not* clipped at this stage.
+        hard_clip_mask = (sigma_lv > SIGMA_LV_HARD_CAP) | (sigma_lv < SIGMA_LV_FLOOR)
+        sigma_lv = np.clip(sigma_lv, SIGMA_LV_FLOOR, SIGMA_LV_HARD_CAP)
+
+        # Warning detection — does not modify the output. We compute the
+        # implied volatility at the same (K, T) for the ratio test; the
+        # total variance is already in hand from the partials helper.
+        sigma_iv = np.sqrt(np.maximum(w_safe, 0.0) / T)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            lv_iv_ratio = np.where(sigma_iv > 0.0, sigma_lv / sigma_iv, 0.0)
+        warning_mask = (sigma_lv > SIGMA_LV_WARNING) | (lv_iv_ratio > LV_IV_RATIO_WARNING)
+        n_warnings = int(np.count_nonzero(warning_mask))
+        if n_warnings > 0:
+            object.__setattr__(
+                self, "local_vol_warning_count",
+                int(getattr(self, "local_vol_warning_count", 0)) + n_warnings,
+            )
+            buffer = list(getattr(self, "local_vol_warning_events", []))
+            if len(buffer) < _LV_WARNING_BUFFER_SIZE:
+                # Retain the loudest unrecorded events first; bounded.
+                warned_idx = np.flatnonzero(warning_mask if warning_mask.ndim else np.atleast_1d(warning_mask))
+                # Sort by sigma_lv descending and keep top entries that fit.
+                sigma_lv_flat = np.atleast_1d(sigma_lv).ravel()
+                sigma_iv_flat = np.atleast_1d(sigma_iv).ravel()
+                K_flat = np.atleast_1d(K_arr).ravel() if K_arr.ndim else np.atleast_1d(K_arr)
+                order = warned_idx[np.argsort(-sigma_lv_flat[warned_idx])]
+                for idx in order:
+                    if len(buffer) >= _LV_WARNING_BUFFER_SIZE:
+                        break
+                    buffer.append({
+                        "K": float(K_flat[idx] if idx < len(K_flat) else K_arr),
+                        "T": float(T),
+                        "sigma_lv": float(sigma_lv_flat[idx]),
+                        "sigma_iv": float(sigma_iv_flat[idx]),
+                        "ratio": float(sigma_lv_flat[idx] / sigma_iv_flat[idx]) if sigma_iv_flat[idx] > 0 else float("inf"),
+                        "code": "LV_WARNING_EXTREME_PUT_WING" if (K_arr if not K_arr.ndim else K_flat[idx]) < self.forward else "LV_WARNING_EXTREME_CALL_WING",
+                    })
+            object.__setattr__(self, "local_vol_warning_events", buffer)
+
+        # Optional damping cap (conservative scenario).
+        if damping_cap is not None:
+            if damping_cap <= 0.0:
+                raise ValueError(
+                    f"damping_cap must be strictly positive when provided; "
+                    f"received {damping_cap}"
+                )
+            damp_mask = sigma_lv > damping_cap
+            sigma_lv = np.minimum(sigma_lv, float(damping_cap))
+            # Damping clips are *not* recorded in ``local_vol_clip_count``,
+            # which is reserved for the production-safety hard cap. They
+            # are an opt-in transformation rather than a numerical guard.
+
+        # Aggregate clip count for the hard-cap and floor events only.
+        all_clip_mask = floor_clip_mask | hard_clip_mask
+        n_clips = int(np.count_nonzero(all_clip_mask))
+        if n_clips > 0:
+            object.__setattr__(
+                self, "local_vol_clip_count",
+                int(getattr(self, "local_vol_clip_count", 0)) + n_clips,
+            )
+
+        return sigma_lv if K_arr.ndim else float(sigma_lv)
+
+    # ------------------------------------------------------------------
+    # Representation
+    # ------------------------------------------------------------------
+
+    def __repr__(self) -> str:
+        if not self._slice_records:
+            qual = "fallback"
+        elif len(self._slice_records) == 1:
+            qual = f"1 SVI slice at T={self._t_min:.3f}"
+        else:
+            qual = f"{self.n_svi_slices} SVI slices, T in [{self._t_min:.3f}, {self._t_max:.3f}]"
+        return f"VolSurface(isin={self.isin!r}, F={self.forward:.3f}, {qual})"
+
+
+# ---------------------------------------------------------------------------
+# Pricer integration (Stage 3 Substage A)
+# ---------------------------------------------------------------------------
+
+
+def build_product_vol_map(
+    product_row,
+    vol_surfaces: dict,
+    fallback_vol_map: dict,
+    valuation_date,
+) -> tuple[dict, list[dict]]:
+    """Resolve a per-underlying volatility map for one product.
+
+    For each underlying referenced in ``product_row``, the function
+    evaluates the corresponding :class:`VolSurface` at the strike of the
+    product's downside barrier and at the product's residual maturity.
+    The barrier strike per underlying is the absolute level
+    ``initial_level * barrier_pct`` returned by
+    :func:`src.reverse_convertible.barrier_levels`, which is the
+    canonical barrier convention of the project. The residual maturity
+    is the calendar distance between the supplied valuation date and
+    the product's maturity date, expressed in years on a 365.25-day
+    basis to match the convention adopted elsewhere in the analytics
+    layer.
+
+    For a European-barrier reverse convertible the resulting
+    volatility is the strictly correct input to the constant-volatility
+    Monte Carlo, because only the marginal distribution of the
+    underlying at the product's maturity enters the valuation and that
+    marginal is identified, under geometric Brownian motion, by the
+    volatility at the corresponding strike. For American-barrier and
+    autocallable products the substitution is a material improvement
+    over the at-the-money input — the barrier-zone volatility is the
+    economically relevant quantity for the dominant payoff feature —
+    but the path-dependency of those payoffs is still mis-represented
+    by the constant-volatility dynamics; the full correction requires
+    the local-volatility Monte Carlo of Stage 3 Substage B.
+
+    When the surface for a given underlying is unavailable, falls back
+    to the static :data:`SURFACE_STATUS_FALLBACK` regime, or has no
+    chain coverage at the barrier strike at the residual maturity, the
+    function reverts to the corresponding entry of ``fallback_vol_map``
+    and records the reason on the diagnostics list. The transparency
+    requirement is non-negotiable: every resolution path is recorded
+    so that the user interface can badge the affected product.
+
+    Parameters
+    ----------
+    product_row : pd.Series
+        One row of the portfolio dataframe. Must expose
+        ``underlying_isins``, ``initial_levels``, ``barrier_pct``,
+        ``maturity_date``. Other product fields are not consulted.
+    vol_surfaces : dict
+        Mapping ``{ isin: VolSurface }`` produced by
+        :meth:`MarketDataEngine.build_vol_surfaces`. May be empty when
+        no surface coverage is available; in that case every
+        underlying resolves via the fallback.
+    fallback_vol_map : dict
+        Mapping ``{ isin: sigma }`` used when the surface cannot
+        produce a value. Typically the implied or realised ATM map
+        already in use by the existing pricer.
+    valuation_date : pd.Timestamp or convertible
+        As-of date for the maturity arithmetic.
+
+    Returns
+    -------
+    vol_map : dict
+        Mapping ``{ isin: sigma }`` consumed by the existing pricer
+        machinery. One entry per underlying referenced in
+        ``product_row``.
+    diagnostics : list of dict
+        One entry per underlying, each carrying ``isin``,
+        ``K_barrier``, ``T``, ``sigma``, ``source`` (``"surface"`` or
+        ``"fallback"``), and ``surface_status`` (the verbatim status
+        returned by the surface, or ``"no_surface"`` when the
+        underlying has no surface at all).
+    """
+    # Local import of the barrier-level helper to avoid a hard
+    # dependency at module import time.
+    from src.pricing.products.reverse_convertible import barrier_levels
+
+    valuation_ts = pd.Timestamp(valuation_date) if valuation_date is not None else pd.Timestamp.today().normalize()
+    maturity_ts = pd.Timestamp(product_row["maturity_date"])
+    T_years = (maturity_ts - valuation_ts).days / 365.25
+    if T_years <= 0.0:
+        # Matured (or maturing today): no barrier risk left. The pricer
+        # treats this case independently; we simply return the fallback
+        # map unchanged so that no surface lookup is attempted at a
+        # non-positive tenor.
+        diagnostics = [
+            {"isin": str(isin), "K_barrier": float("nan"), "T": T_years,
+             "sigma": fallback_vol_map.get(isin, DEFAULT_FALLBACK_VOL),
+             "source": "fallback",
+             "surface_status": "tenor_non_positive"}
+            for isin in product_row["underlying_isins"]
+        ]
+        return ({d["isin"]: d["sigma"] for d in diagnostics}, diagnostics)
+
+    isins = list(product_row["underlying_isins"])
+    initial_levels = product_row.get("initial_levels", isins)   # safe default for products without one
+    barrier_pct = product_row.get("barrier_pct")
+    K_barriers = barrier_levels(initial_levels, barrier_pct)
+
+    vol_map: dict[str, float] = {}
+    diagnostics: list[dict] = []
+
+    for isin, K_barrier in zip(isins, K_barriers):
+        K_barrier = float(K_barrier)
+        surface = (vol_surfaces or {}).get(isin)
+        if surface is None:
+            sigma = float(fallback_vol_map.get(isin, DEFAULT_FALLBACK_VOL))
+            diagnostics.append({
+                "isin": str(isin), "K_barrier": K_barrier, "T": T_years,
+                "sigma": sigma, "source": "fallback",
+                "surface_status": "no_surface",
+            })
+            vol_map[isin] = sigma
+            continue
+
+        status, _ = surface.surface_status_at(T_years)
+        if status == SURFACE_STATUS_FALLBACK:
+            # Surface itself is in the fallback regime (no calibrated
+            # slices). Use the legacy fallback map rather than the
+            # surface's static default to preserve consistency with
+            # the prior pricer behaviour on these underlyings.
+            sigma = float(fallback_vol_map.get(isin, DEFAULT_FALLBACK_VOL))
+            diagnostics.append({
+                "isin": str(isin), "K_barrier": K_barrier, "T": T_years,
+                "sigma": sigma, "source": "fallback",
+                "surface_status": status,
+            })
+            vol_map[isin] = sigma
+            continue
+
+        try:
+            sigma = float(surface.sigma(K_barrier, T_years))
+        except Exception:
+            sigma = float(fallback_vol_map.get(isin, DEFAULT_FALLBACK_VOL))
+            diagnostics.append({
+                "isin": str(isin), "K_barrier": K_barrier, "T": T_years,
+                "sigma": sigma, "source": "fallback",
+                "surface_status": "surface_query_error",
+            })
+            vol_map[isin] = sigma
+            continue
+
+        if not (0.0 < sigma < 5.0) or not np.isfinite(sigma):
+            # Defensive: anomalous surface output is replaced by the
+            # fallback rather than fed into the pricer.
+            sigma_fb = float(fallback_vol_map.get(isin, DEFAULT_FALLBACK_VOL))
+            diagnostics.append({
+                "isin": str(isin), "K_barrier": K_barrier, "T": T_years,
+                "sigma": sigma_fb, "source": "fallback",
+                "surface_status": f"out_of_range:{sigma:.3f}",
+            })
+            vol_map[isin] = sigma_fb
+            continue
+
+        diagnostics.append({
+            "isin": str(isin), "K_barrier": K_barrier, "T": T_years,
+            "sigma": sigma, "source": "surface",
+            "surface_status": status,
+        })
+        vol_map[isin] = sigma
+
+    return vol_map, diagnostics

@@ -9,8 +9,8 @@ from app.ai_insights import (
     build_stress_testing_payload,
     payload_hash,
 )
-from src.portfolio_analytics import PortfolioAnalytics
-from src.scenario_engine import ScenarioEngine
+from src.portfolio.portfolio_analytics import PortfolioAnalytics
+from src.risk.scenario_engine import ScenarioEngine
 from tests.conftest import BETA_MAP, VOL_MAP, SCENARIOS, make_portfolio
 
 

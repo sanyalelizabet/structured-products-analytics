@@ -12,7 +12,7 @@ Usage (CLI):
 
 Usage (importable):
 
-    from src.term_sheet_extractor import extract_term_sheet
+    from src.ingestion.term_sheet_extractor import extract_term_sheet
     row = extract_term_sheet("data/term_sheets_samples/your_file.pdf")
 """
 from __future__ import annotations

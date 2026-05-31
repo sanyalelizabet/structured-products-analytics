@@ -17,10 +17,10 @@ import pandas as pd
 import pytest
 from unittest.mock import MagicMock
 
-from src.factor_engine import FACTORS
-from src.factor_premiums import REGIMES
-from src.factor_scenario_engine import FactorScenarioEngine
-from src.scenario_archetypes import EVENT_RECOVERY_ARCHETYPES
+from src.risk.factor_engine import FACTORS
+from src.risk.factor_premiums import REGIMES
+from src.risk.factor_scenario_engine import FactorScenarioEngine
+from src.risk.scenario_archetypes import EVENT_RECOVERY_ARCHETYPES
 from tests.conftest import make_brc_row
 
 FIXED_TODAY = pd.Timestamp("2024-01-02")

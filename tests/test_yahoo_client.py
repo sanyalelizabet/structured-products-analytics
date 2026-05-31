@@ -5,7 +5,7 @@ All yfinance network calls are patched — no real HTTP requests.
 import pandas as pd
 import pytest
 from unittest.mock import MagicMock, patch
-from src.yahoo_client import YahooClient
+from src.market_data.yahoo_client import YahooClient
 from src.exceptions import DataUnavailableError
 
 

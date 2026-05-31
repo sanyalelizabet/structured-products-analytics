@@ -12,7 +12,7 @@ import pandas as pd
 import pytest
 
 from src.pricing.monte_carlo import MonteCarloPricer, european_brc_payoff
-from src.issuer_callable_reverse_convertible import (
+from src.pricing.products.issuer_callable_reverse_convertible import (
     vectorised_issuer_callable_rc_summary,
 )
 

@@ -31,7 +31,7 @@ from typing import Iterable
 import numpy as np
 import pandas as pd
 
-from src.factor_engine import FACTORS, FactorEngine
+from src.risk.factor_engine import FACTORS, FactorEngine
 
 log = logging.getLogger(__name__)
 

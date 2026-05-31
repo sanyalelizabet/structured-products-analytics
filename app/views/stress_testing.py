@@ -27,8 +27,8 @@ from app.ai_insights import (
     generate_stress_testing_insight,
     payload_hash,
 )
-from src.noise_sampler import NoiseSampler
-from src.scenario_archetypes import (
+from src.numerics.noise_sampler import NoiseSampler
+from src.risk.scenario_archetypes import (
     DEFAULT_INITIAL_MARKET_STATE,
     DEFAULT_RECOVERY_ARCHETYPE,
     EVENT_RECOVERY_ARCHETYPES,
@@ -36,7 +36,7 @@ from src.scenario_archetypes import (
     event_drift_for_factor,
     initial_drift_dict,
 )
-from src.scenario_engine import ScenarioEngine
+from src.risk.scenario_engine import ScenarioEngine
 
 
 # Palette — kept in sync with ``app/views/portfolio.py`` so the whole app

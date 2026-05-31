@@ -30,13 +30,13 @@ from app.ai_insights import (
     generate_factor_stress_insight,
     payload_hash,
 )
-from src.factor_engine import FACTORS
-from src.factor_premiums import (
+from src.risk.factor_engine import FACTORS
+from src.risk.factor_premiums import (
     ESTIMATION_LOOKBACK_YEARS, PREMIUM_METHODS, compute_factor_premiums,
 )
-from src.factor_scenario_engine import FactorScenarioEngine
-from src.noise_sampler import NoiseSampler
-from src.scenario_archetypes import (
+from src.risk.factor_scenario_engine import FactorScenarioEngine
+from src.numerics.noise_sampler import NoiseSampler
+from src.risk.scenario_archetypes import (
     DEFAULT_INITIAL_MARKET_STATE,
     DEFAULT_RECOVERY_ARCHETYPE,
     EVENT_RECOVERY_ARCHETYPES,
@@ -815,7 +815,7 @@ def _render_factor_premiums(premiums_by_method: dict, premium_method: str,
     The estimator selected above is marked as **in use**; the other is shown
     for comparison.
     """
-    from src.factor_premiums import REGIMES
+    from src.risk.factor_premiums import REGIMES
 
     st.markdown("#### Factor premiums by regime")
     st.caption(

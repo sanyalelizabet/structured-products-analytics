@@ -29,7 +29,7 @@ import pandas as pd
 
 from scipy.optimize import brentq
 
-from src.coupon_schedule import CouponSchedule
+from src.pricing.products.coupon_schedule import CouponSchedule
 from src.pricing.black_scholes import BlackScholes
 
 

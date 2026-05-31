@@ -26,7 +26,7 @@ from typing import Iterable
 import numpy as np
 import pandas as pd
 
-from src.beta_engine import BENCHMARK_KEY, BENCHMARK_TICKER
+from src.risk.beta_engine import BENCHMARK_KEY, BENCHMARK_TICKER
 
 log = logging.getLogger(__name__)
 

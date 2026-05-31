@@ -44,7 +44,7 @@ class BetaEngine:
         """Return ``{isin: β_MKT}``. Defaults to 1.0 on insufficient data."""
         # Local import keeps the module-level dependency graph cycle-free
         # (FactorEngine → uses BENCHMARK_KEY/BENCHMARK_TICKER from here).
-        from src.factor_loadings_engine import FactorLoadingsEngine
+        from src.risk.factor_loadings_engine import FactorLoadingsEngine
 
         loadings = FactorLoadingsEngine(self.mde).build_loadings(
             isin_ticker_map,

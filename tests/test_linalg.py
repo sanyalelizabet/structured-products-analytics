@@ -2,7 +2,7 @@
 import numpy as np
 import pytest
 
-from src.linalg import (
+from src.numerics.linalg import (
     is_positive_semidefinite,
     nearest_correlation_matrix,
     safe_cholesky,

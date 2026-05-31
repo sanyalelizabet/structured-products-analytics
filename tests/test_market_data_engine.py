@@ -5,8 +5,8 @@ import pandas as pd
 import pytest
 import numpy as np
 from unittest.mock import MagicMock, patch
-from src.market_data_engine import MarketDataEngine
-from src.correlation_engine import CorrelationEngine
+from src.market_data.market_data_engine import MarketDataEngine
+from src.risk.correlation_engine import CorrelationEngine
 from tests.conftest import make_brc_row
 
 

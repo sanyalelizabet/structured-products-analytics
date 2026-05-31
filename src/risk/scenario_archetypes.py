@@ -121,7 +121,7 @@ def initial_drift_dict(
     if market_state not in INITIAL_MARKET_STATES:
         raise ValueError(f"Unknown initial market state: {market_state}")
     regime = INITIAL_MARKET_STATES[market_state]
-    from src.factor_premiums import get_factor_drift
+    from src.risk.factor_premiums import get_factor_drift
     return get_factor_drift(regime, factor_codes, premiums=premiums)
 
 

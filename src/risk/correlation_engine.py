@@ -3,7 +3,7 @@ import logging
 import numpy as np
 import pandas as pd
 
-from src.linalg import is_positive_semidefinite, nearest_correlation_matrix
+from src.numerics.linalg import is_positive_semidefinite, nearest_correlation_matrix
 
 log = logging.getLogger(__name__)
 

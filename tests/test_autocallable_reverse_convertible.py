@@ -10,10 +10,10 @@ import pandas as pd
 import pytest
 from unittest.mock import MagicMock
 
-from src.autocallable_reverse_convertible import (
+from src.pricing.products.autocallable_reverse_convertible import (
     vectorised_autocallable_rc_summary,
 )
-from src.reverse_convertible import vectorised_european_rc_summary
+from src.pricing.products.reverse_convertible import vectorised_european_rc_summary
 from tests.conftest import make_brc_row, make_mbrc_row
 
 
@@ -306,8 +306,8 @@ class TestEngineDispatch:
     def test_single_factor_engine_runs_with_autocallable(self):
         """``ScenarioEngine`` should run end-to-end when one product is
         autocallable — confirming the dispatch path is wired."""
-        from src.scenario_engine import ScenarioEngine
-        from src.noise_sampler   import NoiseSampler
+        from src.risk.scenario_engine import ScenarioEngine
+        from src.numerics.noise_sampler   import NoiseSampler
 
         portfolio = self._portfolio_with_autocallable()
         beta_map  = {"CH0012221716": 1.0}
@@ -337,9 +337,9 @@ class TestEngineDispatch:
 
     def test_factor_engine_runs_with_autocallable(self, tmp_path):
         """Same dispatch test for ``FactorScenarioEngine``."""
-        from src.factor_engine          import FACTORS, FactorEngine
-        from src.factor_scenario_engine import FactorScenarioEngine
-        from src.market_data_engine     import MarketDataEngine
+        from src.risk.factor_engine          import FACTORS, FactorEngine
+        from src.risk.factor_scenario_engine import FactorScenarioEngine
+        from src.market_data.market_data_engine     import MarketDataEngine
 
         # Seed a tiny factor DB so the engine boots.
         rng   = np.random.default_rng(0)

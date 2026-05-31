@@ -9,18 +9,18 @@ logo_path = Path(__file__).resolve().parent / "assets" / "logo.png"
 from src.logging_config import configure_logging
 configure_logging()
 
-from src.portfolio_analytics import PortfolioAnalytics, scale_display_units
-from src.eod_client import EODClient
-from src.market_data_engine import MarketDataEngine
-from src.correlation_engine import CorrelationEngine
-from src.beta_engine import BetaEngine
-from src.factor_engine import FactorEngine
-from src.factor_loadings_engine import FactorLoadingsEngine
+from src.portfolio.portfolio_analytics import PortfolioAnalytics, scale_display_units
+from src.market_data.eod_client import EODClient
+from src.market_data.market_data_engine import MarketDataEngine
+from src.risk.correlation_engine import CorrelationEngine
+from src.risk.beta_engine import BetaEngine
+from src.risk.factor_engine import FactorEngine
+from src.risk.factor_loadings_engine import FactorLoadingsEngine
 from data.reference_data import beta_map as beta_map_static
 from data.reference_data import risk_free_rates as risk_free_rates_static
-from src.yahoo_client import YahooClient
+from src.market_data.yahoo_client import YahooClient
 from src.pricing.monte_carlo import MonteCarloPricer
-from app import portfolio_source
+from app import portfolio_source, portfolio_storage
 from app.views import (
     product, portfolio as portfolio_view, stress_testing, factor_stress,
     portfolio_entry, onboarding,
@@ -69,6 +69,8 @@ def _portfolio_cache_key(portfolio) -> str:
 def compute_pricing_and_greeks(
     _portfolio, _corr_df, vol_map, risk_free_rates,
     portfolio_key: str,
+    _vol_surfaces=None,
+    valuation_date=None,
 ):
     """One-shot Monte-Carlo: greeks, portfolio delta, and fair values.
 
@@ -76,6 +78,16 @@ def compute_pricing_and_greeks(
     the standalone fair-value Monte Carlo (same seed, same paths), so we
     return all three from a single pass instead of pricing the portfolio
     twice.
+
+    The ``_vol_surfaces`` argument, when supplied, enables the
+    surface-aware barrier-strike volatility input introduced in Stage 3
+    Substage A: each product is priced with a per-underlying volatility
+    drawn from the calibrated surface at the strike of its downside
+    barrier and at its residual maturity, rather than at the
+    at-the-money volatility used by the legacy pricer. The argument is
+    prefixed with an underscore so that Streamlit excludes it from the
+    cache key; the cache invalidation continues to be driven by
+    ``portfolio_key``, which captures the active-portfolio identity.
     """
     _ = portfolio_key   # consumed only as a cache key
     # 5,000 paths is plenty for finite-difference Greeks under common
@@ -84,6 +96,7 @@ def compute_pricing_and_greeks(
     pricer = MonteCarloPricer(n_paths=5_000, seed=42)
     return pricer.compute_portfolio_greeks(
         _portfolio, vol_map, risk_free_rates, corr_df=_corr_df,
+        vol_surfaces=_vol_surfaces, valuation_date=valuation_date,
     )
 
 
@@ -176,32 +189,37 @@ def fetch_realised_vols(_portfolio, portfolio_key: str):
 
 @st.cache_data(ttl=_TTL_DAILY)
 def fetch_vol_surfaces(_portfolio, portfolio_key: str):
-    """Per-(ISIN, listed expiry) implied-volatility surfaces.
+    """Per-ISIN term-structure implied-volatility surfaces.
 
-    The function caches the slice-by-slice SVI calibrations performed by
-    :meth:`MarketDataEngine.build_vol_surface_map`. It is currently
-    additive — no view or pricer consumes it in Stage 1 — and is
-    provided as the foundation for the Stage 2 term-structure object
-    and the Stage 3 pricer migration.
+    Returns one :class:`VolSurface` per active-portfolio underlying.
+    Each surface internally composes the per-(ISIN, expiry) SVI slices
+    built in Stage 1 into a term-structure-consistent object via the
+    Stage 2 linear-in-total-variance recipe. The surface exposes
+    :meth:`sigma(K, T)` at arbitrary strike and tenor, with a status
+    taxonomy (interpolated, extrapolated, single_slice, fallback) that
+    the user interface can badge.
+
+    The function is currently additive: no view or pricer consumes it
+    yet. Stage 3 will replace the constant-vol input to the barrier
+    product pricers with surface evaluations at the barrier strike,
+    which is the substance of the pricer bug-fix.
 
     The cache key follows the same ``portfolio_key`` convention as the
-    sibling ``fetch_implied_vols`` and ``fetch_realised_vols``: the
-    surfaces are refreshed whenever the portfolio composition changes
-    (different active ISINs) and at the daily TTL boundary.
+    sibling ``fetch_implied_vols`` and ``fetch_realised_vols``.
 
     Returns
     -------
     dict
-        ``{ isin: { expiry_iso: VolSliceSurface } }``. The dictionary
-        is empty if no options data is available; ISINs without chain
-        coverage are absent rather than mapped to empty inner dicts.
+        ``{ isin: VolSurface }``. Empty if no options data is available.
+        ISINs without any chain coverage are absent rather than mapped
+        to a fallback surface.
     """
     _ = portfolio_key
     engine = get_market_engine()
     try:
-        return engine.build_vol_surface_map(_portfolio)
+        return engine.build_vol_surfaces(_portfolio)
     except Exception as e:
-        st.warning(f"Could not build vol surface map; downstream surface-aware "
+        st.warning(f"Could not build vol surfaces; downstream surface-aware "
                    f"analytics will fall back to constant vol. {e}")
         return {}
 
@@ -284,7 +302,7 @@ def build_factor_loadings(_portfolio, portfolio_key: str):
         return fle.build_loadings(isin_ticker_map, years=_ESTIMATION_YEARS)
     except Exception as e:
         st.warning(f"Factor loadings unavailable, using safe defaults. {e}")
-        from src.factor_engine import FACTORS
+        from src.risk.factor_engine import FACTORS
         return {
             isin: {
                 "betas":     {f: (1.0 if f == "MKT" else 0.0) for f in FACTORS},
@@ -450,7 +468,7 @@ if mode == "user" and n_products == 0:
 # Product to fix, or Switch portfolio to escape entirely).  The sidebar
 # remains visible because we never reach the analytics pipeline.
 if mode == "user":
-    from src.portfolio_entry import validate_row_errors as _row_errs
+    from src.portfolio.portfolio_entry import validate_row_errors as _row_errs
     bad_rows: list[tuple[int, str, list[str]]] = []
     for i, row in active_portfolio.reset_index(drop=True).iterrows():
         errs = _row_errs(row.to_dict())
@@ -585,7 +603,22 @@ vol_map              = vol_map_implied
 greeks_df, pf_delta, fv_df = compute_pricing_and_greeks(
     portfolio, corr_df, vol_map, risk_free_rates,
     portfolio_key=pkey,
+    _vol_surfaces=vol_surfaces,
+    valuation_date=valuation_date,
 )
+
+if mode == "user" and portfolio_name != portfolio_source.UNSAVED_PORTFOLIO_NAME:
+    try:
+        portfolio_storage.save_valuation_snapshot(
+            portfolio_name,
+            fv_df,
+            valuation_date=valuation_date,
+            reference_currency=portfolio_currency,
+        )
+    except portfolio_storage.NotFoundError:
+        pass
+    except OSError as exc:
+        st.warning(f"Could not save fair-value snapshot. {exc}")
 
 # Merge fair value columns into product analytics df
 df = df.merge(fv_df[["product_id", "fair_value", "fair_value_pct"]], on="product_id", how="left")
@@ -607,6 +640,9 @@ elif view == "Portfolio":
     portfolio_view.render(
         analytics, df, greeks_df, pf_delta, valuation_date,
         corr_df=display_corr_df,
+        vol_surfaces=vol_surfaces,
+        vol_map_realised=vol_map_realised,
+        portfolio=portfolio,
     )
 
 elif view == "Stress Testing":

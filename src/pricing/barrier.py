@@ -7,9 +7,10 @@ Two observation conventions are supported:
 * **Continuous / American** — the barrier is live throughout the product's
   life.  Between two simulated grid points a Geometric Brownian Motion can dip
   below the barrier and recover, so checking only the grid values systematically
-  *under*-detects breaches.  The exact correction is the Brownian-bridge
+  *under*-detects breaches.  The correction used here is the Brownian-bridge
   survival probability: conditional on the two log-levels at the ends of a step,
-  the probability that the bridge never touched a down-barrier ``B`` is
+  the probability that a single-underlying bridge never touched a down-barrier
+  ``B`` is
 
   .. math::
       1 - \\exp\\!\\Big(-\\tfrac{2\\,\\ln(S_a/B)\\,\\ln(S_b/B)}{\\sigma^2\\,\\Delta t}\\Big),
@@ -17,8 +18,11 @@ Two observation conventions are supported:
   for ``S_a, S_b > B`` (and zero if either endpoint is already at/below ``B``).
 
 The continuous routine returns, per path, the probability of *never* knocking in
-(the "survival" probability).  Working with this probability rather than a
-sampled 0/1 indicator keeps the valuation deterministic given the paths — so the
+(the "survival" probability).  For multi-underlying products the implementation
+multiplies marginal bridge survivals across underlyings, which is exact under
+conditional independence of the within-step bridges and a tractable
+approximation otherwise.  Working with this probability rather than a sampled
+0/1 indicator keeps the valuation deterministic given the paths — so the
 bump-and-reprice Greeks remain stable under common random numbers — and lowers
 Monte Carlo variance (a Rao-Blackwellisation of the breach indicator).
 """
@@ -61,8 +65,8 @@ def continuous_survival_prob_from_var(
 
     Uses the Brownian-bridge correction step by step and combines across steps
     and underlyings.  A worst-of down-barrier knocks in if *any* underlying ever
-    crosses *its* barrier, so the survival probability is the product over both
-    axes of the per-step bridge survival factors.
+    crosses *its* barrier, so the implemented survival probability is the
+    product over both axes of the per-step marginal bridge survival factors.
 
     Parameters
     ----------
@@ -70,9 +74,18 @@ def continuous_survival_prob_from_var(
         Monitored underlying levels.
     barriers : np.ndarray, shape ``(n_assets,)``
         Per-underlying down-barrier levels.
-    step_var : np.ndarray, shape ``(n_points - 1, n_assets)``
-        Diffusion variance of each monitoring interval, per underlying, as
-        assumed by the path-generating model.
+    step_var : np.ndarray
+        Diffusion variance of each monitoring interval. Accepted in two
+        shapes:
+
+        * ``(n_points - 1, n_assets)`` — constant per path, the regime
+          consumed by the constant-volatility Monte Carlo.
+        * ``(n_paths, n_points - 1, n_assets)`` — path-dependent, the
+          regime produced by the local-volatility Monte Carlo. Each
+          step's variance is sourced from the same ``sigma_step(S, t)``
+          evaluator that generated the corresponding path step, which
+          is the structural guarantee that the bridge and the path
+          remain internally consistent.
 
     Returns
     -------
@@ -92,9 +105,34 @@ def continuous_survival_prob_from_var(
     S_a = prices[:, :-1, :]                             # (n_paths, n_steps, n_assets)
     S_b = prices[:, 1:, :]
 
+    # Accept either (n_steps, n_assets) — constant per path — or the
+    # path-dependent (n_paths, n_steps, n_assets) shape produced by the
+    # local-volatility Monte Carlo. In the constant case we prepend a
+    # singleton path axis so that the subsequent broadcasting against
+    # (n_paths, n_steps, n_assets) endpoint arrays is identical.
+    if step_var.ndim == 2:
+        if step_var.shape != (n_points - 1, n_assets):
+            raise ValueError(
+                f"step_var of shape {step_var.shape} does not match the "
+                f"expected (n_steps, n_assets) = ({n_points - 1}, {n_assets})"
+            )
+        var = step_var[None, :, :]                       # (1, n_steps, n_assets)
+    elif step_var.ndim == 3:
+        if step_var.shape != (n_paths, n_points - 1, n_assets):
+            raise ValueError(
+                f"step_var of shape {step_var.shape} does not match the "
+                f"expected (n_paths, n_steps, n_assets) = "
+                f"({n_paths}, {n_points - 1}, {n_assets})"
+            )
+        var = step_var
+    else:
+        raise ValueError(
+            f"step_var must be 2-D (n_steps, n_assets) or 3-D "
+            f"(n_paths, n_steps, n_assets); received ndim={step_var.ndim}"
+        )
+
     # Guard zero-variance steps (e.g. a zero-length gap): no diffusion → the
     # bridge cannot breach, so survival is governed by the endpoints alone.
-    var = step_var[None, :, :]                          # (1, n_steps, n_assets)
     var = np.where(var > 0.0, var, np.inf)
 
     above = (S_a > B) & (S_b > B)

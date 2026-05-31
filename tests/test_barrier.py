@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from src.barrier import (
+from src.pricing.barrier import (
     continuous_survival_prob,
     continuous_survival_prob_from_var,
     european_knock_in,

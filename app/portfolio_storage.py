@@ -24,6 +24,7 @@ File schema
 from __future__ import annotations
 
 import datetime as dt
+import csv
 import hashlib
 import json
 import re
@@ -104,8 +105,20 @@ def _path_for(slug: str, portfolios_dir: Path) -> Path:
     return portfolios_dir / f"{slug}.json"
 
 
+def _valuation_path_for(slug: str, portfolios_dir: Path) -> Path:
+    return portfolios_dir / f"{slug}_fair_values.csv"
+
+
 def _ensure_dir(portfolios_dir: Path) -> None:
     portfolios_dir.mkdir(parents=True, exist_ok=True)
+
+
+def _date_str(value: Any) -> str:
+    if value is None:
+        return dt.datetime.utcnow().date().isoformat()
+    if hasattr(value, "strftime"):
+        return value.strftime("%Y-%m-%d")
+    return str(value)
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -152,6 +165,94 @@ def load(name: str, portfolios_dir: Path = DEFAULT_PORTFOLIOS_DIR) -> dict[str, 
     if not path.exists():
         raise NotFoundError(f"No portfolio called {name!r}.")
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+VALUATION_COLUMNS = [
+    "calculated_at",
+    "valuation_date",
+    "portfolio_name",
+    "portfolio_slug",
+    "reference_currency",
+    "product_id",
+    "fair_value",
+    "fair_value_pct",
+    "std_error",
+]
+
+
+def valuation_history_path(
+    name: str,
+    portfolios_dir: Path = DEFAULT_PORTFOLIOS_DIR,
+) -> Path:
+    """Return the sidecar CSV path for a saved portfolio's fair values."""
+    return _valuation_path_for(slugify(name), portfolios_dir)
+
+
+def save_valuation_snapshot(
+    name: str,
+    fair_values: Any,
+    valuation_date: Any = None,
+    portfolios_dir: Path = DEFAULT_PORTFOLIOS_DIR,
+    reference_currency: str = "CHF",
+) -> Path:
+    """Persist a per-product fair-value snapshot for a saved portfolio.
+
+    The sidecar CSV keeps one row per ``valuation_date`` + ``product_id``.
+    Re-running analytics on the same valuation date replaces that day's rows
+    instead of appending duplicates, while older valuation dates are retained.
+    """
+    slug = slugify(name)
+    portfolio_path = _path_for(slug, portfolios_dir)
+    if not portfolio_path.exists():
+        raise NotFoundError(f"No portfolio called {name!r}.")
+
+    path = _valuation_path_for(slug, portfolios_dir)
+    snapshot_date = _date_str(valuation_date)
+    calculated_at = _now_iso()
+
+    if hasattr(fair_values, "to_dict"):
+        records = fair_values.to_dict(orient="records")
+    else:
+        records = list(fair_values or [])
+
+    new_rows = []
+    for record in records:
+        product_id = record.get("product_id")
+        if product_id is None:
+            continue
+        new_rows.append({
+            "calculated_at": calculated_at,
+            "valuation_date": snapshot_date,
+            "portfolio_name": name,
+            "portfolio_slug": slug,
+            "reference_currency": reference_currency,
+            "product_id": product_id,
+            "fair_value": record.get("fair_value", ""),
+            "fair_value_pct": record.get("fair_value_pct", ""),
+            "std_error": record.get("std_error", ""),
+        })
+
+    existing_rows: list[dict[str, Any]] = []
+    if path.exists():
+        with path.open("r", newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            existing_rows = [
+                row for row in reader
+                if not (
+                    row.get("valuation_date") == snapshot_date
+                    and row.get("product_id") in {
+                        str(new_row["product_id"]) for new_row in new_rows
+                    }
+                )
+            ]
+
+    _ensure_dir(portfolios_dir)
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=VALUATION_COLUMNS)
+        writer.writeheader()
+        writer.writerows(existing_rows + new_rows)
+
+    return path
 
 
 def save_new(
@@ -229,10 +330,14 @@ def delete(
     portfolios_dir: Path = DEFAULT_PORTFOLIOS_DIR,
 ) -> None:
     """Remove a saved portfolio.  Requires the owner key."""
-    path = _path_for(slugify(name), portfolios_dir)
+    slug = slugify(name)
+    path = _path_for(slug, portfolios_dir)
     if not path.exists():
         raise NotFoundError(f"No portfolio called {name!r}.")
     payload = json.loads(path.read_text(encoding="utf-8"))
     if not _verify_key(owner_key, payload.get("owner_key_hash", "")):
         raise AuthError("Owner key does not match.")
     path.unlink()
+    valuation_path = _valuation_path_for(slug, portfolios_dir)
+    if valuation_path.exists():
+        valuation_path.unlink()

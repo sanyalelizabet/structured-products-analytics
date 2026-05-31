@@ -3,7 +3,7 @@ Tests for CouponSchedule.
 """
 import pytest
 import pandas as pd
-from src.coupon_schedule import CouponSchedule
+from src.pricing.products.coupon_schedule import CouponSchedule
 
 
 # ─────────────────────────────────────────

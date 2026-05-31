@@ -7,7 +7,7 @@ import math
 
 import pytest
 
-from src.scenario_archetypes import (
+from src.risk.scenario_archetypes import (
     DEFAULT_INITIAL_MARKET_STATE,
     DEFAULT_RECOVERY_ARCHETYPE,
     EVENT_RECOVERY_ARCHETYPES,
@@ -209,7 +209,7 @@ class TestTranslateUiScenario:
         # premiums table with a zero Flat row makes the default-regime drift
         # deterministic (independent of the live premium CSV).
         import pandas as pd
-        from src.factor_premiums import REGIMES
+        from src.risk.factor_premiums import REGIMES
         premiums = pd.DataFrame(
             {c: [(-0.08 if r == "bear" else 0.10 if r == "bull" else 0.0)
                  for r in REGIMES] for c in FACTORS},

@@ -13,8 +13,8 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from src.scenario_engine import ScenarioEngine
-from src.factor_scenario_engine import FactorScenarioEngine
+from src.risk.scenario_engine import ScenarioEngine
+from src.risk.factor_scenario_engine import FactorScenarioEngine
 from tests.conftest import make_brc_row, BETA_MAP, VOL_MAP
 
 
@@ -86,7 +86,7 @@ class TestAutocallableAmericanBarrier:
 
 
 def _factor_loadings(isin):
-    from src.factor_engine import FACTORS
+    from src.risk.factor_engine import FACTORS
     return {
         isin: {
             "betas": {"MKT": 1.0, "TECH": 0.0, "HC": 0.0,
@@ -98,8 +98,8 @@ def _factor_loadings(isin):
 
 def _run_factor(tmp_path, style: str):
     from unittest.mock import MagicMock
-    from src.factor_engine import FactorEngine
-    from src.market_data_engine import MarketDataEngine
+    from src.risk.factor_engine import FactorEngine
+    from src.market_data.market_data_engine import MarketDataEngine
     from tests.test_factor_scenario_engine import _seed_factor_db
 
     isin = "TEST_AMD"

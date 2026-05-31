@@ -5,7 +5,7 @@ from unittest.mock import patch
 import pytest
 import requests
 
-from src.frankfurter_client import FrankfurterClient
+from src.market_data.frankfurter_client import FrankfurterClient
 from src.exceptions import DataUnavailableError, NetworkError
 
 

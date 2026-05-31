@@ -15,7 +15,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.portfolio_analytics import (
+from src.portfolio.portfolio_analytics import (
     PERCENT_DISPLAY_COLUMNS,
     PortfolioAnalytics,
     scale_display_units,

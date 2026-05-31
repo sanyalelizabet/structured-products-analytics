@@ -14,9 +14,9 @@ import pandas as pd
 import pytest
 from unittest.mock import MagicMock
 
-from src.eod_client import EODClient
+from src.market_data.eod_client import EODClient
 from src.exceptions import DataUnavailableError, NetworkError
-from src.market_data_engine import MarketDataEngine
+from src.market_data.market_data_engine import MarketDataEngine
 
 
 # ─────────────────────────────────────────
@@ -32,7 +32,7 @@ class TestEodClientBondYield:
             assert "real-time/US3M.GBOND" in url
             return fake
 
-        monkeypatch.setattr("src.eod_client._request_json", fake_request)
+        monkeypatch.setattr("src.market_data.eod_client._request_json", fake_request)
         result = client.get_bond_yield("US3M.GBOND")
         assert result["ticker"]    == "US3M.GBOND"
         assert result["yield_pct"] == pytest.approx(4.35)
@@ -51,7 +51,7 @@ class TestEodClientBondYield:
                 {"date": "2025-01-14", "adjusted_close": 4.30},
                 {"date": "2025-01-15", "adjusted_close": 4.35},
             ]
-        monkeypatch.setattr("src.eod_client._request_json", fake_request)
+        monkeypatch.setattr("src.market_data.eod_client._request_json", fake_request)
         result = client.get_bond_yield("US3M.GBOND")
         assert result["yield_pct"] == pytest.approx(4.35)
         assert result["date"].strftime("%Y-%m-%d") == "2025-01-15"
@@ -64,7 +64,7 @@ class TestEodClientBondYield:
             if "real-time" in url:
                 return {"close": "NA", "timestamp": 1}
             return [{"date": "2025-01-15", "adjusted_close": 4.35}]
-        monkeypatch.setattr("src.eod_client._request_json", fake_request)
+        monkeypatch.setattr("src.market_data.eod_client._request_json", fake_request)
         result = client.get_bond_yield("US3M.GBOND")
         assert result["yield_pct"] == pytest.approx(4.35)
 
@@ -75,7 +75,7 @@ class TestEodClientBondYield:
             if "real-time" in url:
                 return {"close": "NA"}
             raise DataUnavailableError("no history")
-        monkeypatch.setattr("src.eod_client._request_json", fake_request)
+        monkeypatch.setattr("src.market_data.eod_client._request_json", fake_request)
         with pytest.raises(DataUnavailableError):
             client.get_bond_yield("US3M.GBOND")
 
@@ -83,7 +83,7 @@ class TestEodClientBondYield:
         """EOD returns ``timestamp`` as a string for some virtual
         exchanges (GBOND in particular).  The client must handle both."""
         client = EODClient(api_key="dummy")
-        monkeypatch.setattr("src.eod_client._request_json",
+        monkeypatch.setattr("src.market_data.eod_client._request_json",
                             lambda url, params: {"close": 4.35,
                                                   "timestamp": "1714521600"})
         result = client.get_bond_yield("US3M.GBOND")
@@ -92,7 +92,7 @@ class TestEodClientBondYield:
 
     def test_falls_back_to_date_field_when_no_timestamp(self, monkeypatch):
         client = EODClient(api_key="dummy")
-        monkeypatch.setattr("src.eod_client._request_json",
+        monkeypatch.setattr("src.market_data.eod_client._request_json",
                             lambda url, params: {"close": 4.35,
                                                   "date": "2025-01-15"})
         result = client.get_bond_yield("US3M.GBOND")
@@ -100,14 +100,14 @@ class TestEodClientBondYield:
 
     def test_no_timestamp_no_date_returns_none(self, monkeypatch):
         client = EODClient(api_key="dummy")
-        monkeypatch.setattr("src.eod_client._request_json",
+        monkeypatch.setattr("src.market_data.eod_client._request_json",
                             lambda url, params: {"close": 4.35})
         result = client.get_bond_yield("US3M.GBOND")
         assert result["date"] is None
 
     def test_history_returns_pct(self, monkeypatch):
         client = EODClient(api_key="dummy")
-        monkeypatch.setattr("src.eod_client._request_json",
+        monkeypatch.setattr("src.market_data.eod_client._request_json",
                             lambda url, params: [
                                 {"date": "2025-01-01", "adjusted_close": 4.30},
                                 {"date": "2025-01-02", "adjusted_close": 4.32},

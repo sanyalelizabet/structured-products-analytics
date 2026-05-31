@@ -34,10 +34,10 @@ import pytest
 from unittest.mock import MagicMock
 
 from data.factor_scenarios import FACTOR_SCENARIO_PRESETS
-from src.factor_engine import FACTORS, FactorEngine
-from src.factor_premiums import REGIMES
-from src.factor_scenario_engine import FactorScenarioEngine
-from src.market_data_engine import MarketDataEngine
+from src.risk.factor_engine import FACTORS, FactorEngine
+from src.risk.factor_premiums import REGIMES
+from src.risk.factor_scenario_engine import FactorScenarioEngine
+from src.market_data.market_data_engine import MarketDataEngine
 from tests.conftest import make_mbrc_row
 
 
@@ -286,7 +286,7 @@ class TestTechWreck:
         uses Moderate bull, COVID uses Stable).  We detrend both by
         subtracting the regime's MKT drift × horizon before comparing.
         """
-        from src.scenario_archetypes import initial_drift_dict
+        from src.risk.scenario_archetypes import initial_drift_dict
         from data.factor_scenarios import FACTOR_SCENARIO_PRESETS
 
         covid = _run(engine, "COVID March 2020")

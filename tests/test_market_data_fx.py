@@ -4,7 +4,7 @@ from unittest.mock import MagicMock
 import pandas as pd
 import pytest
 
-from src.market_data_engine import MarketDataEngine
+from src.market_data.market_data_engine import MarketDataEngine
 from src.exceptions import NetworkError
 
 

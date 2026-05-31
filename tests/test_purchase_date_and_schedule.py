@@ -9,7 +9,7 @@ Tests for the buy-date / coupon-schedule extension to ReverseConvertible:
 import math
 import pytest
 import pandas as pd
-from src.reverse_convertible import ReverseConvertible
+from src.pricing.products.reverse_convertible import ReverseConvertible
 from tests.conftest import make_brc_row
 
 

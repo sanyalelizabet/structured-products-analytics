@@ -21,9 +21,9 @@ import pytest
 from unittest.mock import MagicMock
 
 from data.factor_scenarios import FACTOR_SCENARIO_PRESETS
-from src.factor_engine import FACTORS
-from src.factor_premiums import REGIMES
-from src.factor_scenario_engine import FactorScenarioEngine
+from src.risk.factor_engine import FACTORS
+from src.risk.factor_premiums import REGIMES
+from src.risk.factor_scenario_engine import FactorScenarioEngine
 from tests.conftest import make_brc_row
 
 FIXED_TODAY = pd.Timestamp("2024-01-02")

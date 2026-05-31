@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.capital_protection_note import (
+from src.pricing.products.capital_protection_note import (
     CapitalProtectionNote,
     analytic_cpn_price,
     vectorised_cpn_summary,
@@ -176,8 +176,8 @@ def test_analytic_matches_monte_carlo():
 def test_scenario_engine_dispatches_to_cpn():
     """ScenarioEngine.run_path_scenario must route product_type=CPN to the
     CPN summary helper, not the BRC one."""
-    from src.capital_protection_note import vectorised_cpn_summary as real
-    from src import scenario_engine as se
+    from src.pricing.products.capital_protection_note import vectorised_cpn_summary as real
+    from src.risk import scenario_engine as se
 
     row = _make_cpn_row()
     # Build a fake (n_paths, n_days, 1) price tensor; only the terminal slice
@@ -196,7 +196,7 @@ def test_scenario_engine_dispatches_to_cpn():
 def test_factor_scenario_engine_dispatch_branch_exists():
     """Smoke test: import path resolves and CPN branch is present."""
     import inspect
-    from src import factor_scenario_engine as fse
+    from src.risk import factor_scenario_engine as fse
     src = inspect.getsource(fse)
     assert 'ptype == "CPN"' in src
     assert "vectorised_cpn_summary" in src
@@ -312,7 +312,7 @@ def test_portfolio_greeks_routes_cpn_and_brc_separately():
       * CPN fair value sits within MC noise of the analytic ZCB + scaled-BS-call
     """
     from src.pricing.monte_carlo import MonteCarloPricer
-    from src.capital_protection_note import analytic_cpn_price
+    from src.pricing.products.capital_protection_note import analytic_cpn_price
     from tests.conftest import make_brc_row
 
     # Build a 2-product portfolio: 1 BRC + 1 ATM CPN.  Use far-out maturities

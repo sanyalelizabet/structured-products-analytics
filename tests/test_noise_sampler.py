@@ -4,7 +4,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from src.noise_sampler import NoiseSampler, _stable_isin_seed
+from src.numerics.noise_sampler import NoiseSampler, _stable_isin_seed
 
 
 # ──────────────────────────────────────────────────────────────────────────

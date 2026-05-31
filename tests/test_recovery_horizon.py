@@ -13,12 +13,12 @@ import pandas as pd
 import pytest
 from unittest.mock import MagicMock
 
-from src.scenario_engine        import ScenarioEngine
-from src.factor_scenario_engine import FactorScenarioEngine
-from src.factor_engine          import FACTORS, FactorEngine
-from src.factor_premiums        import REGIMES
-from src.market_data_engine     import MarketDataEngine
-from src.noise_sampler          import NoiseSampler
+from src.risk.scenario_engine        import ScenarioEngine
+from src.risk.factor_scenario_engine import FactorScenarioEngine
+from src.risk.factor_engine          import FACTORS, FactorEngine
+from src.risk.factor_premiums        import REGIMES
+from src.market_data.market_data_engine     import MarketDataEngine
+from src.numerics.noise_sampler          import NoiseSampler
 
 
 def _neutral_premiums():
@@ -29,7 +29,7 @@ def _neutral_premiums():
         {c: [vals[r] for r in REGIMES] for c in FACTORS},
         index=pd.Index(list(REGIMES), name="regime"),
     )
-from src.scenario_archetypes    import (
+from src.risk.scenario_archetypes    import (
     EVENT_RECOVERY_ARCHETYPES,
     event_drift_for_factor,
     initial_drift_dict,

@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.factor_premiums import (
+from src.risk.factor_premiums import (
     DRIFT_CLIP_BAND,
     MIN_OBS_PER_REGIME,
     REGIME_ERP,
@@ -221,7 +221,7 @@ class TestGetFactorDrift:
             get_factor_drift("euphoria", ["MKT"], premiums=pd.DataFrame())
 
     def test_missing_cache_falls_back_to_regime_erp(self, tmp_path, monkeypatch):
-        from src import factor_premiums as fp
+        from src.risk import factor_premiums as fp
         monkeypatch.setattr(fp, "DEFAULT_CSV_PATH", tmp_path / "missing.csv")
         d = get_factor_drift("bear", ["MKT", "FX"])
         assert d == {"MKT": REGIME_ERP["bear"], "FX": REGIME_ERP["bear"]}
@@ -234,8 +234,8 @@ class TestGetFactorDrift:
 class TestIntegrationWithScenarioArchetypes:
 
     def test_initial_drift_dict_returns_per_factor_values(self):
-        from src.factor_engine import FACTORS
-        from src.scenario_archetypes import initial_drift_dict
+        from src.risk.factor_engine import FACTORS
+        from src.risk.scenario_archetypes import initial_drift_dict
         prem = pd.DataFrame(
             {c: [-0.05, 0.0, 0.1] for c in FACTORS},
             index=pd.Index(list(REGIMES), name="regime"),

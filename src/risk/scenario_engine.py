@@ -41,10 +41,10 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from src.barrier import sample_knock_in
-from src.linalg import safe_cholesky
-from src.noise_sampler import NoiseSampler
-from src.reverse_convertible import (
+from src.pricing.barrier import sample_knock_in
+from src.numerics.linalg import safe_cholesky
+from src.numerics.noise_sampler import NoiseSampler
+from src.pricing.products.reverse_convertible import (
     ReverseConvertible,
     barrier_levels,
     vectorised_european_rc_summary,
@@ -288,7 +288,7 @@ class ScenarioEngine:
         # their observation dates, while plain BRCs only need the terminal.
         ptype = str(row.get("product_type", "")).upper()
         if ptype == "IC_BRC":
-            from src.issuer_callable_reverse_convertible import (
+            from src.pricing.products.issuer_callable_reverse_convertible import (
                 vectorised_issuer_callable_rc_summary,
             )
             # Issuer call solved by optimal exercise; American knock-in (if any)
@@ -303,7 +303,7 @@ class ScenarioEngine:
                 row, price_paths, date_range, rf, breach_mask=mask,
             )
         elif ptype == "AC_BRC":
-            from src.autocallable_reverse_convertible import (
+            from src.pricing.products.autocallable_reverse_convertible import (
                 vectorised_autocallable_rc_summary,
             )
             # American autocallable: paths that run to maturity observe the
@@ -317,7 +317,7 @@ class ScenarioEngine:
                 row, price_paths, date_range, uncalled_breach_mask=mask,
             )
         elif ptype == "CPN":
-            from src.capital_protection_note import vectorised_cpn_summary
+            from src.pricing.products.capital_protection_note import vectorised_cpn_summary
             v = vectorised_cpn_summary(row, final_prices)
         elif str(row.get("type_style", "european")).lower() == "american":
             # Continuously-monitored barrier: knock-in is sampled over the whole

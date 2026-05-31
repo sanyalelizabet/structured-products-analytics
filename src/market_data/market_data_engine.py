@@ -7,8 +7,8 @@ from pathlib import Path
 from pandas.tseries.offsets import BDay
 
 from src.exceptions import DataFetchError
-from src.frankfurter_client import FrankfurterClient
-from src.snb_client import SNBClient
+from src.market_data.frankfurter_client import FrankfurterClient
+from src.market_data.snb_client import SNBClient
 
 log = logging.getLogger(__name__)
 
@@ -1218,6 +1218,47 @@ class MarketDataEngine:
                 surfaces[isin] = isin_slices
 
         return surfaces
+
+    def build_vol_surfaces(self, portfolio, valuation_date=None):
+        """Build per-ISIN term-structure-consistent implied volatility surfaces.
+
+        The method composes the per-(ISIN, expiry) slices produced by
+        :meth:`build_vol_surface_map` into a single :class:`VolSurface`
+        per underlying. The resulting object exposes the surface as a
+        function of strike *and* tenor, interpolating between listed
+        expiries by the linear-in-total-variance recipe of Gatheral
+        (2006) and extrapolating beyond the listed range by vol-flat
+        scaling of the appropriate anchor slice. The slice-level map
+        returned by :meth:`build_vol_surface_map` remains available
+        through the same engine instance for diagnostic access to
+        individual slices.
+
+        Parameters
+        ----------
+        portfolio : pd.DataFrame
+            Portfolio rows; must expose an ``underlying_isins`` column.
+        valuation_date : pd.Timestamp or str, optional
+            As-of date used to compute the tenor of each expiry. When
+            ``None`` the most recent ``fetch_date`` available in the
+            options database is used.
+
+        Returns
+        -------
+        dict
+            ``{ isin: VolSurface }``. ISINs without any chain coverage
+            are absent from the mapping. ISINs whose slices all fall
+            back to the chain proxy or constant fallback in Stage 1 are
+            present but in the surface's :data:`SURFACE_STATUS_FALLBACK`
+            regime, which the caller may interrogate via
+            ``surface.surface_status_at(T)``.
+        """
+        from src.pricing.vol_surface import VolSurface
+
+        slice_map = self.build_vol_surface_map(portfolio, valuation_date=valuation_date)
+        return {
+            isin: VolSurface.from_slice_map(isin, isin_slices)
+            for isin, isin_slices in slice_map.items()
+        }
 
     def build_isin_ticker_map(self, isins):
         """

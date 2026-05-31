@@ -6,6 +6,7 @@ Each test uses ``tmp_path`` so nothing touches the real
 from __future__ import annotations
 
 import json
+import csv
 
 import pytest
 
@@ -219,6 +220,95 @@ class TestReferenceCurrency:
 
 
 # ──────────────────────────────────────────────────────────────────────────
+# Fair-value snapshot persistence
+# ──────────────────────────────────────────────────────────────────────────
+
+class TestFairValueSnapshots:
+
+    def test_valuation_history_path_uses_portfolio_slug(self, tmp_path):
+        ps.save_new("My Portfolio", [], portfolios_dir=tmp_path)
+        assert (
+            ps.valuation_history_path("MY PORTFOLIO", portfolios_dir=tmp_path)
+            == tmp_path / "my-portfolio_fair_values.csv"
+        )
+
+    def test_save_valuation_snapshot_writes_sidecar_csv(self, tmp_path):
+        ps.save_new("p", [{"product_id": "X"}], portfolios_dir=tmp_path)
+        path = ps.save_valuation_snapshot(
+            "p",
+            [{
+                "product_id": "X",
+                "fair_value": 100.25,
+                "fair_value_pct": 1.0025,
+                "std_error": 0.12,
+            }],
+            valuation_date="2026-05-30",
+            portfolios_dir=tmp_path,
+            reference_currency="USD",
+        )
+
+        assert path == tmp_path / "p_fair_values.csv"
+        rows = list(csv.DictReader(path.open(encoding="utf-8")))
+        assert len(rows) == 1
+        assert rows[0]["valuation_date"] == "2026-05-30"
+        assert rows[0]["portfolio_slug"] == "p"
+        assert rows[0]["reference_currency"] == "USD"
+        assert rows[0]["product_id"] == "X"
+        assert rows[0]["fair_value"] == "100.25"
+
+    def test_same_date_and_product_are_replaced(self, tmp_path):
+        ps.save_new("p", [{"product_id": "X"}], portfolios_dir=tmp_path)
+        ps.save_valuation_snapshot(
+            "p",
+            [{"product_id": "X", "fair_value": 100.0}],
+            valuation_date="2026-05-30",
+            portfolios_dir=tmp_path,
+        )
+        ps.save_valuation_snapshot(
+            "p",
+            [{"product_id": "X", "fair_value": 101.0}],
+            valuation_date="2026-05-30",
+            portfolios_dir=tmp_path,
+        )
+
+        rows = list(csv.DictReader(
+            (tmp_path / "p_fair_values.csv").open(encoding="utf-8")
+        ))
+        assert len(rows) == 1
+        assert rows[0]["fair_value"] == "101.0"
+
+    def test_different_valuation_dates_are_retained(self, tmp_path):
+        ps.save_new("p", [{"product_id": "X"}], portfolios_dir=tmp_path)
+        ps.save_valuation_snapshot(
+            "p",
+            [{"product_id": "X", "fair_value": 100.0}],
+            valuation_date="2026-05-29",
+            portfolios_dir=tmp_path,
+        )
+        ps.save_valuation_snapshot(
+            "p",
+            [{"product_id": "X", "fair_value": 101.0}],
+            valuation_date="2026-05-30",
+            portfolios_dir=tmp_path,
+        )
+
+        rows = list(csv.DictReader(
+            (tmp_path / "p_fair_values.csv").open(encoding="utf-8")
+        ))
+        assert [row["valuation_date"] for row in rows] == [
+            "2026-05-29", "2026-05-30"
+        ]
+
+    def test_unknown_portfolio_raises(self, tmp_path):
+        with pytest.raises(ps.NotFoundError):
+            ps.save_valuation_snapshot(
+                "missing",
+                [{"product_id": "X", "fair_value": 100.0}],
+                portfolios_dir=tmp_path,
+            )
+
+
+# ──────────────────────────────────────────────────────────────────────────
 # Delete (owner-key gated)
 # ──────────────────────────────────────────────────────────────────────────
 
@@ -228,6 +318,19 @@ class TestDelete:
         _, key = ps.save_new("p", [], portfolios_dir=tmp_path)
         ps.delete("p", key, portfolios_dir=tmp_path)
         assert not ps.exists("p", portfolios_dir=tmp_path)
+
+    def test_delete_removes_valuation_sidecar(self, tmp_path):
+        _, key = ps.save_new("p", [{"product_id": "X"}], portfolios_dir=tmp_path)
+        ps.save_valuation_snapshot(
+            "p",
+            [{"product_id": "X", "fair_value": 100.0}],
+            portfolios_dir=tmp_path,
+        )
+        assert (tmp_path / "p_fair_values.csv").exists()
+
+        ps.delete("p", key, portfolios_dir=tmp_path)
+
+        assert not (tmp_path / "p_fair_values.csv").exists()
 
     def test_delete_with_wrong_key_raises(self, tmp_path):
         ps.save_new("p", [], portfolios_dir=tmp_path)

@@ -17,7 +17,7 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 
-from src.reverse_convertible import (
+from src.pricing.products.reverse_convertible import (
     ReverseConvertible,
     vectorised_european_rc_summary,
 )

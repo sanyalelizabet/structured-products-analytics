@@ -7,7 +7,7 @@ import pytest
 import pandas as pd
 import numpy as np
 from datetime import datetime
-from src.portfolio_analytics import PortfolioAnalytics
+from src.portfolio.portfolio_analytics import PortfolioAnalytics
 from tests.conftest import make_portfolio, make_brc_row, make_mbrc_row
 
 

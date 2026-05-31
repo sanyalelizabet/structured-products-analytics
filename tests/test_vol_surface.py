@@ -35,16 +35,29 @@ from src.pricing.vol_surface import (
     FIT_STATUS_FALLBACK,
     FIT_STATUS_PROXY,
     FIT_STATUS_SVI,
+    LV_IV_RATIO_WARNING,
+    SIGMA_LV_FLOOR,
+    SIGMA_LV_HARD_CAP,
+    SIGMA_LV_WARNING,
+    SURFACE_STATUS_EXTRAPOLATED,
+    SURFACE_STATUS_FALLBACK,
+    SURFACE_STATUS_INTERPOLATED,
+    SURFACE_STATUS_SINGLE_SLICE,
     SVICalibrationError,
     SVIParams,
     VolSliceSurface,
+    VolSurface,
+    build_product_vol_map,
     check_durrleman_butterfly,
     check_wing_bounds,
+    extrapolate_atm_scaling,
     fit_svi_slice,
+    interpolate_total_variance,
     nearest_strike_proxy,
     quality_gate,
     svi_implied_vol,
     svi_total_variance,
+    verify_calendar_monotone,
 )
 
 
@@ -442,3 +455,815 @@ class TestRealDataSmoke:
         K_query = forward * 0.9
         sigma = float(slice_surface.sigma(K_query))
         assert 0.01 < sigma < 5.0
+
+
+# ---------------------------------------------------------------------------
+# Term-structure assembly: interpolator + extrapolator + VolSurface
+# ---------------------------------------------------------------------------
+
+def _make_svi_slice(T: float, params: SVIParams, forward: float = 100.0) -> VolSliceSurface:
+    """Construct an SVI-branch :class:`VolSliceSurface` directly for tests."""
+    return VolSliceSurface(
+        isin="SYN", T=T, forward=forward, fit_status=FIT_STATUS_SVI,
+        params=params,
+        chain_strikes=np.array([forward]),
+        chain_ivs=np.array([0.20]),
+        n_strikes=10,
+        k_range=(-0.4, 0.4),
+        rmse=0.005,
+        max_resid=0.01,
+    )
+
+
+class TestTotalVarianceInterpolator:
+    """The convex combination of total variance between two slices."""
+
+    @pytest.fixture
+    def two_slices(self) -> tuple[SVIParams, SVIParams]:
+        return (
+            SVIParams(a=0.04, b=0.40, rho=-0.4, m=0.0, sigma=0.1),
+            SVIParams(a=0.08, b=0.40, rho=-0.4, m=0.0, sigma=0.1),
+        )
+
+    def test_endpoint_identity(self, two_slices):
+        p_left, p_right = two_slices
+        k = np.linspace(-0.4, 0.4, 9)
+        np.testing.assert_allclose(
+            interpolate_total_variance(k, 1.0, 1.0, p_left, 2.0, p_right),
+            svi_total_variance(k, p_left), rtol=0, atol=1e-14,
+        )
+        np.testing.assert_allclose(
+            interpolate_total_variance(k, 2.0, 1.0, p_left, 2.0, p_right),
+            svi_total_variance(k, p_right), rtol=0, atol=1e-14,
+        )
+
+    def test_midpoint_linearity(self, two_slices):
+        # At T = (T_left + T_right) / 2 the interpolator must produce
+        # exactly the pointwise mean of the two endpoint total variances.
+        p_left, p_right = two_slices
+        k = np.linspace(-0.4, 0.4, 9)
+        w_mid_expected = 0.5 * (svi_total_variance(k, p_left)
+                                + svi_total_variance(k, p_right))
+        np.testing.assert_allclose(
+            interpolate_total_variance(k, 1.5, 1.0, p_left, 2.0, p_right),
+            w_mid_expected, rtol=0, atol=1e-14,
+        )
+
+    def test_bracket_order_rejected(self, two_slices):
+        p_left, p_right = two_slices
+        with pytest.raises(ValueError, match="T_left < T_right"):
+            interpolate_total_variance(0.0, 1.5, 2.0, p_left, 1.0, p_right)
+
+    def test_out_of_bracket_rejected(self, two_slices):
+        p_left, p_right = two_slices
+        with pytest.raises(ValueError, match="bracketing interval"):
+            interpolate_total_variance(0.0, 5.0, 1.0, p_left, 2.0, p_right)
+
+
+class TestATMScalingExtrapolator:
+    """Vol-flat extension of a single anchor slice."""
+
+    def test_anchor_identity(self):
+        p = SVIParams(a=0.04, b=0.4, rho=-0.4, m=0.0, sigma=0.1)
+        k = np.linspace(-0.4, 0.4, 9)
+        np.testing.assert_allclose(
+            extrapolate_atm_scaling(k, 1.0, 1.0, p),
+            svi_total_variance(k, p), rtol=0, atol=1e-14,
+        )
+
+    def test_vol_flat_invariant(self):
+        # The defining property: sigma(k, T_query) equals sigma(k, T_anchor)
+        # for any positive T_query.
+        p = SVIParams(a=0.04, b=0.4, rho=-0.4, m=0.0, sigma=0.1)
+        k = np.linspace(-0.3, 0.3, 7)
+        sigma_anchor = svi_implied_vol(k, 1.0, p)
+        for T_query in (0.25, 0.5, 1.0, 2.0, 5.0):
+            w = extrapolate_atm_scaling(k, T_query, 1.0, p)
+            sigma_q = np.sqrt(w / T_query)
+            np.testing.assert_allclose(sigma_q, sigma_anchor, rtol=0, atol=1e-12)
+
+    def test_nonpositive_tenor_rejected(self):
+        p = SVIParams(a=0.04, b=0.4, rho=-0.4, m=0.0, sigma=0.1)
+        with pytest.raises(ValueError, match="T_query"):
+            extrapolate_atm_scaling(0.0, -0.5, 1.0, p)
+        with pytest.raises(ValueError, match="T_anchor"):
+            extrapolate_atm_scaling(0.0, 1.0, 0.0, p)
+
+
+class TestCalendarMonotonicityAudit:
+    """Detection of total-variance non-monotonicity between slices."""
+
+    def test_healthy_surface_passes(self):
+        p1 = SVIParams(a=0.02, b=0.40, rho=-0.4, m=0.0, sigma=0.1)
+        p2 = SVIParams(a=0.04, b=0.40, rho=-0.4, m=0.0, sigma=0.1)
+        p3 = SVIParams(a=0.08, b=0.40, rho=-0.4, m=0.0, sigma=0.1)
+        records = [(0.5, p1, _make_svi_slice(0.5, p1)),
+                   (1.0, p2, _make_svi_slice(1.0, p2)),
+                   (2.0, p3, _make_svi_slice(2.0, p3))]
+        assert verify_calendar_monotone(records) == []
+
+    def test_inverted_surface_caught(self):
+        # Total variance falls when moving from T=1Y to T=2Y at every k.
+        p1 = SVIParams(a=0.04, b=0.40, rho=-0.4, m=0.0, sigma=0.1)
+        p2 = SVIParams(a=0.01, b=0.40, rho=-0.4, m=0.0, sigma=0.1)
+        records = [(1.0, p1, _make_svi_slice(1.0, p1)),
+                   (2.0, p2, _make_svi_slice(2.0, p2))]
+        violations = verify_calendar_monotone(records)
+        assert len(violations) == 1
+        v = violations[0]
+        assert v["T_left"] == 1.0 and v["T_right"] == 2.0
+        assert v["deficit"] > 0.0
+
+    def test_single_slice_skipped(self):
+        p1 = SVIParams(a=0.04, b=0.40, rho=-0.4, m=0.0, sigma=0.1)
+        assert verify_calendar_monotone([(1.0, p1, _make_svi_slice(1.0, p1))]) == []
+
+    def test_empty_records_skipped(self):
+        assert verify_calendar_monotone([]) == []
+
+
+class TestVolSurface:
+    """End-to-end VolSurface dispatch across the four status branches."""
+
+    @pytest.fixture
+    def three_slice_surface(self) -> VolSurface:
+        # Monotone ATM variance: 0.06, 0.08, 0.16 at T = 0.5, 1.0, 2.0.
+        p1 = SVIParams(a=0.02, b=0.40, rho=-0.4, m=0.0, sigma=0.1)
+        p2 = SVIParams(a=0.04, b=0.40, rho=-0.4, m=0.0, sigma=0.1)
+        p3 = SVIParams(a=0.12, b=0.40, rho=-0.4, m=0.0, sigma=0.1)
+        return VolSurface.from_slice_map("SYN", {
+            "2026-12-01": _make_svi_slice(0.5, p1),
+            "2027-06-01": _make_svi_slice(1.0, p2),
+            "2028-06-01": _make_svi_slice(2.0, p3),
+        })
+
+    def test_listed_tenor_reproduces_slice(self, three_slice_surface):
+        # At a listed expiry the surface must equal the slice's SVI sigma.
+        K = np.array([70.0, 100.0, 130.0])
+        for T, params in (
+            (0.5, SVIParams(a=0.02, b=0.40, rho=-0.4, m=0.0, sigma=0.1)),
+            (1.0, SVIParams(a=0.04, b=0.40, rho=-0.4, m=0.0, sigma=0.1)),
+            (2.0, SVIParams(a=0.12, b=0.40, rho=-0.4, m=0.0, sigma=0.1)),
+        ):
+            k = np.log(K / 100.0)
+            np.testing.assert_allclose(
+                three_slice_surface.sigma(K, T),
+                svi_implied_vol(k, T, params),
+                rtol=0, atol=1e-12,
+            )
+
+    def test_interior_query_is_interpolation(self, three_slice_surface):
+        status, _ = three_slice_surface.surface_status_at(1.5)
+        assert status == SURFACE_STATUS_INTERPOLATED
+        # At T = 1.5, k = 0, the total variance must equal the midpoint
+        # between w(0, T=1) = 0.08 and w(0, T=2) = 0.16, i.e. 0.12,
+        # giving sigma = sqrt(0.12 / 1.5) = sqrt(0.08) ~= 0.2828.
+        sigma = float(three_slice_surface.sigma(100.0, 1.5))
+        assert sigma == pytest.approx(np.sqrt(0.12 / 1.5), rel=1e-10)
+
+    def test_above_listed_range_extrapolated(self, three_slice_surface):
+        status, reason = three_slice_surface.surface_status_at(3.0)
+        assert status == SURFACE_STATUS_EXTRAPOLATED
+        assert "longest" in reason
+        # Vol-flat extrapolation: sigma(F, 3.0) equals sigma(F, 2.0).
+        sigma_three = float(three_slice_surface.sigma(100.0, 3.0))
+        sigma_two   = float(three_slice_surface.sigma(100.0, 2.0))
+        assert sigma_three == pytest.approx(sigma_two, rel=1e-10)
+
+    def test_below_listed_range_extrapolated(self, three_slice_surface):
+        status, reason = three_slice_surface.surface_status_at(0.1)
+        assert status == SURFACE_STATUS_EXTRAPOLATED
+        assert "shorter" in reason
+        sigma_short  = float(three_slice_surface.sigma(100.0, 0.1))
+        sigma_anchor = float(three_slice_surface.sigma(100.0, 0.5))
+        assert sigma_short == pytest.approx(sigma_anchor, rel=1e-10)
+
+    def test_single_slice_branch(self):
+        p = SVIParams(a=0.04, b=0.40, rho=-0.4, m=0.0, sigma=0.1)
+        surf = VolSurface.from_slice_map("ONE", {"a": _make_svi_slice(1.0, p)})
+        status, _ = surf.surface_status_at(2.5)
+        assert status == SURFACE_STATUS_SINGLE_SLICE
+        # Vol-flat: sigma(F, T) is invariant in T.
+        for T in (0.5, 1.0, 2.0, 5.0):
+            assert float(surf.sigma(100.0, T)) == pytest.approx(
+                float(np.sqrt(svi_total_variance(0.0, p))), rel=1e-12
+            )
+
+    def test_no_slice_falls_back_to_constant(self):
+        surf = VolSurface.from_slice_map("NONE", {})
+        status, _ = surf.surface_status_at(1.0)
+        assert status == SURFACE_STATUS_FALLBACK
+        assert float(surf.sigma(50.0, 1.0)) == DEFAULT_FALLBACK_VOL
+        assert float(surf.sigma(150.0, 1.0)) == DEFAULT_FALLBACK_VOL
+
+    def test_proxy_and_fallback_slices_ignored_in_assembly(self):
+        # Proxy and fallback slices must not enter the SVI list.
+        p = SVIParams(a=0.04, b=0.40, rho=-0.4, m=0.0, sigma=0.1)
+        proxy_slice = VolSliceSurface(
+            isin="X", T=1.0, forward=100.0,
+            fit_status=FIT_STATUS_PROXY,
+            chain_strikes=np.array([100.0]), chain_ivs=np.array([0.2]),
+            n_strikes=1,
+        )
+        fb_slice = VolSliceSurface(
+            isin="X", T=2.0, forward=100.0,
+            fit_status=FIT_STATUS_FALLBACK,
+            fallback_sigma=0.15,
+        )
+        surf = VolSurface.from_slice_map("MIX", {
+            "a": _make_svi_slice(0.5, p),
+            "b": proxy_slice,
+            "c": fb_slice,
+        })
+        assert surf.n_svi_slices == 1   # only the SVI slice participates
+        status, _ = surf.surface_status_at(1.5)
+        assert status == SURFACE_STATUS_SINGLE_SLICE
+
+    def test_vectorised_sigma(self, three_slice_surface):
+        K = np.array([70.0, 100.0, 130.0])
+        result = three_slice_surface.sigma(K, 1.5)
+        assert result.shape == K.shape
+        for k_i, r in zip(K, result):
+            assert float(r) == pytest.approx(
+                float(three_slice_surface.sigma(float(k_i), 1.5)), rel=1e-12
+            )
+
+    def test_sigma_at_moneyness_consistency(self, three_slice_surface):
+        m, T = 0.9, 1.25
+        assert float(three_slice_surface.sigma_at_moneyness(m, T)) == pytest.approx(
+            float(three_slice_surface.sigma(m * 100.0, T)), rel=1e-12
+        )
+
+    def test_negative_tenor_rejected(self, three_slice_surface):
+        with pytest.raises(ValueError, match="T must be strictly positive"):
+            three_slice_surface.sigma(100.0, -1.0)
+
+    def test_negative_strike_rejected(self, three_slice_surface):
+        with pytest.raises(ValueError, match="strictly positive"):
+            three_slice_surface.sigma(-5.0, 1.0)
+
+    def test_inverted_pair_records_violation(self):
+        # Construct an inverted surface and verify the audit field
+        # exposes the violation while the surface remains usable.
+        p1 = SVIParams(a=0.10, b=0.40, rho=-0.4, m=0.0, sigma=0.1)   # T=1, w_ATM = 0.14
+        p2 = SVIParams(a=0.01, b=0.40, rho=-0.4, m=0.0, sigma=0.1)   # T=2, w_ATM = 0.05
+        surf = VolSurface.from_slice_map("BAD", {
+            "a": _make_svi_slice(1.0, p1),
+            "b": _make_svi_slice(2.0, p2),
+        })
+        assert surf.calendar_violations
+        v = surf.calendar_violations[0]
+        assert v["deficit"] > 0.0
+        # The surface is still queryable -- audit does not block use.
+        sigma = float(surf.sigma(100.0, 1.5))
+        assert 0.0 < sigma < 5.0
+
+    def test_strictly_increasing_tenors_required(self):
+        p = SVIParams(a=0.04, b=0.40, rho=-0.4, m=0.0, sigma=0.1)
+        with pytest.raises(ValueError, match="strictly increasing"):
+            VolSurface(
+                isin="X", forward=100.0,
+                slice_records=[(1.0, p, _make_svi_slice(1.0, p)),
+                               (1.0, p, _make_svi_slice(1.0, p))],
+            )
+
+
+# ---------------------------------------------------------------------------
+# Stage 3 Substage A: product-specific vol map
+# ---------------------------------------------------------------------------
+
+class TestBuildProductVolMap:
+    """Per-product surface-aware volatility resolution."""
+
+    @pytest.fixture
+    def equity_surface(self) -> VolSurface:
+        # ATM total variance rises 0.02 -> 0.04 -> 0.08 across T = 0.5, 1, 2.
+        slice_map = {}
+        for T, a in [(0.5, 0.02), (1.0, 0.04), (2.0, 0.08)]:
+            p = SVIParams(a=a, b=0.40, rho=-0.4, m=0.0, sigma=0.1)
+            slice_map[str(T)] = _make_svi_slice(T, p, forward=100.0)
+        return VolSurface.from_slice_map("EQUITY", slice_map)
+
+    @pytest.fixture
+    def brc_product(self) -> pd.Series:
+        return pd.Series({
+            "product_type":     "BRC",
+            "underlying_isins": ["EQUITY"],
+            "initial_levels":   [100.0],
+            "barrier_pct":      0.65,
+            "maturity_date":    pd.Timestamp("2028-05-30"),
+        })
+
+    def test_surface_lookup_picks_barrier_strike_vol(self, equity_surface, brc_product):
+        # Two-year maturity from a 2026-05-30 valuation date sits inside
+        # the listed slice range (T_max = 2.0), so the lookup should be
+        # either interpolated or extrapolated; either way, the resolved
+        # sigma must be the vol at the 65 % barrier strike rather than
+        # the at-the-money vol.
+        valuation = pd.Timestamp("2026-05-30")
+        vmap, diag = build_product_vol_map(
+            brc_product,
+            vol_surfaces={"EQUITY": equity_surface},
+            fallback_vol_map={"EQUITY": 0.30},   # legacy ATM input
+            valuation_date=valuation,
+        )
+        sigma = vmap["EQUITY"]
+        # Sigma at K=65 must exceed sigma at K=100 under the negative
+        # skew of the synthetic surface.
+        T_resid = (pd.Timestamp(brc_product["maturity_date"]) - valuation).days / 365.25
+        sigma_atm = float(equity_surface.sigma(100.0, T_resid))
+        sigma_barrier = float(equity_surface.sigma(65.0, T_resid))
+        assert sigma == pytest.approx(sigma_barrier, rel=1e-10)
+        assert sigma > sigma_atm
+        assert diag[0]["source"] == "surface"
+
+    def test_missing_surface_falls_back(self, brc_product):
+        vmap, diag = build_product_vol_map(
+            brc_product,
+            vol_surfaces={},                     # no surface for EQUITY
+            fallback_vol_map={"EQUITY": 0.30},
+            valuation_date=pd.Timestamp("2026-05-30"),
+        )
+        assert vmap["EQUITY"] == 0.30
+        assert diag[0]["source"] == "fallback"
+        assert diag[0]["surface_status"] == "no_surface"
+
+    def test_surface_in_fallback_regime_uses_legacy_map(self, brc_product):
+        empty_surface = VolSurface.from_slice_map("EQUITY", {})
+        vmap, diag = build_product_vol_map(
+            brc_product,
+            vol_surfaces={"EQUITY": empty_surface},
+            fallback_vol_map={"EQUITY": 0.30},
+            valuation_date=pd.Timestamp("2026-05-30"),
+        )
+        assert vmap["EQUITY"] == 0.30
+        assert diag[0]["source"] == "fallback"
+        assert diag[0]["surface_status"] == SURFACE_STATUS_FALLBACK
+
+    def test_matured_product_falls_back(self, equity_surface, brc_product):
+        # Maturity in the past -> tenor non-positive -> fallback.
+        product = brc_product.copy()
+        product["maturity_date"] = pd.Timestamp("2024-01-01")
+        vmap, diag = build_product_vol_map(
+            product,
+            vol_surfaces={"EQUITY": equity_surface},
+            fallback_vol_map={"EQUITY": 0.30},
+            valuation_date=pd.Timestamp("2026-05-30"),
+        )
+        assert vmap["EQUITY"] == 0.30
+        assert diag[0]["surface_status"] == "tenor_non_positive"
+
+    def test_worst_of_with_mixed_surface_coverage(self, equity_surface):
+        # Two-underlying BRC: one isin has a surface, the other does not.
+        product = pd.Series({
+            "product_type":     "BRC",
+            "underlying_isins": ["EQUITY", "OTHER"],
+            "initial_levels":   [100.0, 50.0],
+            "barrier_pct":      0.65,
+            "maturity_date":    pd.Timestamp("2027-05-30"),
+        })
+        vmap, diag = build_product_vol_map(
+            product,
+            vol_surfaces={"EQUITY": equity_surface},
+            fallback_vol_map={"EQUITY": 0.30, "OTHER": 0.40},
+            valuation_date=pd.Timestamp("2026-05-30"),
+        )
+        # EQUITY -> surface; OTHER -> fallback.
+        assert diag[0]["source"] == "surface"
+        assert diag[1]["source"] == "fallback"
+        assert diag[1]["surface_status"] == "no_surface"
+        # The OTHER barrier strike was computed correctly.
+        assert diag[1]["K_barrier"] == pytest.approx(50.0 * 0.65, rel=1e-12)
+
+    def test_diagnostics_include_barrier_strike_and_tenor(self, equity_surface, brc_product):
+        valuation = pd.Timestamp("2026-05-30")
+        _, diag = build_product_vol_map(
+            brc_product,
+            vol_surfaces={"EQUITY": equity_surface},
+            fallback_vol_map={"EQUITY": 0.30},
+            valuation_date=valuation,
+        )
+        assert diag[0]["K_barrier"] == pytest.approx(65.0, rel=1e-12)
+        assert diag[0]["T"] == pytest.approx(
+            (pd.Timestamp(brc_product["maturity_date"]) - valuation).days / 365.25,
+            rel=1e-12,
+        )
+
+    def test_pricer_integration_shifts_fair_value(self):
+        # End-to-end: compute_portfolio_greeks with vs without
+        # vol_surfaces on a single-underlying European BRC. Under a
+        # negative-skew surface the bond NPV should fall (barrier-zone
+        # vol is higher than ATM), reducing the fair value of the
+        # security relative to the legacy constant-ATM-vol baseline.
+        from src.pricing.monte_carlo import MonteCarloPricer
+        from tests.conftest import make_brc_row
+
+        # Build a synthetic equity surface whose anchor ISIN matches the
+        # ISIN used by the canonical make_brc_row fixture.
+        forward = 100.0
+        slice_map = {}
+        for T, a in [(0.5, 0.02), (1.0, 0.04), (2.0, 0.08)]:
+            p = SVIParams(a=a, b=0.40, rho=-0.4, m=0.0, sigma=0.1)
+            slice_map[str(T)] = _make_svi_slice(T, p, forward=forward)
+        brc_isin = "CH0012221716"
+        equity_surface = VolSurface.from_slice_map(brc_isin, slice_map)
+
+        row = make_brc_row(
+            barrier_pct=0.65,
+            initial_level=100.0,
+            current_spot=100.0,
+            initial_fixing_date="2026-05-30",
+            maturity_date="2028-05-30",
+        )
+        portfolio = pd.DataFrame([row])
+        vol_map_legacy = {brc_isin: 0.30}    # legacy ATM-vol input
+        risk_free = {"CHF": 0.01}
+
+        pricer = MonteCarloPricer(n_paths=3000, seed=42)
+        _, _, fv_legacy = pricer.compute_portfolio_greeks(
+            portfolio, vol_map_legacy, risk_free,
+        )
+        _, _, fv_surface = pricer.compute_portfolio_greeks(
+            portfolio, vol_map_legacy, risk_free,
+            vol_surfaces={brc_isin: equity_surface},
+            valuation_date=pd.Timestamp("2026-05-30"),
+        )
+        # The two fair values must differ -- the surface input changes
+        # the barrier-hit probability -- and the direction must agree
+        # with the sign of the skew correction. Under a negative skew
+        # the barrier-strike vol exceeds the ATM vol, the barrier-hit
+        # probability rises, the bond is worth less, and the fair value
+        # falls.
+        fv_l = float(fv_legacy["fair_value"].iloc[0])
+        fv_s = float(fv_surface["fair_value"].iloc[0])
+        assert fv_s < fv_l, (
+            f"Expected surface fair value (={fv_s:.4f}) to fall below "
+            f"the legacy ATM-vol baseline (={fv_l:.4f}) under negative skew."
+        )
+
+
+# ---------------------------------------------------------------------------
+# Stage 3 Substage B (foundations): Dupire local volatility
+# ---------------------------------------------------------------------------
+
+class TestLocalVolatility:
+    """Dupire local volatility on the assembled surface."""
+
+    def _flat_surface(self, sigma_const: float = 0.20) -> VolSurface:
+        # SVI with b ~ 0 gives a flat smile; varying ATM variance with T
+        # so that sigma at every (k, T) equals sigma_const exactly.
+        slice_map = {}
+        for T in (0.5, 1.0, 2.0):
+            p = SVIParams(a=sigma_const ** 2 * T,
+                          b=1.0e-6, rho=0.0, m=0.0, sigma=0.1)
+            slice_map[str(T)] = _make_svi_slice(T, p, forward=100.0)
+        return VolSurface.from_slice_map("FLAT", slice_map)
+
+    def _skewed_surface(self) -> VolSurface:
+        # Three-slice negative-skew equity-like surface.
+        slice_map = {}
+        for T, a in [(0.5, 0.02), (1.0, 0.04), (2.0, 0.08)]:
+            p = SVIParams(a=a, b=0.40, rho=-0.4, m=0.0, sigma=0.1)
+            slice_map[str(T)] = _make_svi_slice(T, p, forward=100.0)
+        return VolSurface.from_slice_map("SKEW", slice_map)
+
+    def test_flat_surface_local_vol_equals_implied(self):
+        # On a constant-volatility surface, the Dupire identity reduces
+        # to sigma_LV == sigma_IV at every (K, T).
+        surf = self._flat_surface(sigma_const=0.20)
+        for K in (70.0, 100.0, 130.0):
+            for T in (0.75, 1.5):
+                lv = float(surf.local_volatility(K, T))
+                iv = float(surf.sigma(K, T))
+                assert lv == pytest.approx(iv, abs=1.0e-3)
+
+    def test_skewed_surface_amplifies_put_wing(self):
+        # Under negative skew, the local volatility at a deep OTM put
+        # strike exceeds the implied volatility at the same point
+        # (Dupire amplification).
+        surf = self._skewed_surface()
+        K_otm = 70.0
+        lv = float(surf.local_volatility(K_otm, 1.0))
+        iv = float(surf.sigma(K_otm, 1.0))
+        assert lv > iv
+
+    def test_vectorised_output_shape(self):
+        surf = self._skewed_surface()
+        K = np.array([70.0, 100.0, 130.0])
+        out = surf.local_volatility(K, 1.5)
+        assert out.shape == K.shape
+
+    def test_hard_cap_is_two_hundred_percent(self):
+        # SIGMA_LV_HARD_CAP is the production threshold; values in
+        # [SIGMA_LV_WARNING, SIGMA_LV_HARD_CAP] are *not* clipped.
+        assert SIGMA_LV_HARD_CAP == 2.00
+        assert SIGMA_LV_WARNING == 1.00
+        assert LV_IV_RATIO_WARNING == 3.00
+
+    def test_warning_recorded_for_extreme_local_vol(self):
+        # Construct a surface with very steep put-wing skew that
+        # produces sigma_LV above the one-hundred-per-cent threshold
+        # at some strikes.
+        surf = VolSurface.from_slice_map("STEEP", {
+            "a": _make_svi_slice(1.0, SVIParams(a=0.005, b=0.80, rho=-0.85, m=0.0, sigma=0.02)),
+            "b": _make_svi_slice(2.0, SVIParams(a=0.010, b=0.80, rho=-0.85, m=0.0, sigma=0.02)),
+        })
+        # Query a deep OTM put strike and a benign ATM strike.
+        K_deep = 60.0
+        K_atm  = 100.0
+        sigma_deep = float(surf.local_volatility(K_deep, 1.5))
+        sigma_atm  = float(surf.local_volatility(K_atm,  1.5))
+        # Trigger condition: either sigma_lv > 1.0 OR sigma_lv/sigma_iv > 3.
+        if sigma_deep > SIGMA_LV_WARNING:
+            assert surf.local_vol_warning_count >= 1
+            assert any(e["code"] == "LV_WARNING_EXTREME_PUT_WING"
+                       for e in surf.local_vol_warning_events)
+        # Benign ATM strike should never trigger a warning.
+        assert sigma_atm < SIGMA_LV_WARNING
+
+    def test_damping_cap_applies_after_hard_cap(self):
+        # On a surface that produces large local vols, the damping cap
+        # truncates the output below the hard cap without modifying the
+        # pure-Dupire branch.
+        surf = VolSurface.from_slice_map("STEEP", {
+            "a": _make_svi_slice(1.0, SVIParams(a=0.005, b=0.80, rho=-0.85, m=0.0, sigma=0.02)),
+            "b": _make_svi_slice(2.0, SVIParams(a=0.010, b=0.80, rho=-0.85, m=0.0, sigma=0.02)),
+        })
+        K_deep = 60.0
+        raw    = float(surf.local_volatility(K_deep, 1.5))
+        damped = float(surf.local_volatility(K_deep, 1.5, damping_cap=0.8))
+        if raw > 0.8:
+            assert damped == pytest.approx(0.8, rel=1.0e-12)
+        else:
+            assert damped == pytest.approx(raw, rel=1.0e-12)
+
+    def test_damping_cap_must_be_positive(self):
+        surf = self._skewed_surface()
+        with pytest.raises(ValueError, match="damping_cap"):
+            surf.local_volatility(100.0, 1.0, damping_cap=0.0)
+        with pytest.raises(ValueError, match="damping_cap"):
+            surf.local_volatility(100.0, 1.0, damping_cap=-0.1)
+
+    def test_fallback_surface_raises(self):
+        # Pure-fallback surfaces have no calibrated information from
+        # which to derive Dupire local volatility.
+        surf = VolSurface.from_slice_map("EMPTY", {})
+        with pytest.raises(ValueError, match="local_volatility is undefined"):
+            surf.local_volatility(100.0, 1.0)
+
+    def test_nonpositive_inputs_rejected(self):
+        surf = self._skewed_surface()
+        with pytest.raises(ValueError, match="T must be strictly positive"):
+            surf.local_volatility(100.0, -1.0)
+        with pytest.raises(ValueError, match=r"strike\(s\) must be"):
+            surf.local_volatility(-5.0, 1.0)
+
+    def test_clip_count_does_not_increment_on_damping(self):
+        # Damping clips are an opt-in transformation, not a numerical
+        # guard, and must not be conflated with hard-cap or floor
+        # events in ``local_vol_clip_count``.
+        surf = self._skewed_surface()
+        surf.local_vol_clip_count = 0
+        # Query a benign point first to confirm no clips.
+        surf.local_volatility(100.0, 1.0)
+        baseline = surf.local_vol_clip_count
+        # Apply a tight damping cap that would force a truncation.
+        surf.local_volatility(70.0, 0.5, damping_cap=0.10)
+        assert surf.local_vol_clip_count == baseline
+
+
+# ---------------------------------------------------------------------------
+# Stage 3 Substage B (integration): local-vol Monte Carlo
+# ---------------------------------------------------------------------------
+
+class TestLocalVolMonteCarlo:
+    """Path generation under Dupire local volatility + pricer integration."""
+
+    def _flat_surface(self, sigma_const: float, forward: float) -> VolSurface:
+        slice_map = {}
+        for T in (0.5, 1.0, 2.0):
+            p = SVIParams(a=sigma_const ** 2 * T,
+                          b=1.0e-6, rho=0.0, m=0.0, sigma=0.1)
+            slice_map[str(T)] = _make_svi_slice(T, p, forward=forward)
+        return VolSurface.from_slice_map("FLAT", slice_map)
+
+    def _negative_skew_surface(self, forward: float = 100.0) -> VolSurface:
+        slice_map = {}
+        for T, a in [(0.5, 0.02), (1.0, 0.04), (2.0, 0.08)]:
+            p = SVIParams(a=a, b=0.40, rho=-0.4, m=0.0, sigma=0.1)
+            slice_map[str(T)] = _make_svi_slice(T, p, forward=forward)
+        return VolSurface.from_slice_map("SKEW", slice_map)
+
+    def test_simulate_paths_local_vol_returns_correct_shapes(self):
+        from src.pricing.monte_carlo import MonteCarloPricer
+        from tests.conftest import make_brc_row
+
+        forward = 100.0
+        surf = self._flat_surface(0.20, forward)
+        row = make_brc_row(initial_level=forward, current_spot=forward,
+                          initial_fixing_date="2026-05-31",
+                          maturity_date="2027-05-31")
+        # MBRC American observation forces the path-dependent regime.
+        row["product_type"] = "MBRC"
+        row["type_style"] = "american"
+        row["underlying_isins"] = ["FLAT"]
+
+        pricer = MonteCarloPricer(n_paths=1_000, seed=42)
+        surfaces = {"FLAT": surf}
+        paths, dates, sigma_path = pricer.simulate_paths_local_vol(
+            row, surfaces, {"FLAT": 0.20}, risk_free_rate=0.03,
+        )
+        assert paths.shape == (1_000, len(dates), 1)
+        assert sigma_path.shape == paths.shape
+        # On a flat surface sigma_path equals sigma_const everywhere.
+        np.testing.assert_allclose(sigma_path, 0.20, atol=1.0e-4)
+
+    def test_flat_surface_reproduces_constant_vol_paths(self):
+        # Critical safety net: on a flat surface (no smile, no term
+        # structure), simulate_paths_local_vol must reproduce
+        # simulate_paths to within a tight numerical tolerance under
+        # the same RNG seed.
+        from src.pricing.monte_carlo import MonteCarloPricer
+        from tests.conftest import make_brc_row
+
+        sigma_const, forward = 0.20, 100.0
+        flat = self._flat_surface(sigma_const, forward)
+        row = make_brc_row(initial_level=forward, current_spot=forward,
+                          initial_fixing_date="2026-05-31",
+                          maturity_date="2027-05-31")
+        row["underlying_isins"] = ["FLAT"]
+
+        pricer = MonteCarloPricer(n_paths=2_000, seed=42)
+        paths_cv, dates_cv = pricer.simulate_paths(
+            row, vol_map={"FLAT": sigma_const}, risk_free_rate=0.03,
+        )
+        paths_lv, dates_lv, _ = pricer.simulate_paths_local_vol(
+            row, vol_surfaces={"FLAT": flat},
+            fallback_vol_map={"FLAT": sigma_const}, risk_free_rate=0.03,
+        )
+        assert (dates_cv == dates_lv).all()
+        # Terminal-spot agreement: the two paths must coincide to the
+        # numerical precision of the Dupire derivation. We allow a
+        # tolerance of 0.5 % of the typical spot to absorb the
+        # floating-point residue without being too loose.
+        max_diff = float(np.abs(paths_lv[:, -1, 0] - paths_cv[:, -1, 0]).max())
+        assert max_diff < 0.5
+
+    def test_flat_surface_reproduces_constant_vol_fair_value(self):
+        # The flat-surface regression at the pricer level: MBRC fair
+        # value under local vol must match the constant-vol baseline
+        # within Monte Carlo noise.
+        from src.pricing.monte_carlo import MonteCarloPricer
+        from tests.conftest import make_mbrc_row
+
+        sigma_const = 0.20
+        flat_a = self._flat_surface(sigma_const, 100.0)
+        flat_b = self._flat_surface(sigma_const, 80.0)
+        row = make_mbrc_row(barrier_pct=0.65,
+                            initial_levels=[100.0, 80.0],
+                            current_spots=[100.0, 80.0],
+                            initial_fixing_date="2026-05-31",
+                            maturity_date="2027-05-31")
+        row["product_type"] = "MBRC"
+        row["type_style"] = "american"
+
+        portfolio = pd.DataFrame([row])
+        pricer = MonteCarloPricer(n_paths=3_000, seed=42)
+        vol_map = {row["underlying_isins"][0]: sigma_const,
+                   row["underlying_isins"][1]: sigma_const}
+        _, _, fv_cv = pricer.compute_portfolio_greeks(
+            portfolio, vol_map, risk_free_rates={"CHF": 0.01},
+        )
+        _, _, fv_lv = pricer.compute_portfolio_greeks(
+            portfolio, vol_map, risk_free_rates={"CHF": 0.01},
+            vol_surfaces={row["underlying_isins"][0]: flat_a,
+                          row["underlying_isins"][1]: flat_b},
+        )
+        fv_const = float(fv_cv["fair_value"].iloc[0])
+        fv_local = float(fv_lv["fair_value"].iloc[0])
+        # MC tolerance: the two pricers share the seed, so the residual
+        # difference is purely the bridge variance accounting and the
+        # midpoint-vs-left-endpoint Euler convention. A small relative
+        # tolerance is appropriate.
+        relative = abs(fv_local - fv_const) / max(abs(fv_const), 1.0)
+        assert relative < 1.0e-2, (
+            f"Flat-surface regression: local-vol FV={fv_local:.2f} vs "
+            f"constant-vol FV={fv_const:.2f} (relative diff {relative:.3%})"
+        )
+
+    def test_negative_skew_mbrc_sits_between_stage_0_and_substage_a(self):
+        # Under negative skew, an American-barrier MBRC produces three
+        # distinct fair values across the migration sequence:
+        #
+        #   Stage 0   : constant ATM volatility plugged into GBM.
+        #               Over-estimates the bond NPV because the
+        #               barrier-hit probability is computed under a
+        #               volatility much lower than the surface assigns
+        #               to the barrier region. FV is too high.
+        #
+        #   Substage A: constant barrier-strike volatility plugged
+        #               into GBM. Over-corrects the bug because the
+        #               elevated wing volatility is applied to the
+        #               whole path, not only near the barrier. FV is
+        #               too low.
+        #
+        #   Substage B: local-volatility path with (S, t)-dependent
+        #               sigma. Surface-consistent. FV sits between
+        #               the two -- corrects the Stage 0 bug without
+        #               over-applying the wing vol.
+        from src.pricing.monte_carlo import MonteCarloPricer
+        from tests.conftest import make_brc_row
+
+        forward = 100.0
+        skewed = self._negative_skew_surface(forward)
+        row = make_brc_row(barrier_pct=0.65, initial_level=forward,
+                          current_spot=forward,
+                          initial_fixing_date="2026-05-31",
+                          maturity_date="2027-05-31")
+        row["product_type"] = "MBRC"
+        row["type_style"] = "american"
+        row["underlying_isins"] = ["SKEW"]
+
+        portfolio = pd.DataFrame([row])
+        pricer = MonteCarloPricer(n_paths=4_000, seed=42)
+        sigma_atm     = float(skewed.sigma(forward, 1.0))
+        sigma_barrier = float(skewed.sigma(0.65 * forward, 1.0))
+
+        # Stage 0 baseline: constant ATM vol.
+        _, _, fv0 = pricer.compute_portfolio_greeks(
+            portfolio, {"SKEW": sigma_atm},
+            risk_free_rates={"CHF": 0.01},
+        )
+        # Substage A baseline: constant barrier-strike vol.
+        _, _, fvA = pricer.compute_portfolio_greeks(
+            portfolio, {"SKEW": sigma_barrier},
+            risk_free_rates={"CHF": 0.01},
+        )
+        # Substage B: local volatility.
+        _, _, fvB = pricer.compute_portfolio_greeks(
+            portfolio, {"SKEW": sigma_barrier},
+            risk_free_rates={"CHF": 0.01},
+            vol_surfaces={"SKEW": skewed},
+        )
+        fv_0 = float(fv0["fair_value"].iloc[0])
+        fv_A = float(fvA["fair_value"].iloc[0])
+        fv_B = float(fvB["fair_value"].iloc[0])
+        se   = float(fv0["std_error"].iloc[0])
+        # The ordering: Stage 0 > Substage B > Substage A, each gap
+        # of at least a couple of MC standard errors.
+        assert fv_0 > fv_B + 2.0 * se, (
+            f"Stage 0 FV ({fv_0:.2f}) should exceed Substage B FV ({fv_B:.2f})"
+        )
+        assert fv_B > fv_A + 2.0 * se, (
+            f"Substage B FV ({fv_B:.2f}) should exceed Substage A FV ({fv_A:.2f})"
+        )
+
+    def test_european_product_keeps_substage_a_path(self):
+        # A European-barrier product must not be routed to local-vol
+        # mode even when surfaces are available: substage A's scalar
+        # input is strictly correct for this payoff class.
+        from src.pricing.monte_carlo import MonteCarloPricer
+        from tests.conftest import make_brc_row
+
+        forward = 100.0
+        skewed = self._negative_skew_surface(forward)
+        row = make_brc_row(barrier_pct=0.65, initial_level=forward,
+                          current_spot=forward,
+                          initial_fixing_date="2026-05-31",
+                          maturity_date="2027-05-31")
+        row["underlying_isins"] = ["SKEW"]
+        # type_style stays "european" -> _is_american is False ->
+        # _should_use_local_vol returns False.
+
+        pricer = MonteCarloPricer(n_paths=200, seed=42)
+        assert not pricer._should_use_local_vol(row, {"SKEW": skewed})
+
+    def test_should_use_local_vol_requires_path_dependence(self):
+        from src.pricing.monte_carlo import MonteCarloPricer
+        from tests.conftest import make_brc_row
+
+        pricer = MonteCarloPricer(n_paths=100, seed=42)
+        skewed = self._negative_skew_surface(100.0)
+
+        # European BRC -> False even with surface
+        row_euro = make_brc_row()
+        row_euro["underlying_isins"] = ["SKEW"]
+        row_euro["type_style"] = "european"
+        assert pricer._should_use_local_vol(row_euro, {"SKEW": skewed}) is False
+
+        # MBRC American -> True with surface
+        row_mbrc = make_brc_row()
+        row_mbrc["product_type"] = "MBRC"
+        row_mbrc["type_style"] = "american"
+        row_mbrc["underlying_isins"] = ["SKEW"]
+        assert pricer._should_use_local_vol(row_mbrc, {"SKEW": skewed}) is True
+
+        # MBRC American but no surface -> False
+        assert pricer._should_use_local_vol(row_mbrc, {}) is False
+        assert pricer._should_use_local_vol(row_mbrc, None) is False
+
+        # Surface in fallback regime -> False
+        empty_surface = VolSurface.from_slice_map("EMPTY", {})
+        assert pricer._should_use_local_vol(
+            row_mbrc, {"SKEW": empty_surface}
+        ) is False

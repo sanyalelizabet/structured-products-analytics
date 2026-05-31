@@ -44,11 +44,11 @@ import hashlib
 import numpy as np
 import pandas as pd
 
-from src.barrier import sample_knock_in
-from src.factor_engine import FACTORS
-from src.linalg import safe_cholesky
-from src.noise_sampler import NoiseSampler
-from src.reverse_convertible import barrier_levels, vectorised_european_rc_summary
+from src.pricing.barrier import sample_knock_in
+from src.risk.factor_engine import FACTORS
+from src.numerics.linalg import safe_cholesky
+from src.numerics.noise_sampler import NoiseSampler
+from src.pricing.products.reverse_convertible import barrier_levels, vectorised_european_rc_summary
 
 
 _PERCENTILES = [5, 95]
@@ -147,7 +147,7 @@ class FactorScenarioEngine:
         3. **Legacy schema**       — ``factor_shock + n_shocks + …``.
            Expanded into the equivalent event timeline.
         """
-        from src.scenario_archetypes import translate_ui_scenario
+        from src.risk.scenario_archetypes import translate_ui_scenario
 
         # 1. UI form — needs archetype translation
         events_have_archetypes = (
@@ -419,7 +419,7 @@ class FactorScenarioEngine:
         # while plain BRCs only need the terminal slice.
         ptype = str(row.get("product_type", "")).upper()
         if ptype == "IC_BRC":
-            from src.issuer_callable_reverse_convertible import (
+            from src.pricing.products.issuer_callable_reverse_convertible import (
                 vectorised_issuer_callable_rc_summary,
             )
             # Issuer call solved by optimal exercise; American knock-in (if any)
@@ -434,7 +434,7 @@ class FactorScenarioEngine:
                 row, price_paths, date_range, rf, breach_mask=mask,
             )
         elif ptype == "AC_BRC":
-            from src.autocallable_reverse_convertible import (
+            from src.pricing.products.autocallable_reverse_convertible import (
                 vectorised_autocallable_rc_summary,
             )
             # American autocallable: paths that run to maturity observe the
@@ -448,7 +448,7 @@ class FactorScenarioEngine:
                 row, price_paths, date_range, uncalled_breach_mask=mask,
             )
         elif ptype == "CPN":
-            from src.capital_protection_note import vectorised_cpn_summary
+            from src.pricing.products.capital_protection_note import vectorised_cpn_summary
             v = vectorised_cpn_summary(row, final_prices)
         elif str(row.get("type_style", "european")).lower() == "american":
             # Continuously-monitored barrier: knock-in sampled over the whole

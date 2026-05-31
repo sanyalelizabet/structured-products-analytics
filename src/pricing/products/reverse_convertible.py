@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import brentq
 
-from src.coupon_schedule import CouponSchedule
+from src.pricing.products.coupon_schedule import CouponSchedule
 
 
 def barrier_levels(initial_levels, barrier_pct) -> np.ndarray:

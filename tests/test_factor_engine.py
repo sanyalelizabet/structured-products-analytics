@@ -8,8 +8,8 @@ import pandas as pd
 import pytest
 from unittest.mock import MagicMock
 
-from src.market_data_engine import MarketDataEngine
-from src.factor_engine import FACTORS, FactorEngine
+from src.market_data.market_data_engine import MarketDataEngine
+from src.risk.factor_engine import FACTORS, FactorEngine
 
 
 # ──────────────────────────────────────────────────────────────────────────

@@ -71,7 +71,8 @@ PLOTLY_DIVERGING_SCALE = [
 ]
 
 
-def render(analytics, df, greeks_df, pf_delta, valuation_date, corr_df=None):
+def render(analytics, df, greeks_df, pf_delta, valuation_date, corr_df=None,
+           vol_surfaces=None, vol_map_realised=None, portfolio=None):
     _render_header(analytics, valuation_date)
     _render_kpi_strip(analytics, df)
     _render_quick_stats(analytics, df)
@@ -82,6 +83,8 @@ def render(analytics, df, greeks_df, pf_delta, valuation_date, corr_df=None):
     _render_holdings(analytics, df, greeks_df, pf_delta, valuation_date)
     st.markdown("---")
     _render_concentration(analytics, corr_df)
+    _render_volatility_expander(portfolio, vol_surfaces, vol_map_realised, valuation_date)
+    _render_surface_3d_viewer(portfolio, vol_surfaces)
     st.markdown("---")
     _render_risk(greeks_df, pf_delta)
 
@@ -737,3 +740,237 @@ def _delta_bar(pf_delta):
     )
     fig.add_vline(x=0, line=dict(color=NEUTRAL_GREY, width=1, dash="dot"))
     st.plotly_chart(fig, width="stretch")
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Implied vs realised volatility — surface-aware expander
+# ──────────────────────────────────────────────────────────────────────────
+
+def _build_vol_comparison_table(portfolio, vol_surfaces, vol_map_realised, valuation_date):
+    """One row per (product, underlying); columns evaluated on the surface
+    at the product's residual maturity.
+
+    The function is defensive against missing inputs: any underlying for
+    which a calibrated surface is unavailable populates the implied-vol
+    columns with ``None`` and records ``no_surface`` as the surface
+    status. Realised volatility falls through ``vol_map_realised``.
+    """
+    if portfolio is None or len(portfolio) == 0 or not vol_surfaces:
+        return pd.DataFrame()
+
+    val_ts = pd.Timestamp(valuation_date) if valuation_date is not None else pd.Timestamp.today().normalize()
+    rows = []
+    for _, prod in portfolio.iterrows():
+        mat_ts = pd.Timestamp(prod["maturity_date"])
+        T = (mat_ts - val_ts).days / 365.25
+        if T <= 0:
+            continue
+        isins = list(prod["underlying_isins"])
+        underlyings = list(prod.get("underlyings", isins))
+        initial_levels = list(prod.get("initial_levels", [None] * len(isins)))
+        current_spots = list(prod.get("current_spots", initial_levels))
+        bp_raw = prod.get("barrier_pct")
+        bp = 1.0 if bp_raw is None else float(bp_raw)
+
+        for i, isin in enumerate(isins):
+            init_lvl = float(initial_levels[i]) if initial_levels[i] is not None else None
+            spot = float(current_spots[i]) if current_spots[i] is not None else init_lvl
+            if spot is None or spot <= 0.0:
+                continue
+            K_barrier = init_lvl * bp if init_lvl is not None else float("nan")
+
+            surface = (vol_surfaces or {}).get(isin)
+            sigma_atm = sigma_bar = sigma_90 = None
+            status = "no_surface"
+            if surface is not None and getattr(surface, "n_svi_slices", 0) > 0:
+                try:
+                    sigma_atm = float(surface.sigma(spot, T))
+                    sigma_bar = (float(surface.sigma(K_barrier, T))
+                                 if np.isfinite(K_barrier) and K_barrier > 0 else None)
+                    sigma_90 = float(surface.sigma(0.90 * spot, T))
+                    status = surface.surface_status_at(T)[0]
+                except Exception:
+                    sigma_atm = sigma_bar = sigma_90 = None
+                    status = "error"
+
+            sigma_realised = (vol_map_realised or {}).get(isin)
+
+            row = {
+                "Product":             prod["product_id"],
+                "Underlying":          underlyings[i],
+                "T (yrs)":             round(T, 2),
+                "K barrier":           round(K_barrier, 2) if np.isfinite(K_barrier) else None,
+                "σ ATM (%)":           round(sigma_atm * 100, 1) if sigma_atm is not None else None,
+                "σ barrier (%)":       round(sigma_bar * 100, 1) if sigma_bar is not None else None,
+                "σ 90% (%)":           round(sigma_90 * 100, 1) if sigma_90 is not None else None,
+                "Skew 90−ATM (vp)":    round((sigma_90 - sigma_atm) * 100, 1)
+                                       if (sigma_90 is not None and sigma_atm is not None) else None,
+                "σ realised 1Y (%)":   round(sigma_realised * 100, 1) if sigma_realised is not None else None,
+                "VRP (barrier−real, vp)": round((sigma_bar - sigma_realised) * 100, 1)
+                                       if (sigma_bar is not None and sigma_realised is not None) else None,
+                "Surface":             status,
+            }
+            rows.append(row)
+
+    return pd.DataFrame(rows)
+
+
+def _render_volatility_expander(portfolio, vol_surfaces, vol_map_realised, valuation_date):
+    """Surface-aware implied-vs-realised vol table, per (product, underlying)."""
+    with st.expander("Implied vs realised volatility"):
+        if not vol_surfaces:
+            st.info(
+                "Implied volatility surfaces are unavailable. Listed option "
+                "chain data must be cached before this table can be built."
+            )
+            return
+
+        table = _build_vol_comparison_table(
+            portfolio, vol_surfaces, vol_map_realised, valuation_date,
+        )
+        if table.empty:
+            st.info("No barrier-bearing products with a positive residual maturity.")
+            return
+
+        st.caption(
+            "Implied volatility evaluated on the calibrated surface at each "
+            "product's residual maturity and at three reference strikes: "
+            "spot (ATM), the product's downside barrier, and 90 % of spot. "
+            "Realised volatility is the trailing 252-day standard deviation "
+            "of daily log returns, independent of tenor. **VRP** "
+            "(volatility risk premium) is the gap between the *barrier*-strike "
+            "implied volatility and the realised volatility, in volatility "
+            "points: a barrier reverse convertible embeds a short put at "
+            "the barrier strike, so the implied vol that compensates the "
+            "investor for that short-option exposure is the barrier-strike "
+            "vol, not the at-the-money vol. A positive VRP indicates that "
+            "the option market currently prices the downside in excess of "
+            "realised history — structurally favourable for the investor. "
+            "The *Surface* column records the regime: *interpolated* "
+            "between listed expiries, *extrapolated* beyond them, "
+            "*single_slice* when only one calibrated slice is available, "
+            "*fallback* when no chain data exists for the underlying."
+        )
+
+        st.dataframe(table, width="stretch", hide_index=True,
+                     height=_fit_height(len(table)))
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 3D volatility surface viewer
+# ──────────────────────────────────────────────────────────────────────────
+
+def _plot_surface_3d(surface, label: str):
+    """Plotly go.Surface of σ_IV(K, T) over a strike × tenor grid."""
+    F = surface.forward
+    K_grid = np.linspace(0.5 * F, 1.5 * F, 41)
+
+    t_max_listed = getattr(surface, "_t_max", 0.0) or 0.0
+    t_upper = max(t_max_listed + 0.5, 2.5)
+    T_grid = np.linspace(0.05, t_upper, 25)
+
+    Z = np.empty((len(T_grid), len(K_grid)))
+    for i, T in enumerate(T_grid):
+        try:
+            Z[i, :] = np.asarray(surface.sigma(K_grid, T)) * 100.0
+        except Exception:
+            Z[i, :] = np.nan
+
+    fig = go.Figure(
+        data=[go.Surface(
+            x=K_grid, y=T_grid, z=Z,
+            colorscale="Viridis",
+            colorbar=dict(title="σ (%)"),
+            hovertemplate=(
+                "K = %{x:.2f}<br>"
+                "T = %{y:.2f} yrs<br>"
+                "σ = %{z:.2f}%<extra></extra>"
+            ),
+        )]
+    )
+
+    # Mark the listed-expiry slices so the user can see where the
+    # surface is interpolated versus extrapolated.
+    listed_T = [rec[0] for rec in getattr(surface, "_slice_records", [])]
+    for T_listed in listed_T:
+        sigma_at_listed = np.asarray(surface.sigma(K_grid, T_listed)) * 100.0
+        fig.add_scatter3d(
+            x=K_grid,
+            y=[T_listed] * len(K_grid),
+            z=sigma_at_listed,
+            mode="lines",
+            line=dict(color="rgba(255,255,255,0.85)", width=4),
+            showlegend=False,
+            hoverinfo="skip",
+        )
+
+    fig.update_layout(
+        title=f"Implied volatility surface — {label}",
+        template="plotly_dark",
+        height=600,
+        scene=dict(
+            xaxis_title="Strike K",
+            yaxis_title="Tenor T (years)",
+            zaxis_title="σ (%)",
+        ),
+        margin=dict(l=10, r=10, t=40, b=10),
+    )
+    return fig
+
+
+def _render_surface_3d_viewer(portfolio, vol_surfaces):
+    """Expander allowing the user to inspect a single underlying's calibrated
+    surface in three dimensions."""
+    if not vol_surfaces:
+        return
+
+    viable = {
+        isin: surf
+        for isin, surf in vol_surfaces.items()
+        if getattr(surf, "n_svi_slices", 0) > 0
+    }
+    if not viable:
+        return
+
+    with st.expander("3D volatility surface viewer"):
+        label_map = {}
+        if portfolio is not None and len(portfolio) > 0:
+            for _, prod in portfolio.iterrows():
+                names = list(prod.get("underlyings", []))
+                isins = list(prod["underlying_isins"])
+                for name, isin in zip(names, isins):
+                    label_map.setdefault(isin, str(name))
+
+        options = []
+        for isin in viable.keys():
+            display = label_map.get(isin, isin)
+            options.append((f"{display} ({isin})", isin))
+
+        labels = [opt[0] for opt in options]
+        choice = st.selectbox(
+            "Underlying:",
+            options=labels,
+            help="Only underlyings with at least one calibrated SVI slice "
+                 "are eligible for 3D display.",
+        )
+        chosen_isin = next(opt[1] for opt in options if opt[0] == choice)
+        chosen_surface = viable[chosen_isin]
+        chosen_label = label_map.get(chosen_isin, chosen_isin)
+
+        fig = _plot_surface_3d(chosen_surface, label=chosen_label)
+        st.plotly_chart(fig, width="stretch")
+
+        # Diagnostics line below the plot.
+        slice_count = chosen_surface.n_svi_slices
+        t_lo = chosen_surface._t_min
+        t_hi = chosen_surface._t_max
+        cal_violations = len(chosen_surface.calendar_violations)
+        st.caption(
+            f"{slice_count} calibrated SVI slices, T ∈ [{t_lo:.2f}, {t_hi:.2f}] years. "
+            f"White lines mark listed expiries (interpolation anchors); "
+            f"the surface between them is the linear-in-total-variance "
+            f"interpolation, beyond them the vol-flat extrapolation. "
+            f"Calendar-arbitrage audit: {cal_violations} violation"
+            f"{'s' if cal_violations != 1 else ''}."
+        )
+

@@ -116,7 +116,7 @@ class TestSchemaParity:
     def _mock_user_row(self, ptype: str, ref: dict) -> dict:
         """Build a finalised user row using values copied from the demo
         row (for shared keys) and reasonable placeholders elsewhere."""
-        from src.portfolio_entry import fields_for_product, finalise_row
+        from src.portfolio.portfolio_entry import fields_for_product, finalise_row
         row = {"product_type": ptype}
         for f in fields_for_product(ptype):
             if f.name == "product_type":
@@ -168,8 +168,8 @@ class TestRoundTripCPNThroughProductClass:
     def test_user_built_cpn_row_works_in_product_class(self):
         """A row produced by finalise_row for a CPN must be consumable
         by ``CapitalProtectionNote`` without errors."""
-        from src.capital_protection_note import CapitalProtectionNote
-        from src.portfolio_entry import finalise_row
+        from src.pricing.products.capital_protection_note import CapitalProtectionNote
+        from src.portfolio.portfolio_entry import finalise_row
 
         row = finalise_row({
             "product_type":       "CPN",

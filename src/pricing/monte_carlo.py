@@ -18,16 +18,22 @@ import numpy as np
 import pandas as pd
 from typing import Callable
 
-from src.linalg import safe_cholesky
-from src.reverse_convertible import barrier_levels
-from src.autocallable_reverse_convertible import (
+from typing import Optional
+
+from src.numerics.linalg import safe_cholesky
+from src.pricing.products.reverse_convertible import barrier_levels
+from src.pricing.products.autocallable_reverse_convertible import (
     vectorised_autocallable_rc_summary,
 )
-from src.issuer_callable_reverse_convertible import (
+from src.pricing.products.issuer_callable_reverse_convertible import (
     vectorised_issuer_callable_rc_summary,
 )
-from src.barrier import continuous_survival_prob, sample_knock_in
-from src.noise_sampler import _stable_isin_seed
+from src.pricing.barrier import (
+    continuous_survival_prob,
+    continuous_survival_prob_from_var,
+    sample_knock_in,
+)
+from src.numerics.noise_sampler import _stable_isin_seed
 
 log = logging.getLogger(__name__)
 
@@ -264,6 +270,207 @@ class MonteCarloPricer:
 
         return paths, dates
 
+    def simulate_paths_local_vol(
+        self,
+        row: pd.Series,
+        vol_surfaces: dict,
+        fallback_vol_map: dict,
+        risk_free_rate: float,
+        corr_matrix: np.ndarray | None = None,
+        damping_cap: Optional[float] = None,
+    ) -> tuple[np.ndarray, pd.DatetimeIndex, np.ndarray]:
+        """Simulate correlated paths under Dupire local volatility.
+
+        The path generation differs from :meth:`simulate_paths` in two
+        respects. First, the per-step volatility is no longer a single
+        scalar per underlying but a function of the current spot and
+        time, sourced from each underlying's :class:`VolSurface` by
+        calling :meth:`VolSurface.local_volatility`. Second, the path
+        is evolved step by step rather than in a single vectorised
+        log-increment cumsum, because the next step's volatility
+        depends on the *current* spot.
+
+        The per-step variance returned alongside the path tensor is
+        the same variance the bridge utilities must consume to
+        compute knock-in probabilities under the same dynamics. This
+        is the structural protection against the implied-realised
+        inconsistency: one ``sigma_step`` value, two call sites
+        (path-step and bridge-step), identical numerical input.
+
+        For any underlying whose surface is unavailable, lies in the
+        fallback regime, or has insufficient term-structure
+        information at the relevant tenor, the per-step volatility is
+        the corresponding entry of ``fallback_vol_map`` for every
+        step. The graceful degradation matches the discipline of
+        Stage 3 Substage A.
+
+        Parameters
+        ----------
+        row : pd.Series
+            Portfolio row; required fields match :meth:`simulate_paths`.
+        vol_surfaces : dict
+            ``{ isin: VolSurface }``. Underlyings absent from the map
+            fall back to the constant-volatility input.
+        fallback_vol_map : dict
+            Per-underlying constant volatility used when the surface
+            cannot produce a value.
+        risk_free_rate : float
+            Annualised continuously-compounded risk-free rate.
+        corr_matrix : np.ndarray, optional
+            Correlation between underlyings; defaults to identity.
+        damping_cap : float or None, optional
+            Conservative-mode clip applied to every local-volatility
+            evaluation. See :meth:`VolSurface.local_volatility`.
+
+        Returns
+        -------
+        paths : np.ndarray, shape (n_paths, n_steps, n_assets)
+        dates : pd.DatetimeIndex of length n_steps
+        sigma_path : np.ndarray, shape (n_paths, n_steps, n_assets)
+            The per-(path, step, asset) volatility used to generate
+            each step, suitable as input to the time-varying form of
+            the Brownian-bridge survival probability.
+        """
+        today    = pd.Timestamp.today().normalize()
+        maturity = pd.Timestamp(row["maturity_date"])
+        isins    = list(row["underlying_isins"])
+        spots    = np.array([float(s) for s in row["current_spots"]])
+        n_assets = len(isins)
+        r        = float(risk_free_rate)
+
+        dates   = pd.bdate_range(start=today, end=maturity)
+        n_steps = len(dates)
+
+        if corr_matrix is None or n_assets == 1:
+            corr_matrix = np.eye(n_assets)
+        L = safe_cholesky(corr_matrix)
+
+        rng   = np.random.default_rng(self.seed)
+        Z_raw = rng.standard_normal((self.n_paths, n_steps, n_assets))
+        Z     = Z_raw @ L.T
+
+        all_dates = np.concatenate([[today.to_datetime64()], dates.values])
+        dt = np.diff(all_dates) / np.timedelta64(1, "D") / 360.0
+        dt = np.maximum(dt, 0.0)
+
+        # Per-asset surface resolution: keep a reference to the
+        # VolSurface (or None) and the legacy fallback sigma per
+        # underlying. This lookup is done once before the time loop;
+        # the per-step evaluation pays only for the Dupire computation.
+        surface_per_asset = [(vol_surfaces or {}).get(isin) for isin in isins]
+        fallback_sigma = np.array(
+            [float(fallback_vol_map.get(isin, DEFAULT_VOL)) for isin in isins]
+        )
+
+        # ``t_start[j]`` is the calendar time elapsed since today at
+        # the START of step j. The local volatility for the step is
+        # evaluated at the midpoint of the step, ``t_eval[j] =
+        # t_start[j] + 0.5 * dt[j]``: this avoids the T=0 singularity
+        # of the Dupire formula at the very first step, gives the
+        # same first-order accuracy as a left-endpoint Euler scheme,
+        # and provides a single, unambiguous value that both the
+        # path-step and the bridge-step consume.
+        t_end_per_step   = np.cumsum(dt)
+        t_start_per_step = np.concatenate([[0.0], t_end_per_step[:-1]])
+        t_eval_per_step  = t_start_per_step + 0.5 * dt
+
+        # Pre-allocate output tensors.
+        paths      = np.empty((self.n_paths, n_steps, n_assets), dtype=float)
+        sigma_path = np.empty((self.n_paths, n_steps, n_assets), dtype=float)
+
+        # Current spot per (path, asset). Broadcast the initial spots
+        # to the path-major shape and evolve in place.
+        S = np.broadcast_to(spots, (self.n_paths, n_assets)).copy()
+
+        # The Python loop is unavoidable in the local-vol regime because
+        # the next step's volatility depends on the *current* spot. The
+        # inner work is fully vectorised across paths and assets, so the
+        # per-step cost is comparable to a single vectorised constant-vol
+        # step and the total runtime overhead relative to the bulk path
+        # generator is a constant factor of a few.
+        for j in range(n_steps):
+            t_eval = float(t_eval_per_step[j])
+            sigma_j = np.empty((self.n_paths, n_assets), dtype=float)
+            for a, surface in enumerate(surface_per_asset):
+                if (
+                    surface is None
+                    or getattr(surface, "n_svi_slices", 0) == 0
+                    or t_eval <= 0.0
+                ):
+                    sigma_j[:, a] = fallback_sigma[a]
+                    continue
+                try:
+                    sigma_eval = surface.local_volatility(
+                        S[:, a], t_eval, damping_cap=damping_cap,
+                    )
+                    sigma_j[:, a] = np.asarray(sigma_eval, dtype=float)
+                except Exception as exc:  # defensive: never let the MC die
+                    log.warning(
+                        "local_volatility raised on asset %s at t=%.4f; "
+                        "falling back to constant vol (%s)",
+                        isins[a], t_eval, exc,
+                    )
+                    sigma_j[:, a] = fallback_sigma[a]
+
+            sigma_path[:, j, :] = sigma_j
+
+            drift_j = (r - 0.5 * sigma_j ** 2) * dt[j]
+            diff_j  = sigma_j * np.sqrt(dt[j]) * Z[:, j, :]
+            S = S * np.exp(drift_j + diff_j)
+            paths[:, j, :] = S
+
+        return paths, dates, sigma_path
+
+    # ------------------------------------------------------------------
+    # Local-vol dispatch predicate and uniform simulate wrapper
+    # ------------------------------------------------------------------
+
+    def _should_use_local_vol(self, row: pd.Series, vol_surfaces: dict | None) -> bool:
+        """Decide whether a product is priced under local-volatility dynamics.
+
+        Three conditions are required: at least one calibrated surface
+        is supplied (``vol_surfaces`` non-empty); the product is
+        path-dependent under any of the three pricer specialisations
+        (autocallable, American-barrier, issuer-callable); and at
+        least one of the product's underlyings carries a non-fallback
+        surface. European-barrier products and products without any
+        calibrated surface stay on the Substage A scalar input.
+        """
+        if not vol_surfaces:
+            return False
+        if not (_is_autocallable(row) or _is_american(row) or _is_issuer_callable(row)):
+            return False
+        for isin in row["underlying_isins"]:
+            surf = vol_surfaces.get(isin)
+            if surf is not None and getattr(surf, "n_svi_slices", 0) > 0:
+                return True
+        return False
+
+    def _simulate(
+        self,
+        row: pd.Series,
+        vol_map: dict,
+        risk_free_rate: float,
+        corr_matrix: np.ndarray | None,
+        vol_surfaces: dict | None,
+    ) -> tuple[np.ndarray, pd.DatetimeIndex, Optional[np.ndarray]]:
+        """Uniform entry point for path generation.
+
+        Returns ``(paths, dates, sigma_path)`` where ``sigma_path`` is
+        ``None`` in the constant-volatility regime (Stage 3 Substage A
+        or earlier) and a ``(n_paths, n_steps, n_assets)`` tensor in
+        the local-volatility regime (Stage 3 Substage B). The
+        sigma_path tensor flows through the downstream payoff
+        evaluation so that bridge consistency with the path step is
+        preserved by construction.
+        """
+        if self._should_use_local_vol(row, vol_surfaces):
+            return self.simulate_paths_local_vol(
+                row, vol_surfaces or {}, vol_map, risk_free_rate, corr_matrix,
+            )
+        paths, dates = self.simulate_paths(row, vol_map, risk_free_rate, corr_matrix)
+        return paths, dates, None
+
     # ------------------------------------------------------------------
     # Single-product pricer
     # ------------------------------------------------------------------
@@ -274,6 +481,7 @@ class MonteCarloPricer:
         vol_map: dict,
         risk_free_rate: float,
         corr_matrix: np.ndarray | None = None,
+        vol_surfaces: dict | None = None,
     ) -> dict:
         """
         Price one product using a provided payoff function.
@@ -329,13 +537,16 @@ class MonteCarloPricer:
                 "fallbacks":      fallbacks,
             }
 
-        paths, dates = self.simulate_paths(row, vol_map, risk_free_rate, corr_matrix)
+        paths, dates, sigma_path = self._simulate(
+            row, vol_map, risk_free_rate, corr_matrix, vol_surfaces,
+        )
 
         # Discounting is centralised in ``_fv_from_paths`` so that path-dependent
         # products (autocallables) discount each path to its own cashflow date
         # rather than uniformly to maturity.
         fair_value, std_error = self._fv_from_paths(
             paths, dates, payoff_fn, row, risk_free_rate, T_remaining, vol_map,
+            sigma_path=sigma_path,
         )
 
         return {
@@ -409,6 +620,7 @@ class MonteCarloPricer:
         risk_free_rate: float,
         T_remaining: float,
         vol_map: dict,
+        sigma_path: Optional[np.ndarray] = None,
     ) -> tuple[float, float]:
         """Discount a payoff applied to a precomputed path tensor.
 
@@ -433,10 +645,12 @@ class MonteCarloPricer:
         elif _is_autocallable(row):
             pv_paths = self._autocallable_path_pv(
                 paths, dates, row, risk_free_rate, vol_map,
+                sigma_path=sigma_path,
             )
         elif _is_american(row):
             pv_paths = self._american_barrier_pv(
                 paths, dates, row, risk_free_rate, T_remaining, vol_map,
+                sigma_path=sigma_path,
             )
         else:
             payoffs  = payoff_fn(paths, dates, row)
@@ -453,6 +667,7 @@ class MonteCarloPricer:
         risk_free_rate: float,
         T_remaining: float,
         vol_map: dict,
+        sigma_path: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         """Per-path present value of a continuously-monitored barrier RC.
 
@@ -467,7 +682,6 @@ class MonteCarloPricer:
         strikes  = np.array([float(k) for k in row["strike"]])
         barriers = barrier_levels(row["initial_levels"], row.get("barrier_pct"))
         isins    = list(row["underlying_isins"])
-        vols     = np.array([vol_map.get(i, DEFAULT_VOL) for i in isins])
 
         # Monitor over the simulated business-day grid.  Using the grid points
         # (rather than prepending today's spot) keeps every monitored level
@@ -478,7 +692,18 @@ class MonteCarloPricer:
             np.diff(dates.values) / np.timedelta64(1, "D") / 360.0, 0.0,
         )  # length n_steps - 1, matching prices = paths
 
-        p_survive  = continuous_survival_prob(paths, barriers, vols, dt)
+        if sigma_path is not None:
+            # Local-volatility regime: per-step variance is sourced from
+            # the same evaluator that produced the path. The sigma that
+            # generated the step from ``dates[i]`` to ``dates[i+1]`` is
+            # ``sigma_path[:, i+1, :]``, so the bridge variance for the
+            # monitoring interval ``[i, i+1]`` is built from it directly.
+            sigma_bridge = sigma_path[:, 1:, :]                   # (n_paths, n_steps-1, n_assets)
+            step_var = (sigma_bridge ** 2) * dt[None, :, None]
+            p_survive  = continuous_survival_prob_from_var(paths, barriers, step_var)
+        else:
+            vols     = np.array([vol_map.get(i, DEFAULT_VOL) for i in isins])
+            p_survive  = continuous_survival_prob(paths, barriers, vols, dt)
 
         terminal   = paths[:, -1, :]
         worst_perf = (terminal / strikes).min(axis=1)
@@ -500,6 +725,7 @@ class MonteCarloPricer:
         row: pd.Series,
         risk_free_rate: float,
         vol_map: dict,
+        sigma_path: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         """Per-path present value of an autocallable BRC.
 
@@ -519,7 +745,9 @@ class MonteCarloPricer:
         """
         uncalled_breach_mask = None
         if _is_american(row):
-            uncalled_breach_mask = self._sampled_american_mask(paths, dates, row, vol_map)
+            uncalled_breach_mask = self._sampled_american_mask(
+                paths, dates, row, vol_map, sigma_path=sigma_path,
+            )
 
         summary    = vectorised_autocallable_rc_summary(
             row, paths, dates, uncalled_breach_mask=uncalled_breach_mask,
@@ -589,6 +817,7 @@ class MonteCarloPricer:
 
     def _sampled_american_mask(
         self, paths: np.ndarray, dates: pd.DatetimeIndex, row: pd.Series, vol_map: dict,
+        sigma_path: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         """Sampled continuous knock-in mask for fair-value autocallable pricing.
 
@@ -596,12 +825,23 @@ class MonteCarloPricer:
         Brownian-bridge survival probability, then draws one uniform per path.
         The uniforms are fixed by ``(seed, product_id)`` so every bump-and-reprice
         Greek evaluation reuses identical draws.
+
+        When ``sigma_path`` is supplied (Stage 3 Substage B local-vol
+        regime), the per-step variance is sourced from that tensor
+        rather than from the constant ``vol_map``: the variance for
+        the interval between ``dates[i]`` and ``dates[i+1]`` is
+        ``sigma_path[:, i+1, :]**2 * dt[i]``, preserving the
+        path-step / bridge-step consistency contract.
         """
-        isins    = list(row["underlying_isins"])
-        vols     = np.array([vol_map.get(i, DEFAULT_VOL) for i in isins])
         barriers = barrier_levels(row["initial_levels"], row.get("barrier_pct"))
         dt       = np.maximum(np.diff(dates.values) / np.timedelta64(1, "D") / 360.0, 0.0)
-        step_var = (vols[None, :] ** 2) * dt[:, None]
+        if sigma_path is not None:
+            sigma_bridge = sigma_path[:, 1:, :]
+            step_var = (sigma_bridge ** 2) * dt[None, :, None]
+        else:
+            isins    = list(row["underlying_isins"])
+            vols     = np.array([vol_map.get(i, DEFAULT_VOL) for i in isins])
+            step_var = (vols[None, :] ** 2) * dt[:, None]
         rng      = np.random.default_rng(_stable_isin_seed(str(row["product_id"]), self.seed))
         uniforms = rng.random(paths.shape[0])
         return sample_knock_in(paths, barriers, step_var, uniforms)
@@ -621,6 +861,7 @@ class MonteCarloPricer:
         rate_bump: float = 0.0001,     # 1 bp rate move
         corr_bump: float = 0.01,       # 1 pp correlation move (MBRC)
         return_base_price: bool = False,
+        vol_surfaces: dict | None = None,
     ) -> dict:
         """Per-product Greeks by central finite difference.
 
@@ -648,7 +889,10 @@ class MonteCarloPricer:
         T_remaining = max((maturity - today).days / 360, 0.0)
 
         if T_remaining <= 0:
-            base_result = self.price(row, payoff_fn, vol_map, risk_free_rate, corr_matrix)
+            base_result = self.price(
+                row, payoff_fn, vol_map, risk_free_rate, corr_matrix,
+                vol_surfaces=vol_surfaces,
+            )
             base_fv = base_result["fair_value"]
             isins   = list(row["underlying_isins"])
             names   = list(row["underlyings"])
@@ -672,12 +916,15 @@ class MonteCarloPricer:
 
         # Simulate the base path tensor once; delta and theta reuse it
         # rather than re-running simulate_paths (the dominant cost).
-        paths_base, dates_base = self.simulate_paths(
-            row, vol_map, risk_free_rate, corr_matrix,
+        # Under local volatility (Stage 3 Substage B) the per-step
+        # variance varies with the path, so we also retain the
+        # ``sigma_path`` tensor for downstream bridge consistency.
+        paths_base, dates_base, sigma_path_base = self._simulate(
+            row, vol_map, risk_free_rate, corr_matrix, vol_surfaces,
         )
         base_fv, base_se = self._fv_from_paths(
             paths_base, dates_base, payoff_fn, row, risk_free_rate, T_remaining,
-            vol_map,
+            vol_map, sigma_path=sigma_path_base,
         )
 
         isins  = list(row["underlying_isins"])
@@ -698,11 +945,11 @@ class MonteCarloPricer:
 
             fv_up, _ = self._fv_from_paths(
                 paths_up, dates_base, payoff_fn, row, risk_free_rate, T_remaining,
-                vol_map,
+                vol_map, sigma_path=sigma_path_base,
             )
             fv_dn, _ = self._fv_from_paths(
                 paths_dn, dates_base, payoff_fn, row, risk_free_rate, T_remaining,
-                vol_map,
+                vol_map, sigma_path=sigma_path_base,
             )
             # FV change for a 1 % spot move (central diff over ±1 %)
             deltas.append((fv_up - fv_dn) / 2)
@@ -714,8 +961,10 @@ class MonteCarloPricer:
             vol_up = {**vol_map, isin: base_vol + vol_bump}
             vol_dn = {**vol_map, isin: base_vol - vol_bump}
 
-            fv_up = self.price(row, payoff_fn, vol_up, risk_free_rate, corr_matrix)["fair_value"]
-            fv_dn = self.price(row, payoff_fn, vol_dn, risk_free_rate, corr_matrix)["fair_value"]
+            fv_up = self.price(row, payoff_fn, vol_up, risk_free_rate, corr_matrix,
+                               vol_surfaces=vol_surfaces)["fair_value"]
+            fv_dn = self.price(row, payoff_fn, vol_dn, risk_free_rate, corr_matrix,
+                               vol_surfaces=vol_surfaces)["fair_value"]
 
             # FV change per 1 pp vol move
             vegas.append((fv_up - fv_dn) / 2)
@@ -730,17 +979,20 @@ class MonteCarloPricer:
             paths_tm1 = paths_base[:, :-1, :]
             dates_tm1 = dates_base[:-1]
             T_tm1     = max((dates_base[-2] - today).days / 360, 0.0)
+            sigma_path_tm1 = sigma_path_base[:, :-1, :] if sigma_path_base is not None else None
             fv_tm1, _ = self._fv_from_paths(
                 paths_tm1, dates_tm1, payoff_fn, row, risk_free_rate, T_tm1,
-                vol_map,
+                vol_map, sigma_path=sigma_path_tm1,
             )
             theta     = fv_tm1 - base_fv
         else:
             theta = 0.0
 
         # ── Rho ───────────────────────────────────────────────────────────
-        fv_up = self.price(row, payoff_fn, vol_map, risk_free_rate + rate_bump, corr_matrix)["fair_value"]
-        fv_dn = self.price(row, payoff_fn, vol_map, risk_free_rate - rate_bump, corr_matrix)["fair_value"]
+        fv_up = self.price(row, payoff_fn, vol_map, risk_free_rate + rate_bump,
+                            corr_matrix, vol_surfaces=vol_surfaces)["fair_value"]
+        fv_dn = self.price(row, payoff_fn, vol_map, risk_free_rate - rate_bump,
+                            corr_matrix, vol_surfaces=vol_surfaces)["fair_value"]
         rho = (fv_up - fv_dn) / 2   # per 1 bp
 
         # ── Correlation sensitivity (MBRC only) ───────────────────────────
@@ -758,8 +1010,10 @@ class MonteCarloPricer:
                 except np.linalg.LinAlgError:
                     bumped[:] = original
 
-            fv_up = self.price(row, payoff_fn, vol_map, risk_free_rate, corr_up)["fair_value"]
-            fv_dn = self.price(row, payoff_fn, vol_map, risk_free_rate, corr_dn)["fair_value"]
+            fv_up = self.price(row, payoff_fn, vol_map, risk_free_rate, corr_up,
+                                vol_surfaces=vol_surfaces)["fair_value"]
+            fv_dn = self.price(row, payoff_fn, vol_map, risk_free_rate, corr_dn,
+                                vol_surfaces=vol_surfaces)["fair_value"]
             corr_sens = (fv_up - fv_dn) / 2   # per 1 pp correlation move
 
         result = {
@@ -788,6 +1042,8 @@ class MonteCarloPricer:
         vol_map: dict,
         risk_free_rates: dict,
         corr_df: pd.DataFrame | None = None,
+        vol_surfaces: dict | None = None,
+        valuation_date=None,
     ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         """
         Compute Greeks for every product and aggregate delta to portfolio level.
@@ -814,13 +1070,29 @@ class MonteCarloPricer:
             r = float(risk_free_rates.get(row["currency"], DEFAULT_RISK_FREE_RATE))
             corr_matrix, corr_fb = self._get_corr_subset(row, corr_df)
             payoff_fn   = self._resolve_payoff(row)
-            fallbacks   = self._input_fallbacks(row, vol_map, corr_fb, risk_free_rates)
+
+            # Stage 3 Substage A: if a vol surface is available, resolve a
+            # product-specific volatility map evaluated at each underlying's
+            # barrier strike at the product's maturity. The legacy global
+            # vol_map remains the fallback for any underlying for which the
+            # surface cannot produce a value. When no surfaces are supplied
+            # the legacy behaviour is preserved exactly.
+            if vol_surfaces:
+                from src.pricing.vol_surface import build_product_vol_map
+                product_vol_map, _surface_diagnostics = build_product_vol_map(
+                    row, vol_surfaces, vol_map, valuation_date,
+                )
+            else:
+                product_vol_map = vol_map
+
+            fallbacks   = self._input_fallbacks(row, product_vol_map, corr_fb, risk_free_rates)
             if fallbacks:
                 log.warning("Pricing %s with defaulted inputs: %s",
                             row["product_id"], "; ".join(fallbacks))
 
-            g = self.compute_greeks(row, payoff_fn, vol_map, r, corr_matrix,
-                                    return_base_price=True)
+            g = self.compute_greeks(row, payoff_fn, product_vol_map, r, corr_matrix,
+                                    return_base_price=True,
+                                    vol_surfaces=vol_surfaces)
 
             fv_rows.append({
                 "product_id":     row["product_id"],
