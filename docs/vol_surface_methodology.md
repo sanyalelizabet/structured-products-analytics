@@ -39,10 +39,10 @@ volatility that the listed option market quotes for the corresponding
 European call (or put) on the underlying. The surface is constructed
 slice by slice — one slice per listed expiry — and assembled across
 expiries into a term-structure-consistent object. The present document
-specifies the slice-level calibration that constitutes the first stage
-of the surface construction. The term-structure interpolation and the
-local-volatility derivation that follow are reserved for the
-specifications of Stages 2 and 3.
+specifies the surface end to end: the slice-level calibration of
+Sections 2 to 5, the term-structure assembly of Section 6, and the
+two-substage migration of the Monte Carlo pricer to a surface-aware
+volatility input in Section 8.
 
 ## 2. The raw SVI parameterisation
 
@@ -174,11 +174,10 @@ b\, T\, (1 + |\rho|) \;\leq\; 4,
 ```
 
 equivalent to *b*(1 + |&rho;|) &leq; 4 / *T*. The bound is tenor-
-dependent: parameter tuples that are admissible at *T* = 1 year may
-violate the condition at *T* = 5 years simply because the linear
-asymptotic slope of total variance must be matched against the
-corresponding slope of *T* × 2 implicit in the moment formula. The
-gate is implemented by direct evaluation of the bound at the tenor of
+dependent: parameter tuples admissible at *T* = 1 year may violate
+the condition at *T* = 5 years because the right-hand side, 4 / *T*,
+shrinks in tenor while the left-hand side does not. The gate is
+implemented by direct evaluation of the inequality at the tenor of
 the slice.
 
 ## 5. Data-quality gate and fallback policy
@@ -231,10 +230,9 @@ identifying its provenance.
 
 The slices defined in the preceding sections constitute, individually,
 a calibrated arbitrage-aware smile at one listed expiry. Downstream
-applications, and in particular the barrier-product pricer to be
-migrated in Stage 3, require the value of the implied volatility at
-arbitrary tenors that, in general, do not coincide with any listed
-expiry. The present section specifies the assembly of the slice-level
+applications, and in particular the surface-aware pricer of Section 8,
+require the value of the implied volatility at arbitrary tenors that,
+in general, do not coincide with any listed expiry. The present section specifies the assembly of the slice-level
 surfaces into a single object that exposes the implied volatility as a
 function of both strike and tenor.
 
@@ -272,8 +270,8 @@ individually satisfy the Durrleman condition, because the convex
 combination of two arbitrage-free smiles is not in general
 arbitrage-free in the butterfly direction. In practice the violation,
 when it occurs, is small in magnitude and localised in moneyness; an
-evaluation-time audit on a grid is acknowledged as a Stage 3
-prerequisite for the path-dependent pricers that consume the surface
+evaluation-time audit on a grid is acknowledged as a prerequisite for
+the path-dependent pricers of Section 8.2, which consume the surface
 at every Monte Carlo time step.
 
 For a query tenor that falls outside the convex hull of the listed
@@ -323,10 +321,12 @@ directions, but at the cost of a more constrained functional form
 that, on the noisy listed chains characteristic of Yahoo Finance
 coverage of single-name underlyings, fits each individual slice
 materially less well than the raw SVI calibration of Section 3
-attains. Preserving the per-slice fit quality of Stage 1 is preferred
-in the present context to the more parsimonious but globally fitted
+attains. Preserving the per-slice fit quality is preferred in the
+present context to the more parsimonious but globally fitted
 alternative, with the residual arbitrage risk acknowledged and
 audited rather than precluded.
+
+## 7. Current limitations
 
 Four limitations of the present implementation are recorded
 explicitly.
@@ -336,19 +336,17 @@ every slice tenor. The simplification is benign at the slice level
 because the smile-translation parameter *m* absorbs any small offset
 between the true forward and the spot, but it nevertheless distorts
 the interpretation of "at the money" in log-moneyness terms by an
-amount of order *(r − q) T*. The simplification carries through
-unchanged in the present Stage 2 assembly and will be tightened in
-Stage 3 in tandem with the integration of the existing risk-free
-rate term structure and a dividend yield estimator.
+amount of order *(r − q) T*. Removing it requires the integration of
+the existing risk-free rate term structure together with a dividend
+yield estimator and is recorded as future work.
 
 The second is the absence of an evaluation-time butterfly audit at
 intermediate tenors. The linear-in-total-variance interpolation does
 not in general preserve the Durrleman condition between the endpoint
 slices, although in practice the violation magnitude is small. The
-audit is deferred to the Stage 3 pricer migration, at which point
-the surface is evaluated at every Monte Carlo time step and the
-arbitrage cost of a small density-negativity in a single (*k*, *T*)
-cell becomes economically material.
+audit becomes economically material when the surface is queried at
+every Monte Carlo time step under the local-volatility dynamics of
+Section 8.2, and is also recorded as future work.
 
 The third is the absence of skew calibration to listed exotics. The
 surface is calibrated exclusively to listed vanilla chains; the skew
@@ -373,15 +371,19 @@ paid alternative (IVolatility, ORATS, OptionMetrics) when the
 calibration coverage observed in production usage motivates the
 expense.
 
-## 8. Pricer migration
+## 8. Surface integration in the Monte Carlo pricer
 
-Stage 3 of the surface construction migrates the Monte Carlo pricer
-from its constant-volatility input to a surface-aware evaluation. The
-migration is performed in two substages, of which the first is
-specified by the present section as delivered and the second is
-forward-looking.
+The Monte Carlo pricer consumes the volatility surface in one of two
+regimes, selected per product. European-barrier products are priced
+under a *constant-σ regime* in which a single, surface-evaluated
+scalar enters the dynamics; American-barrier, autocallable, and
+issuer-callable products are priced under a *local-volatility
+regime* in which the dynamics evolve under a state-dependent
+volatility derived from the surface. The two regimes share the
+same fallback policy and the same internal-consistency contract
+between path-step and bridge-step.
 
-### 8.1 Substage A — surface-aware volatility input
+### 8.1 Constant-σ regime with surface-evaluated input
 
 The volatility consumed by the Monte Carlo pricer for any barrier
 product is, for every underlying referenced in the product, the
@@ -400,12 +402,11 @@ T_\mathrm{resid} \;=\; \frac{T_\mathrm{maturity} - T_\mathrm{valuation}}{365.25}
 ```
 
 with *σ*(*K*, *T*) read from the assembled surface of Section 6. The
-Monte Carlo dynamics themselves are unchanged: paths continue to be
-generated under geometric Brownian motion with constant volatility
-per underlying, and the Brownian-bridge barrier-hit probability is
+Monte Carlo dynamics are otherwise unchanged: paths are generated
+under geometric Brownian motion with constant volatility per
+underlying, and the Brownian-bridge barrier-hit probability is
 computed from the same scalar volatility input — preserving the
-internal consistency of the path-step and the bridge-step that was
-the motivation for the migration.
+internal consistency between the path-step and the bridge-step.
 
 For a *European-barrier* reverse convertible the substitution is
 strictly correct. The payoff is observed only at maturity and depends
@@ -415,41 +416,40 @@ that marginal is identified by the volatility at the strike of the
 barrier observation, so plugging *σ*(*K*<sub>barrier</sub>,
 *T*<sub>maturity</sub>) into the constant-volatility Monte Carlo
 recovers the barrier-hit probability that the listed option market
-prices. The substage is therefore expected to remove the systematic
-bias of the existing pricer on European-barrier products.
+prices.
 
 For *American-barrier*, *autocallable* and *issuer-callable* products,
-the substitution is a material improvement over the at-the-money
-input — the barrier-zone volatility is the economically relevant
-quantity for the dominant payoff feature — but the path dependency
-of those payoffs remains misrepresented by the constant-volatility
-dynamics. The constant-σ Monte Carlo generates a path that, between
-its initial and terminal date, is governed by a single volatility
-rather than by the smile-implied (*S*, *t*)-dependent local
-volatility. The error is one-sided in the direction of the smile
-shape: a slice that is more skewed than the constant-σ assumption
+the constant-σ regime would be a material improvement over an
+at-the-money input — the barrier-zone volatility is the
+economically relevant quantity for the dominant payoff feature —
+but the path dependency of those payoffs is misrepresented by the
+constant-volatility dynamics. The constant-σ Monte Carlo generates a
+path that, between its initial and terminal date, is governed by a
+single volatility rather than by the smile-implied (*S*, *t*)-dependent
+local volatility. The error is one-sided in the direction of the
+smile shape: a slice more skewed than the constant-σ assumption
 implies a different distribution of the maximum drawdown along the
-path than the constant-σ dynamics admit. The Substage B
-specification, which migrates the dynamics to Dupire local
-volatility, is the rigorous remedy.
+path than the constant-σ dynamics admit. Path-dependent products
+are therefore routed to the local-volatility regime of Section 8.2.
 
 The fallback policy mirrors the slice-level discipline of Section 5.
 When the surface for a given underlying is unavailable, lies in the
 *fallback* regime, or produces an out-of-range value, the
-corresponding underlying reverts to the legacy at-the-money
-volatility input previously consumed by the pricer. Every resolution
-path — surface or fallback — is recorded on a per-underlying
-diagnostic structure so that the user interface can badge the
-affected product with the provenance of its mark.
+corresponding underlying reverts to a legacy at-the-money volatility
+input. Every resolution path — surface or fallback — is recorded on
+a per-underlying diagnostic structure so that the user interface can
+badge the affected product with the provenance of its mark.
 
-### 8.2 Substage B — Dupire local volatility
+### 8.2 Local-volatility regime
 
-The second substage of the pricer migration derives the Dupire local
+For path-dependent products the pricer derives the Dupire local
 volatility function from the assembled total-variance surface and
-exposes it to the Monte Carlo pricer for the path-dependent products.
-The present subsection specifies the derivation as delivered; the
-integration into the Monte Carlo dynamics is the subject of the
-remaining tasks of the substage.
+consumes it inside the Monte Carlo dynamics directly, evaluating the
+volatility afresh at every (*S*, *t*) the path visits. The present
+subsection specifies the derivation, the layered numerical safety
+policy applied to the output, the interpretation that should attach
+to extreme values, and the Monte Carlo integration through which the
+local volatility enters the pricer.
 
 The local volatility at strike *K* and tenor *T* is defined by the
 Dupire identity in total-variance form (Gatheral 2006, equation 1.27):
@@ -528,19 +528,57 @@ required by the Monte Carlo stepping scheme.
 
 #### 8.2.3 Monte Carlo integration
 
-The integration of the local-volatility derivation into the Monte
-Carlo dynamics is performed in three further tasks specified
-separately: the addition of a step-by-step path generator
-``simulate_paths_local_vol`` whose per-step variance is sourced from
-``VolSurface.local_volatility``; the extension of the Brownian-bridge
-barrier-hit probability to a time-varying volatility input, so that
-the same ``sigma_step(S, t)`` evaluator drives both the path-step
-and the bridge-step; and the per-product dispatch that routes
-American-barrier, autocallable, and issuer-callable products into
-the local-volatility mode while preserving the Substage A scalar
-input for European-barrier products. The internal-consistency
-contract is preserved by construction: every consumer of the
-per-step volatility resolves it through the same call site.
+The local volatility is consumed by the Monte Carlo through three
+components, each preserving the internal-consistency contract by
+which every reader of the per-step volatility resolves it through
+the same evaluator.
+
+The first component is the step-by-step path generator
+``simulate_paths_local_vol``. The path is evolved one business day
+at a time under an Euler discretisation of geometric Brownian
+motion with state-dependent variance,
+
+```math
+S_{j+1} \;=\; S_j \, \exp\!\left( \left( r - \tfrac{1}{2} \sigma_j^2 \right) \Delta t_j + \sigma_j \sqrt{\Delta t_j}\, Z_j \right),
+\qquad \sigma_j \;=\; \sigma_\mathrm{LV}\!\left( S_j, \; t_j + \tfrac{1}{2}\Delta t_j \right),
+```
+
+the volatility being evaluated at the midpoint of each step to
+avoid the *T* → 0 singularity of the Dupire identity at the very
+first step. The per-step tensor ``sigma_path`` of shape
+``(n_paths, n_steps, n_assets)`` is returned alongside the price
+path so that downstream consumers can use precisely the values
+that generated the path. The correlation between underlyings is
+reproduced by the same Cholesky-decomposed correlated normal
+increments that the constant-volatility path generator uses; only
+the volatility scaling at each step differs.
+
+The second component is the time-varying Brownian-bridge
+barrier-hit probability. The bridge utility
+``continuous_survival_prob_from_var`` is generalised to accept a
+per-step variance tensor of either the constant-per-path shape
+``(n_steps, n_assets)`` or the path-dependent shape
+``(n_paths, n_steps, n_assets)`` returned by the local-volatility
+generator. The variance assigned to the monitoring interval
+between consecutive observations ``i`` and ``i + 1`` is
+``sigma_path[:, i + 1, :]² · Δt_i``, identical to the variance
+that generated the corresponding path step. Path-step and
+bridge-step are thus identical by construction, which is the
+structural protection against the implied-realised inconsistency
+that motivated the migration.
+
+The third component is the per-product dispatch
+``_should_use_local_vol``. The local-volatility regime is
+activated for a product when the product is path-dependent under
+any of the autocallable, American-barrier or issuer-callable
+specialisations *and* at least one of its underlyings carries a
+non-fallback surface. European-barrier products always remain on
+the constant-σ regime of Section 8.1 — for them the substitution is
+strictly correct and the local-volatility generator would add
+expense without changing the result. Products whose underlyings
+are all in the surface-level fallback regime likewise remain on
+the constant-σ path, with the legacy at-the-money volatility
+input as the volatility scalar.
 
 ## 9. References
 

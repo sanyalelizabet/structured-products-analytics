@@ -301,8 +301,8 @@ class MonteCarloPricer:
         fallback regime, or has insufficient term-structure
         information at the relevant tenor, the per-step volatility is
         the corresponding entry of ``fallback_vol_map`` for every
-        step. The graceful degradation matches the discipline of
-        Stage 3 Substage A.
+        step. The graceful degradation matches the constant-σ regime's
+        fallback discipline.
 
         Parameters
         ----------
@@ -434,7 +434,7 @@ class MonteCarloPricer:
         (autocallable, American-barrier, issuer-callable); and at
         least one of the product's underlyings carries a non-fallback
         surface. European-barrier products and products without any
-        calibrated surface stay on the Substage A scalar input.
+        calibrated surface stay on the constant-σ scalar input.
         """
         if not vol_surfaces:
             return False
@@ -457,12 +457,11 @@ class MonteCarloPricer:
         """Uniform entry point for path generation.
 
         Returns ``(paths, dates, sigma_path)`` where ``sigma_path`` is
-        ``None`` in the constant-volatility regime (Stage 3 Substage A
-        or earlier) and a ``(n_paths, n_steps, n_assets)`` tensor in
-        the local-volatility regime (Stage 3 Substage B). The
-        sigma_path tensor flows through the downstream payoff
-        evaluation so that bridge consistency with the path step is
-        preserved by construction.
+        ``None`` in the constant-volatility regime and a
+        ``(n_paths, n_steps, n_assets)`` tensor in the local-volatility
+        regime. The sigma_path tensor flows through the downstream
+        payoff evaluation so that bridge consistency with the path
+        step is preserved by construction.
         """
         if self._should_use_local_vol(row, vol_surfaces):
             return self.simulate_paths_local_vol(
@@ -826,10 +825,10 @@ class MonteCarloPricer:
         The uniforms are fixed by ``(seed, product_id)`` so every bump-and-reprice
         Greek evaluation reuses identical draws.
 
-        When ``sigma_path`` is supplied (Stage 3 Substage B local-vol
-        regime), the per-step variance is sourced from that tensor
-        rather than from the constant ``vol_map``: the variance for
-        the interval between ``dates[i]`` and ``dates[i+1]`` is
+        When ``sigma_path`` is supplied (local-volatility regime), the
+        per-step variance is sourced from that tensor rather than from
+        the constant ``vol_map``: the variance for the interval between
+        ``dates[i]`` and ``dates[i+1]`` is
         ``sigma_path[:, i+1, :]**2 * dt[i]``, preserving the
         path-step / bridge-step consistency contract.
         """
@@ -916,9 +915,9 @@ class MonteCarloPricer:
 
         # Simulate the base path tensor once; delta and theta reuse it
         # rather than re-running simulate_paths (the dominant cost).
-        # Under local volatility (Stage 3 Substage B) the per-step
-        # variance varies with the path, so we also retain the
-        # ``sigma_path`` tensor for downstream bridge consistency.
+        # Under local volatility the per-step variance varies with the
+        # path, so we also retain the ``sigma_path`` tensor for
+        # downstream bridge consistency.
         paths_base, dates_base, sigma_path_base = self._simulate(
             row, vol_map, risk_free_rate, corr_matrix, vol_surfaces,
         )
@@ -1071,12 +1070,12 @@ class MonteCarloPricer:
             corr_matrix, corr_fb = self._get_corr_subset(row, corr_df)
             payoff_fn   = self._resolve_payoff(row)
 
-            # Stage 3 Substage A: if a vol surface is available, resolve a
-            # product-specific volatility map evaluated at each underlying's
-            # barrier strike at the product's maturity. The legacy global
-            # vol_map remains the fallback for any underlying for which the
-            # surface cannot produce a value. When no surfaces are supplied
-            # the legacy behaviour is preserved exactly.
+            # If a vol surface is available, resolve a product-specific
+            # volatility map evaluated at each underlying's barrier
+            # strike at the product's maturity. The legacy global
+            # vol_map remains the fallback for any underlying for which
+            # the surface cannot produce a value. When no surfaces are
+            # supplied the legacy behaviour is preserved exactly.
             if vol_surfaces:
                 from src.pricing.vol_surface import build_product_vol_map
                 product_vol_map, _surface_diagnostics = build_product_vol_map(

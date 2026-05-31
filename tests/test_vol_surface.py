@@ -729,7 +729,7 @@ class TestVolSurface:
 
 
 # ---------------------------------------------------------------------------
-# Stage 3 Substage A: product-specific vol map
+# Pricer integration: product-specific vol map
 # ---------------------------------------------------------------------------
 
 class TestBuildProductVolMap:
@@ -903,7 +903,7 @@ class TestBuildProductVolMap:
 
 
 # ---------------------------------------------------------------------------
-# Stage 3 Substage B (foundations): Dupire local volatility
+# Dupire local volatility derivation
 # ---------------------------------------------------------------------------
 
 class TestLocalVolatility:
@@ -1033,7 +1033,7 @@ class TestLocalVolatility:
 
 
 # ---------------------------------------------------------------------------
-# Stage 3 Substage B (integration): local-vol Monte Carlo
+# Local-volatility Monte Carlo integration
 # ---------------------------------------------------------------------------
 
 class TestLocalVolMonteCarlo:
@@ -1151,26 +1151,27 @@ class TestLocalVolMonteCarlo:
             f"constant-vol FV={fv_const:.2f} (relative diff {relative:.3%})"
         )
 
-    def test_negative_skew_mbrc_sits_between_stage_0_and_substage_a(self):
+    def test_negative_skew_mbrc_sits_between_atm_and_barrier_baselines(self):
         # Under negative skew, an American-barrier MBRC produces three
-        # distinct fair values across the migration sequence:
+        # distinct fair values, ordered as follows:
         #
-        #   Stage 0   : constant ATM volatility plugged into GBM.
-        #               Over-estimates the bond NPV because the
-        #               barrier-hit probability is computed under a
-        #               volatility much lower than the surface assigns
-        #               to the barrier region. FV is too high.
+        #   ATM constant-vol   : single ATM sigma plugged into GBM.
+        #                        Over-estimates the bond NPV because
+        #                        the barrier-hit probability is
+        #                        computed under a volatility much
+        #                        lower than the surface assigns to
+        #                        the barrier region. FV is too high.
         #
-        #   Substage A: constant barrier-strike volatility plugged
-        #               into GBM. Over-corrects the bug because the
-        #               elevated wing volatility is applied to the
-        #               whole path, not only near the barrier. FV is
-        #               too low.
+        #   Barrier constant-vol: single barrier-strike sigma plugged
+        #                         into GBM. Over-corrects: the
+        #                         elevated wing volatility is applied
+        #                         to the whole path, not only near
+        #                         the barrier. FV is too low.
         #
-        #   Substage B: local-volatility path with (S, t)-dependent
-        #               sigma. Surface-consistent. FV sits between
-        #               the two -- corrects the Stage 0 bug without
-        #               over-applying the wing vol.
+        #   Local-volatility   : (S, t)-dependent sigma. Surface-
+        #                        consistent. FV sits between the two
+        #                        -- corrects the ATM bug without
+        #                        over-applying the wing vol.
         from src.pricing.monte_carlo import MonteCarloPricer
         from tests.conftest import make_brc_row
 
@@ -1189,33 +1190,33 @@ class TestLocalVolMonteCarlo:
         sigma_atm     = float(skewed.sigma(forward, 1.0))
         sigma_barrier = float(skewed.sigma(0.65 * forward, 1.0))
 
-        # Stage 0 baseline: constant ATM vol.
-        _, _, fv0 = pricer.compute_portfolio_greeks(
+        # ATM constant-vol baseline.
+        _, _, fv_atm = pricer.compute_portfolio_greeks(
             portfolio, {"SKEW": sigma_atm},
             risk_free_rates={"CHF": 0.01},
         )
-        # Substage A baseline: constant barrier-strike vol.
-        _, _, fvA = pricer.compute_portfolio_greeks(
+        # Barrier constant-vol baseline.
+        _, _, fv_bar = pricer.compute_portfolio_greeks(
             portfolio, {"SKEW": sigma_barrier},
             risk_free_rates={"CHF": 0.01},
         )
-        # Substage B: local volatility.
-        _, _, fvB = pricer.compute_portfolio_greeks(
+        # Local-volatility regime.
+        _, _, fv_lv = pricer.compute_portfolio_greeks(
             portfolio, {"SKEW": sigma_barrier},
             risk_free_rates={"CHF": 0.01},
             vol_surfaces={"SKEW": skewed},
         )
-        fv_0 = float(fv0["fair_value"].iloc[0])
-        fv_A = float(fvA["fair_value"].iloc[0])
-        fv_B = float(fvB["fair_value"].iloc[0])
-        se   = float(fv0["std_error"].iloc[0])
-        # The ordering: Stage 0 > Substage B > Substage A, each gap
-        # of at least a couple of MC standard errors.
-        assert fv_0 > fv_B + 2.0 * se, (
-            f"Stage 0 FV ({fv_0:.2f}) should exceed Substage B FV ({fv_B:.2f})"
+        fv_ATM_only = float(fv_atm["fair_value"].iloc[0])
+        fv_BAR_only = float(fv_bar["fair_value"].iloc[0])
+        fv_LV       = float(fv_lv["fair_value"].iloc[0])
+        se          = float(fv_atm["std_error"].iloc[0])
+        # Expected ordering: ATM-only > local-vol > barrier-only, each
+        # gap of at least a couple of MC standard errors.
+        assert fv_ATM_only > fv_LV + 2.0 * se, (
+            f"ATM-vol FV ({fv_ATM_only:.2f}) should exceed local-vol FV ({fv_LV:.2f})"
         )
-        assert fv_B > fv_A + 2.0 * se, (
-            f"Substage B FV ({fv_B:.2f}) should exceed Substage A FV ({fv_A:.2f})"
+        assert fv_LV > fv_BAR_only + 2.0 * se, (
+            f"Local-vol FV ({fv_LV:.2f}) should exceed barrier-vol FV ({fv_BAR_only:.2f})"
         )
 
     def test_european_product_keeps_substage_a_path(self):

@@ -80,14 +80,14 @@ def compute_pricing_and_greeks(
     twice.
 
     The ``_vol_surfaces`` argument, when supplied, enables the
-    surface-aware barrier-strike volatility input introduced in Stage 3
-    Substage A: each product is priced with a per-underlying volatility
-    drawn from the calibrated surface at the strike of its downside
-    barrier and at its residual maturity, rather than at the
-    at-the-money volatility used by the legacy pricer. The argument is
-    prefixed with an underscore so that Streamlit excludes it from the
-    cache key; the cache invalidation continues to be driven by
-    ``portfolio_key``, which captures the active-portfolio identity.
+    surface-aware barrier-strike volatility input: each product is
+    priced with a per-underlying volatility drawn from the calibrated
+    surface at the strike of its downside barrier and at its residual
+    maturity, rather than at a single at-the-money volatility. The
+    argument is prefixed with an underscore so that Streamlit excludes
+    it from the cache key; the cache invalidation continues to be
+    driven by ``portfolio_key``, which captures the active-portfolio
+    identity.
     """
     _ = portfolio_key   # consumed only as a cache key
     # 5,000 paths is plenty for finite-difference Greeks under common
@@ -192,17 +192,15 @@ def fetch_vol_surfaces(_portfolio, portfolio_key: str):
     """Per-ISIN term-structure implied-volatility surfaces.
 
     Returns one :class:`VolSurface` per active-portfolio underlying.
-    Each surface internally composes the per-(ISIN, expiry) SVI slices
-    built in Stage 1 into a term-structure-consistent object via the
-    Stage 2 linear-in-total-variance recipe. The surface exposes
-    :meth:`sigma(K, T)` at arbitrary strike and tenor, with a status
-    taxonomy (interpolated, extrapolated, single_slice, fallback) that
-    the user interface can badge.
-
-    The function is currently additive: no view or pricer consumes it
-    yet. Stage 3 will replace the constant-vol input to the barrier
-    product pricers with surface evaluations at the barrier strike,
-    which is the substance of the pricer bug-fix.
+    Each surface composes the per-(ISIN, expiry) calibrated SVI slices
+    into a term-structure-consistent object via the
+    linear-in-total-variance recipe, and exposes :meth:`sigma(K, T)` at
+    arbitrary strike and tenor with a status taxonomy (interpolated,
+    extrapolated, single_slice, fallback) that the user interface
+    badges. The surfaces are consumed by the Monte Carlo pricer at the
+    product's downside barrier strike (constant-σ regime) or, for
+    path-dependent products, through the Dupire local-volatility
+    evaluator at every Monte Carlo time step.
 
     The cache key follows the same ``portfolio_key`` convention as the
     sibling ``fetch_implied_vols`` and ``fetch_realised_vols``.
@@ -519,9 +517,9 @@ beta_map             = build_beta_map(portfolio, portfolio_key=pkey)
 
 vol_map_implied      = fetch_implied_vols(portfolio, portfolio_key=pkey)
 vol_map_realised     = fetch_realised_vols(portfolio, portfolio_key=pkey)
-# Stage 1: per-(isin, expiry) SVI slice surfaces. Populated but not yet
-# consumed by the pricer or any view; the term-structure assembly (Stage 2)
-# and surface-aware pricing (Stage 3) build on this object.
+# Per-underlying implied volatility surfaces, consumed by the pricer
+# for barrier-strike evaluations and by the portfolio view for the
+# implied-vs-realised vol table and the 3D surface viewer.
 vol_surfaces         = fetch_vol_surfaces(portfolio, portfolio_key=pkey)
 
 risk_free_rates      = fetch_risk_free_rates(portfolio, portfolio_key=pkey)

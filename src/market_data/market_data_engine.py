@@ -1081,27 +1081,26 @@ class MarketDataEngine:
         For every underlying in the portfolio the method assembles, from
         the stored options chain in ``options.csv``, one
         :class:`VolSliceSurface` per available expiry. Each slice is the
-        product of the full Stage 1 calibration pipeline: SVI fit,
-        butterfly and wing-bound arbitrage gates, data-quality gate, and
-        the chain-proxy or constant-volatility fallback when any of
-        those checks fail. The decision and reason are recorded on the
+        product of the full calibration pipeline: SVI fit, butterfly
+        and wing-bound arbitrage gates, data-quality gate, and the
+        chain-proxy or constant-volatility fallback when any of those
+        checks fail. The decision and reason are recorded on the
         returned slice so that the user interface can badge the result
         without re-running the calibration.
 
-        Stage 1 simplifications
-        -----------------------
+        Conventions
+        -----------
         The forward price at each expiry is approximated by the spot
         price of the underlying (i.e. ``F = S``). This is the same
-        convention adopted by the existing ATM vol map and is acceptable
-        for SVI calibration because the smile-translation parameter
-        ``m`` absorbs any small offset between the true forward and the
-        spot. Risk-free rate drift and dividend yield will be
-        incorporated in Stage 2 when the term structure of the surface
-        is assembled. Likewise, only out-of-the-money options are
-        retained per expiry — out-of-the-money calls above the spot,
-        out-of-the-money puts below the spot — to avoid the
-        early-exercise bid-ask distortion that affects in-the-money
-        American equity options.
+        convention adopted by the existing ATM vol map and is
+        acceptable for SVI calibration because the smile-translation
+        parameter ``m`` absorbs any small offset between the true
+        forward and the spot. Removing the simplification, in concert
+        with a dividend-yield estimator, is recorded as future work.
+        Only out-of-the-money options are retained per expiry —
+        out-of-the-money calls above the spot, out-of-the-money puts
+        below the spot — to avoid the early-exercise bid-ask
+        distortion that affects in-the-money American equity options.
 
         Parameters
         ----------
@@ -1206,7 +1205,7 @@ class MarketDataEngine:
                 slice_surface = VolSliceSurface.from_chain(
                     isin=isin,
                     T=tenor_years,
-                    forward=spot,   # Stage 1 simplification: F = S
+                    forward=spot,   # F = S simplification, per module convention
                     strikes=strikes,
                     implied_vols=ivs,
                     bid_asks=bid_asks,
@@ -1247,10 +1246,10 @@ class MarketDataEngine:
         dict
             ``{ isin: VolSurface }``. ISINs without any chain coverage
             are absent from the mapping. ISINs whose slices all fall
-            back to the chain proxy or constant fallback in Stage 1 are
-            present but in the surface's :data:`SURFACE_STATUS_FALLBACK`
-            regime, which the caller may interrogate via
-            ``surface.surface_status_at(T)``.
+            back to the chain proxy or constant fallback at the slice
+            level are present but in the surface's
+            :data:`SURFACE_STATUS_FALLBACK` regime, which the caller
+            may interrogate via ``surface.surface_status_at(T)``.
         """
         from src.pricing.vol_surface import VolSurface
 

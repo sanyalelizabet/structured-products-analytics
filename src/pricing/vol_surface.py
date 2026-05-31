@@ -4,11 +4,12 @@ Implied volatility surface — raw SVI parameterisation
 
 This module provides the mathematical core of the implied volatility surface
 used by the structured-products pricers. The surface is constructed
-slice-by-slice (one slice per listed expiry) and, in later stages, assembled
-into a term-structure-consistent object via SSVI. This file contains the
-parameterisation and pointwise evaluation only; calibration, arbitrage gates,
-and the higher-level ``VolSliceSurface`` wrapper are added in subsequent
-tasks of Stage 1.
+slice-by-slice (one slice per listed expiry) and assembled into a
+term-structure-consistent object by the :class:`VolSurface` defined below.
+Three objects compose the public interface: :class:`SVIParams` for the
+raw parameterisation, :class:`VolSliceSurface` for a single calibrated
+expiry with its arbitrage and quality gates, and :class:`VolSurface` for
+the term-structure assembly and the Dupire local-volatility derivation.
 
 Motivation
 ----------
@@ -1197,19 +1198,19 @@ class VolSliceSurface:
 
 
 # ---------------------------------------------------------------------------
-# Term-structure assembly (Stage 2)
+# Term-structure assembly
 # ---------------------------------------------------------------------------
 #
-# The objects defined below assemble the per-slice SVI surfaces of Stage 1
-# into a single, term-structure-consistent volatility surface. The
-# assembly follows the standard linear-in-total-variance recipe of
-# Gatheral (2006, chapter 3), under which the absence of calendar
-# arbitrage is preserved between two slices whose total variance is
-# monotone increasing in tenor at every log-moneyness. The recipe is
-# preferred here to a full SSVI re-calibration because it preserves the
-# per-slice quality already achieved in Stage 1 and avoids re-fitting a
-# more constrained functional form to chains whose data quality varies
-# considerably across the universe of underlyings.
+# The objects defined below assemble the per-slice SVI surfaces into a
+# single, term-structure-consistent volatility surface. The assembly
+# follows the standard linear-in-total-variance recipe of Gatheral
+# (2006, chapter 3), under which the absence of calendar arbitrage is
+# preserved between two slices whose total variance is monotone
+# increasing in tenor at every log-moneyness. The recipe is preferred
+# here to a full SSVI re-calibration because it preserves the
+# per-slice quality of the underlying calibration and avoids re-fitting
+# a more constrained functional form to chains whose data quality
+# varies considerably across the universe of underlyings.
 
 
 def interpolate_total_variance(
@@ -1444,10 +1445,10 @@ def verify_calendar_monotone(
 # Surface status taxonomy
 # ---------------------------------------------------------------------------
 #
-# Four values complete the badge taxonomy introduced in Stage 1. They are
-# part of the public contract of the module: the user interface badges
-# the surface query according to these labels and analytics output tags
-# carry them verbatim.
+# Four values complete the badge taxonomy that complements the
+# slice-level fit-status labels. They are part of the public contract
+# of the module: the user interface badges the surface query according
+# to these labels and analytics output tags carry them verbatim.
 
 SURFACE_STATUS_INTERPOLATED: str = "interpolated"
 SURFACE_STATUS_EXTRAPOLATED: str = "extrapolated"
@@ -1526,7 +1527,7 @@ class VolSurface:
       vol-flat scaling of the appropriate anchor slice (the shortest
       listed expiry for ``T < T_min``, the longest for ``T > T_max``),
       as defined by :func:`extrapolate_atm_scaling`.
-    * **single_slice** — only one SVI slice survives the Stage 1
+    * **single_slice** — only one SVI slice survives the slice-level
       arbitrage and quality gates. Every query is answered by
       vol-flat scaling of that single slice. The status is reported
       separately from ``extrapolated`` because the surface provides
@@ -1540,8 +1541,8 @@ class VolSurface:
     :meth:`from_slice_map`, which extracts the SVI-branch slices of a
     :class:`VolSliceSurface` dictionary, sorts them by tenor, and
     populates the surface. Direct construction is supported for
-    composition by Stage 3 code that builds surfaces from other
-    sources but is not the primary entry point.
+    composition by code that builds surfaces from other sources but
+    is not the primary entry point.
     """
 
     __slots__ = (
@@ -1602,14 +1603,14 @@ class VolSurface:
             self, "calendar_violations",
             verify_calendar_monotone(records),
         )
-        # Stage 3B diagnostic: number of local-volatility clip events
-        # accumulated by ``local_volatility`` over the surface's lifetime.
-        # Counts every (k, T) cell where the Dupire output was clipped to
-        # the admissible range. Reset by the caller if a per-product or
+        # Diagnostic: number of local-volatility clip events accumulated
+        # by ``local_volatility`` over the surface's lifetime. Counts
+        # every (k, T) cell where the Dupire output was clipped to the
+        # admissible range. Reset by the caller if a per-product or
         # per-evaluation count is required.
         object.__setattr__(self, "local_vol_clip_count", 0)
-        # Stage 3B warning diagnostics: events where the Dupire output
-        # lay inside the admissible range but exceeded the informational
+        # Warning diagnostics: events where the Dupire output lay
+        # inside the admissible range but exceeded the informational
         # warning thresholds. The counter is incremented for every
         # warning regardless of buffer state; the event list retains a
         # representative sample (the most extreme by sigma_LV) up to
@@ -1745,9 +1746,9 @@ class VolSurface:
         Only :data:`FIT_STATUS_SVI` slices participate in the term-
         structure interpolation; slices in the proxy or fallback
         branches are excluded. The forward of the resulting surface is
-        inherited from any participating slice; under the Stage 1
-        simplification *F = S* every slice for a given underlying
-        carries the same forward, so the choice is unambiguous. When
+        inherited from any participating slice; under the prevailing
+        *F = S* convention every slice for a given underlying carries
+        the same forward, so the choice is unambiguous. When
         no SVI slice is present, the surface is constructed in the
         fallback regime and a constant volatility is returned for every
         query.
@@ -2134,7 +2135,7 @@ class VolSurface:
 
 
 # ---------------------------------------------------------------------------
-# Pricer integration (Stage 3 Substage A)
+# Pricer integration: per-product volatility resolution
 # ---------------------------------------------------------------------------
 
 
@@ -2169,7 +2170,9 @@ def build_product_vol_map(
     economically relevant quantity for the dominant payoff feature —
     but the path-dependency of those payoffs is still mis-represented
     by the constant-volatility dynamics; the full correction requires
-    the local-volatility Monte Carlo of Stage 3 Substage B.
+    the local-volatility Monte Carlo regime that the pricer activates
+    automatically when a surface is available for a path-dependent
+    product.
 
     When the surface for a given underlying is unavailable, falls back
     to the static :data:`SURFACE_STATUS_FALLBACK` regime, or has no
