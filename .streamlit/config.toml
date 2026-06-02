@@ -18,3 +18,23 @@ backgroundColor = "#0E1117"     # Streamlit dark default
 secondaryBackgroundColor = "#1E2230"
 textColor       = "#FAFAFA"
 font            = "sans serif"
+
+# =========================================================================
+# Server — production deployment posture
+# =========================================================================
+# Disable Streamlit's file-change auto-reload subsystem on production
+# deployments. The watcher uses inotify under the hood; on shared
+# environments such as Streamlit Cloud the inotify watch budget is
+# routinely exhausted and the watcher threads die with ENOSPC, flooding
+# the logs and masking real application errors. Auto-reload is a
+# developer-loop convenience and is not needed in production: a git
+# push triggers a clean redeploy regardless.
+
+[server]
+fileWatcherType = "none"
+
+# Surface application errors in the browser so production diagnostics
+# are not gated on log-tab access.
+
+[client]
+showErrorDetails = true
