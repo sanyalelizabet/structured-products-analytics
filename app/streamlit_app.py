@@ -248,26 +248,6 @@ def fetch_vol_surfaces(_portfolio, portfolio_key: str):
 
 
 @st.cache_data(ttl=_TTL_INTRADAY)
-def fetch_vol_surface_slice_map(_portfolio, portfolio_key: str):
-    """Per-(ISIN, expiry) raw slice-level diagnostics.
-
-    Returns the raw ``{isin: {expiry_iso: VolSliceSurface}}`` map produced
-    by :meth:`MarketDataEngine.build_vol_surface_map`, retaining the
-    per-slice ``fit_status`` and ``reason`` for every expiry, including
-    slices that fell back to the chain-proxy or constant fallback. The
-    portfolio view consumes this map to render the surface-diagnostics
-    expander, which makes the failure mode visible rather than silent.
-    """
-    _ = portfolio_key
-    engine = get_market_engine()
-    try:
-        return engine.build_vol_surface_map(_portfolio)
-    except Exception as e:
-        st.warning(f"Could not build vol surface slice map: {e}")
-        return {}
-
-
-@st.cache_data(ttl=_TTL_INTRADAY)
 def build_product_analytics(_portfolio, _db, reference_currency: str,
                             portfolio_key: str, fx_as_of: str = "", _fx_map=None):
     # ``reference_currency`` + ``portfolio_key`` + ``fx_as_of`` form the cache
@@ -566,7 +546,6 @@ vol_map_realised     = fetch_realised_vols(portfolio, portfolio_key=pkey)
 # for barrier-strike evaluations and by the portfolio view for the
 # implied-vs-realised vol table and the 3D surface viewer.
 vol_surfaces         = fetch_vol_surfaces(portfolio, portfolio_key=pkey)
-vol_surface_slice_map = fetch_vol_surface_slice_map(portfolio, portfolio_key=pkey)
 
 risk_free_rates      = fetch_risk_free_rates(portfolio, portfolio_key=pkey)
 
@@ -685,7 +664,6 @@ elif view == "Portfolio":
         analytics, df, greeks_df, pf_delta, valuation_date,
         corr_df=display_corr_df,
         vol_surfaces=vol_surfaces,
-        vol_surface_slice_map=vol_surface_slice_map,
         vol_map_realised=vol_map_realised,
         portfolio=portfolio,
     )

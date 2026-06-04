@@ -198,11 +198,20 @@ observation that wide-spread quotes are diagnostic of stale or thin
 options markets rather than of a genuine implied-volatility surface
 feature.
 
-A maximum root-mean-square calibration residual is required, set by
-default at one-and-a-half volatility points. The threshold reflects the
-typical noise level of mid quotes on liquid single-name chains; a
-substantially larger residual is almost always indicative of a
-contaminated slice rather than of a real exotic smile feature.
+A maximum root-mean-square calibration residual is required. The
+ceiling is calibrated to the noise floor of the data source rather
+than fixed at a single value. The present implementation consumes the
+implied volatilities published in each option chain unchanged,
+without re-inverting them from observed option prices, and therefore
+inherits the cross-strike inconsistencies introduced by the vendor's
+own Black–Scholes conventions — discount rate, dividend treatment,
+exercise style. On free retail feeds these inconsistencies produce
+per-slice residuals of two to three volatility points on liquid US
+single names, and the ceiling is set at three points accordingly to
+admit those fits while still rejecting genuinely divergent
+calibrations. A migration to a cleaner feed or to in-house
+Black–Scholes inversion under consistent conventions would warrant a
+tighter ceiling of approximately one and a half volatility points.
 
 When any of the three checks fails, the slice is routed into a
 fallback. Two fallback branches are provided. The chain-proxy fallback

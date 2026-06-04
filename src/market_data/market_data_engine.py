@@ -1212,9 +1212,23 @@ class MarketDataEngine:
                     mids=mids,
                 )
                 isin_slices[str(expiry_iso)] = slice_surface
+                if slice_surface.fit_status != "svi":
+                    log.warning(
+                        "Slice fell back to %s for %s @ %s (T=%.3fy): %s",
+                        slice_surface.fit_status,
+                        isin,
+                        expiry_iso,
+                        tenor_years,
+                        slice_surface.reason or "(no reason recorded)",
+                    )
 
             if isin_slices:
                 surfaces[isin] = isin_slices
+            else:
+                log.warning(
+                    "No usable slices for %s — surface will be in fallback regime",
+                    isin,
+                )
 
         return surfaces
 

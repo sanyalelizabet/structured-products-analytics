@@ -565,15 +565,26 @@ def fit_svi_slice(
 # Arbitrage and data-quality gates
 # ---------------------------------------------------------------------------
 
-# Default thresholds used by the quality gate. The values reflect the
-# empirical noise level of Yahoo option chains on liquid underlyings: a
-# tighter root-mean-square fit than 1.5 volatility points is rare even
-# on SPX, while a wider one is almost always a sign of a contaminated
-# slice rather than a real exotic smile feature.
+# Default thresholds used by the quality gate.
+#
+# The RMSE ceiling is calibrated to the noise floor of the underlying
+# data source. The present implementation consumes the implied
+# volatilities published in each option chain unchanged, without
+# re-inverting them from observed option prices, and therefore
+# inherits the cross-strike inconsistencies introduced by the data
+# vendor's own Black–Scholes conventions (discount rate, dividend
+# treatment, exercise style). On free retail feeds (Yahoo Finance)
+# these inconsistencies produce per-slice RMSE values of two to three
+# volatility points on liquid US single names; the ceiling is set at
+# three to admit those fits while still rejecting genuinely divergent
+# calibrations. A cleaner feed (Bloomberg, OptionMetrics, IVolatility)
+# would justify a tighter ceiling of one and a half volatility points,
+# as would a future migration to in-house Black–Scholes inversion of
+# observed prices under our own discount and dividend conventions.
 _QUALITY_DEFAULTS = {
     "min_strikes":           5,
     "max_bid_ask_pct":       0.25,   # bid-ask must be at most 25 % of mid
-    "max_rmse_vol_points":   0.015,  # 1.5 volatility points
+    "max_rmse_vol_points":   0.030,  # 3.0 volatility points (Yahoo noise floor)
 }
 
 # Densities used by the Durrleman butterfly check. The grid spans a wide
@@ -748,11 +759,13 @@ def quality_gate(
       informative observations.
     * **Fit quality.** The root-mean-square deviation of the fitted
       implied volatilities from the observed mids must be below a
-      tolerance expressed in volatility points. The default of 1.5
-      points reflects the typical noise level of mid quotes on liquid
-      single names; a substantially larger residual is almost always
-      diagnostic of a contaminated slice rather than of a genuine
-      exotic smile feature.
+      tolerance expressed in volatility points. The default of three
+      points reflects the noise floor of the implied volatilities
+      published by free retail option-chain feeds (Yahoo Finance),
+      which inherit cross-strike inconsistencies from the vendor's
+      own Black–Scholes inversion conventions. A cleaner feed or an
+      in-house re-inversion would warrant a tighter ceiling; see the
+      module-level note on ``_QUALITY_DEFAULTS``.
 
     Parameters
     ----------
