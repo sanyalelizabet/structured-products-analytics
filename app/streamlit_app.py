@@ -1,5 +1,6 @@
 import streamlit as st
 import sys
+import pandas as pd
 from pathlib import Path
 
 # make src and data importable
@@ -40,6 +41,27 @@ def get_yahoo_client():
 # Cache TTLs — daily-frequency data lives 24h, intraday spots/rates 1h.
 _TTL_INTRADAY = 60 * 60          # 1h
 _TTL_DAILY    = 24 * 60 * 60     # 24h
+
+
+def _us_options_session_open() -> bool:
+    """True iff NYSE regular hours (09:30 to 16:00 ET) on a weekday.
+
+    Used to decide whether to attempt a live Yahoo chain refresh. Outside
+    these hours Yahoo returns sparse, zero-bid, stale-quote chains that
+    fail downstream calibration; the cached file is preferred.
+    """
+    try:
+        from zoneinfo import ZoneInfo
+        now_ny = pd.Timestamp.now(tz=ZoneInfo("America/New_York"))
+    except Exception:
+        # Fallback: assume open if we cannot determine tz. Safer to attempt
+        # the fetch than to never refresh.
+        return True
+    if now_ny.weekday() >= 5:        # Sat / Sun
+        return False
+    open_ts  = now_ny.replace(hour=9,  minute=30, second=0, microsecond=0)
+    close_ts = now_ny.replace(hour=16, minute=0,  second=0, microsecond=0)
+    return open_ts <= now_ny <= close_ts
 
 # History window for historical estimations (factor loadings, single-factor
 # betas, correlations). Matches the factor-premium estimation window so all
@@ -117,14 +139,17 @@ def fetch_market_data(_portfolio, portfolio_key: str):
         valuation_date = db["date"].max() if not db.empty else None
         return _portfolio, db, valuation_date, str(e)
 
-@st.cache_data(ttl=_TTL_DAILY)
+@st.cache_data(ttl=_TTL_INTRADAY)
 def fetch_implied_vols(_portfolio, portfolio_key: str):
     _ = portfolio_key
     engine = get_market_engine()
     yahoo  = get_yahoo_client()
     isins  = list({isin for _, row in _portfolio.iterrows() for isin in row["underlying_isins"]})
+    options_path = engine.options_path
+    file_present = options_path.exists() and options_path.stat().st_size > 0
     try:
-        engine.fetch_options_chain(isins, yahoo_client=yahoo)
+        if _us_options_session_open() or not file_present:
+            engine.fetch_options_chain(isins, yahoo_client=yahoo)
         return engine.build_atm_vol_map(_portfolio)
     except Exception as e:
         st.warning(f"Could not build implied vol map, falling back to static vols. {e}")
@@ -219,6 +244,26 @@ def fetch_vol_surfaces(_portfolio, portfolio_key: str):
     except Exception as e:
         st.warning(f"Could not build vol surfaces; downstream surface-aware "
                    f"analytics will fall back to constant vol. {e}")
+        return {}
+
+
+@st.cache_data(ttl=_TTL_INTRADAY)
+def fetch_vol_surface_slice_map(_portfolio, portfolio_key: str):
+    """Per-(ISIN, expiry) raw slice-level diagnostics.
+
+    Returns the raw ``{isin: {expiry_iso: VolSliceSurface}}`` map produced
+    by :meth:`MarketDataEngine.build_vol_surface_map`, retaining the
+    per-slice ``fit_status`` and ``reason`` for every expiry, including
+    slices that fell back to the chain-proxy or constant fallback. The
+    portfolio view consumes this map to render the surface-diagnostics
+    expander, which makes the failure mode visible rather than silent.
+    """
+    _ = portfolio_key
+    engine = get_market_engine()
+    try:
+        return engine.build_vol_surface_map(_portfolio)
+    except Exception as e:
+        st.warning(f"Could not build vol surface slice map: {e}")
         return {}
 
 
@@ -521,6 +566,7 @@ vol_map_realised     = fetch_realised_vols(portfolio, portfolio_key=pkey)
 # for barrier-strike evaluations and by the portfolio view for the
 # implied-vs-realised vol table and the 3D surface viewer.
 vol_surfaces         = fetch_vol_surfaces(portfolio, portfolio_key=pkey)
+vol_surface_slice_map = fetch_vol_surface_slice_map(portfolio, portfolio_key=pkey)
 
 risk_free_rates      = fetch_risk_free_rates(portfolio, portfolio_key=pkey)
 
@@ -639,6 +685,7 @@ elif view == "Portfolio":
         analytics, df, greeks_df, pf_delta, valuation_date,
         corr_df=display_corr_df,
         vol_surfaces=vol_surfaces,
+        vol_surface_slice_map=vol_surface_slice_map,
         vol_map_realised=vol_map_realised,
         portfolio=portfolio,
     )

@@ -72,7 +72,8 @@ PLOTLY_DIVERGING_SCALE = [
 
 
 def render(analytics, df, greeks_df, pf_delta, valuation_date, corr_df=None,
-           vol_surfaces=None, vol_map_realised=None, portfolio=None):
+           vol_surfaces=None, vol_surface_slice_map=None,
+           vol_map_realised=None, portfolio=None):
     _render_header(analytics, valuation_date)
     _render_kpi_strip(analytics, df)
     _render_quick_stats(analytics, df)
@@ -85,6 +86,7 @@ def render(analytics, df, greeks_df, pf_delta, valuation_date, corr_df=None,
     _render_concentration(analytics, corr_df)
     _render_volatility_expander(portfolio, vol_surfaces, vol_map_realised, valuation_date)
     _render_surface_3d_viewer(portfolio, vol_surfaces)
+    _render_vol_surface_diagnostics(portfolio, vol_surfaces, vol_surface_slice_map)
     st.markdown("---")
     _render_risk(greeks_df, pf_delta)
 
@@ -972,5 +974,96 @@ def _render_surface_3d_viewer(portfolio, vol_surfaces):
             f"interpolation, beyond them the vol-flat extrapolation. "
             f"Calendar-arbitrage audit: {cal_violations} violation"
             f"{'s' if cal_violations != 1 else ''}."
+        )
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Surface diagnostics — per-(ISIN, expiry) calibration outcomes
+# ──────────────────────────────────────────────────────────────────────────
+
+def _render_vol_surface_diagnostics(portfolio, vol_surfaces, slice_map):
+    """Audit-trail of the per-slice calibration outcomes.
+
+    The expander exposes, for every (ISIN, listed expiry) referenced by the
+    portfolio, the calibration outcome recorded by the surface builder:
+    whether the slice resulted in a calibrated SVI fit, a chain-proxy
+    fallback or a constant-volatility fallback, the reason recorded by
+    the gate that triggered any fallback, and the calibration residual
+    where applicable. The expander is the user-facing antidote to the
+    silent ``no_surface`` cells that otherwise appear in the implied-
+    versus-realised table when calibration is impossible: every row of
+    that table now has a corresponding row here naming the cause.
+    """
+    if portfolio is None or len(portfolio) == 0:
+        return
+
+    portfolio_isins = sorted({
+        isin
+        for _, row in portfolio.iterrows()
+        for isin in row["underlying_isins"]
+    })
+    slice_map = slice_map or {}
+    vol_surfaces = vol_surfaces or {}
+
+    with st.expander("Surface diagnostics — per-slice calibration outcomes"):
+        st.caption(
+            "Every (ISIN, listed expiry) inspected by the surface builder is "
+            "recorded below. *svi* indicates a calibrated arbitrage-free "
+            "slice; *proxy* indicates a slice that fell back to "
+            "nearest-strike interpolation because the SVI fit or its "
+            "arbitrage / data-quality gates did not pass; *fallback* "
+            "indicates a slice with no chain data at all. Underlyings "
+            "with no row here had no chain data persisted under their "
+            "ISIN — typically because Yahoo does not list options on "
+            "them (e.g. Swiss singles)."
+        )
+
+        rows = []
+        for isin in portfolio_isins:
+            isin_slices = slice_map.get(isin, {})
+            if not isin_slices:
+                rows.append({
+                    "ISIN":          isin,
+                    "Expiry":        "—",
+                    "T (yrs)":       None,
+                    "Fit status":    "no_chain_data",
+                    "Reason":        "no rows persisted under this ISIN",
+                    "Strikes":       None,
+                    "RMSE (vp)":     None,
+                })
+                continue
+            for expiry_iso, slice_surface in sorted(isin_slices.items()):
+                rmse = getattr(slice_surface, "rmse", None)
+                rows.append({
+                    "ISIN":       isin,
+                    "Expiry":     str(expiry_iso),
+                    "T (yrs)":    round(float(getattr(slice_surface, "T", 0.0)), 3),
+                    "Fit status": getattr(slice_surface, "fit_status", "—"),
+                    "Reason":     getattr(slice_surface, "reason", "") or "",
+                    "Strikes":    int(getattr(slice_surface, "n_strikes", 0)),
+                    "RMSE (vp)":  round(rmse * 100.0, 2) if rmse is not None else None,
+                })
+
+        if not rows:
+            st.info("No underlyings to audit in this portfolio.")
+            return
+
+        table = pd.DataFrame(rows)
+        st.dataframe(table, width="stretch", hide_index=True,
+                     height=_fit_height(len(table)))
+
+        # Headline counters at the top to show overall coverage at a glance.
+        n_isins = len(portfolio_isins)
+        n_with_any_slice = sum(1 for i in portfolio_isins if slice_map.get(i))
+        n_with_svi = sum(
+            1
+            for i in portfolio_isins
+            if any(s.fit_status == "svi" for s in (slice_map.get(i) or {}).values())
+        )
+        st.caption(
+            f"**Coverage:** {n_with_svi}/{n_isins} underlyings produced at "
+            f"least one calibrated SVI slice. {n_with_any_slice}/{n_isins} "
+            f"have any chain data. Underlyings with zero chain data appear "
+            f"as a single *no_chain_data* row."
         )
 
