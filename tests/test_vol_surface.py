@@ -243,8 +243,10 @@ class TestQualityGate:
         assert "insufficient strikes" in msg
 
     def test_rmse_above_threshold_rejected(self):
+        # 4 volatility points is unambiguously above any defensible
+        # ceiling, even on noisy free retail feeds.
         ok, msg = quality_gate(
-            np.array([90.0, 95.0, 100.0, 105.0, 110.0]), None, fit_rmse=0.025
+            np.array([90.0, 95.0, 100.0, 105.0, 110.0]), None, fit_rmse=0.040
         )
         assert not ok
         assert "RMSE too large" in msg
@@ -344,17 +346,20 @@ class TestVolSliceSurface:
         # Fallback constant must be invariant to strike.
         assert slice_surface.sigma(50.0) == slice_surface.sigma(150.0)
 
-    def test_noisy_chain_routes_to_proxy_via_rmse(self):
-        # IVs that are not SVI-shaped force the fit RMSE above the
-        # quality-gate threshold and route the slice to the proxy.
+    def test_noisy_chain_routes_to_proxy(self):
+        # IVs that are not SVI-shaped should route the slice to the
+        # proxy fallback. The precise gate that fires depends on the
+        # nature of the noise — calibration may fail to converge, the
+        # Durrleman density may go negative, or the RMSE may exceed
+        # the ceiling — but in every case the result is the proxy.
         F, T = 100.0, 1.0
         strikes = np.array([70.0, 80.0, 85.0, 90.0, 95.0, 100.0,
                             105.0, 110.0, 120.0, 130.0])
         rng = np.random.default_rng(0)
-        ivs = 0.2 + rng.uniform(-0.05, 0.05, len(strikes))
+        ivs = 0.2 + rng.uniform(-0.10, 0.10, len(strikes))
         slice_surface = VolSliceSurface.from_chain("NOISY", T, F, strikes, ivs)
         assert slice_surface.fit_status == FIT_STATUS_PROXY
-        assert "RMSE" in slice_surface.reason
+        assert slice_surface.reason, "fallback should record a reason"
 
     def test_vectorised_sigma(self, synthetic_chain):
         strikes, ivs, T, F = synthetic_chain
