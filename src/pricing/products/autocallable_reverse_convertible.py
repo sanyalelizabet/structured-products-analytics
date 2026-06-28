@@ -78,11 +78,12 @@ def vectorised_autocallable_rc_summary(
     raw_obs     = list(row.get("autocall_obs_dates", []) or [])
     obs_dates   = pd.to_datetime(raw_obs) if raw_obs else pd.DatetimeIndex([])
 
-    # Constants — computed once via a prototype RC instance (reused for
-    # cost / total-coupon constants regardless of call status).
+    # Constant — total dirty cost is identical for every path, so compute it
+    # once via a prototype RC instance. Per-path coupon income is computed
+    # inline below: pro-rata to the call date for autocalled paths, and via
+    # `vectorised_european_rc_summary` for uncalled paths.
     rc_proto       = ReverseConvertible(row, final_levels=[0.0] * n_assets)
     total_cost     = rc_proto.total_cost()
-    full_coupon    = rc_proto.coupon_payment()
 
     initial_fixing = datetime.strptime(row["initial_fixing_date"], "%Y-%m-%d")
 
@@ -126,7 +127,7 @@ def vectorised_autocallable_rc_summary(
 
     if autocalled.any():
         for p in np.flatnonzero(autocalled):
-            t_call_years = (call_date[p].to_pydatetime() - initial_fixing).days / 360
+            t_call_years = rc_proto.schedule.year_fraction(initial_fixing, call_date[p])
             accrued = notional * coupon * max(t_call_years, 0.0)
             payoff_p = notional + accrued
 

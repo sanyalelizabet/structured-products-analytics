@@ -228,6 +228,33 @@ def validate(row: dict[str, Any]) -> list[str]:
             f"strike={n_k} initial_levels={n_l}"
         )
 
+    # Coupon schedule sanity. A coupon-bearing product without an explicit
+    # multi-date schedule will silently fall back to a single bullet at
+    # maturity downstream (`ReverseConvertible._build_schedule`), which is
+    # only correct for products that actually pay a single bullet.  Surface
+    # the ambiguity so the operator can re-extract or enter the dates
+    # manually before the row is persisted.
+    coupon = row.get("coupon")
+    coupon_dates = row.get("coupon_dates") or []
+    maturity = row.get("maturity_date")
+    if coupon is not None and coupon > 0:
+        if not coupon_dates:
+            warnings.append(
+                "Coupon > 0 but coupon_dates is empty — schedule will fall "
+                "back to a single bullet at maturity. Verify the term sheet "
+                "and enter the dates if this is a multi-coupon product."
+            )
+        elif (
+            maturity is not None
+            and len(coupon_dates) == 1
+            and coupon_dates[0] == maturity
+        ):
+            warnings.append(
+                "coupon_dates contains only the maturity date. If the term "
+                "sheet specifies a multi-period coupon schedule, the "
+                "extractor missed it — verify and re-enter manually."
+            )
+
     return warnings
 
 

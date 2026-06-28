@@ -302,34 +302,40 @@ class ReverseConvertible:
     def is_multi(self):
         return len(self.initial_levels) > 1
     
-    def performances(self):
-        """
-        Final performance vs strike. for each underlying in a given MRC
-        Better for payoff/redemption logic.
+    def delivery_performances(self):
+        """Per-underlying strike-relative ratios used in delivery mechanics.
+
+        Returns ``S_i(T) / K_i`` for each underlying. Per the model
+        specification (`docs/specifications/reverse_convertible.md` §10),
+        this ratio enters the contract inside the breach branch, where it
+        sets (a) the delivery quantity ``N / K_{i*}`` and (b) the worst
+        underlying ``i* = argmin S_i(T) / K_i``.
         """
         return [
             final / strike
             for final, strike in zip(self.final_levels, self.strike_levels)
         ]
-    
+
     def current_performances(self):
-        """
-        Current spot performance vs strike.
+        """Current spot relative to strike, per underlying.
+
+        Distinct from :meth:`delivery_performances`, which uses the
+        projected terminal level. Used for current-state reporting only.
         """
         return [
             spot / strike
             for spot, strike in zip(self.current_spots, self.strike_levels)
         ]
-    
-    def performance(self):
-        """
-        Relevant payoff performance:
-        - BRC: single underlying performance
-        - MBRC: worst-of performance
+
+    def delivery_performance(self):
+        """Worst-of delivery-performance ratio (single value).
+
+        ``min`` over :meth:`delivery_performances` for MBRC; the single
+        underlying's ratio for BRC.
         """
         if self.is_multi():
-            return min(self.performances())
-        return self.performances()[0]
+            return min(self.delivery_performances())
+        return self.delivery_performances()[0]
     
     def barrier_breaches_final(self):
         """
@@ -362,7 +368,7 @@ class ReverseConvertible:
         """
         if not self.barrier_breached():
             return self.notional
-        return self.notional * self.performance()
+        return self.notional * self.delivery_performance()
     
     def total_product_time(self):
         start = datetime.strptime(self.row["initial_fixing_date"], "%Y-%m-%d")
@@ -370,8 +376,24 @@ class ReverseConvertible:
         return (maturity - start).days / 360
 
     def coupon_payment(self):
-        """Total contractual coupon over the life of the product."""
-        return self.schedule.total_amount(self.notional, self.coupon)
+        """Sum of contractual coupons scheduled strictly after the purchase date.
+
+        Per the model specification (`docs/specifications/reverse_convertible.md`
+        §6), only coupons due after the investor's purchase date enter the
+        projected payoff and PnL. Coupons paid before purchase belong to the
+        previous holder and are accounted for separately via
+        :meth:`accrued_at_purchase` (added to the dirty cost).
+
+        For a position bought at issuance, purchase date equals the initial
+        fixing date and the result coincides with the full-life total. For a
+        position bought after issuance, pre-purchase coupons are excluded.
+        """
+        return sum(
+            amount
+            for _, amount in self.schedule.future_cashflows(
+                self.notional, self.coupon, self._purchase_date()
+            )
+        )
 
     def accrued_at_purchase(self):
         """
@@ -512,7 +534,7 @@ class ReverseConvertible:
     
     def worst_underlying(self):
         if self.is_multi():
-            idx = np.argmin(self.performances())
+            idx = np.argmin(self.delivery_performances())
             return self.underlyings[idx]
         return self.underlyings[0]
     def summary(self):
@@ -542,7 +564,7 @@ class ReverseConvertible:
             "total_notional": self.total_notional,
             "maturity_date": self.row["maturity_date"],
             "days_to_expiry": days_to_expiry,
-            "performance": self.performance() - 1,
+            "performance": self.delivery_performance() - 1,
             "barrier_breached": self.barrier_breached(),
             "worst_underlying": self.worst_underlying(),
             "payoff_per_unit": self.payoff() / self.position_units,

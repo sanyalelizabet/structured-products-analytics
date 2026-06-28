@@ -71,15 +71,15 @@ class TestPerformances:
     def test_performances_at_par(self):
         # final == strike → performance == 1.0
         rc = brc(final_pct=0.0, current_spot=100.0, strike=100.0)
-        assert abs(rc.performances()[0] - 1.0) < 1e-9
+        assert abs(rc.delivery_performances()[0] - 1.0) < 1e-9
 
     def test_performances_above_strike(self):
         rc = brc(final_pct=10.0, current_spot=100.0, strike=100.0)
-        assert abs(rc.performances()[0] - 1.10) < 1e-9
+        assert abs(rc.delivery_performances()[0] - 1.10) < 1e-9
 
     def test_performances_below_strike(self):
         rc = brc(final_pct=-20.0, current_spot=100.0, strike=100.0)
-        assert abs(rc.performances()[0] - 0.80) < 1e-9
+        assert abs(rc.delivery_performances()[0] - 0.80) < 1e-9
 
     def test_current_performances_uses_spot_not_final(self):
         rc = brc(current_spot=90.0, strike=100.0)
@@ -87,11 +87,11 @@ class TestPerformances:
 
     def test_mbrc_performances_length(self):
         rc = mbrc()
-        assert len(rc.performances()) == 2
+        assert len(rc.delivery_performances()) == 2
 
     def test_performance_brc_is_single(self):
         rc = brc(final_pct=-10.0, current_spot=100.0, strike=100.0)
-        assert abs(rc.performance() - rc.performances()[0]) < 1e-9
+        assert abs(rc.delivery_performance() - rc.delivery_performances()[0]) < 1e-9
 
     def test_performance_mbrc_is_worst_of(self):
         rc = mbrc(
@@ -99,7 +99,7 @@ class TestPerformances:
             current_spots=[100.0, 100.0],
             strikes=[100.0, 100.0],
         )
-        assert abs(rc.performance() - min(rc.performances())) < 1e-9
+        assert abs(rc.delivery_performance() - min(rc.delivery_performances())) < 1e-9
 
 
 # ─────────────────────────────────────────
@@ -276,6 +276,37 @@ class TestBreakEven:
         rc_low = brc(coupon=0.05)
         rc_high = brc(coupon=0.10)
         assert rc_high.break_even() < rc_low.break_even()
+
+
+class TestStrikeDifferentFromInitial:
+    """When `strike ≠ initial`, the spec splits the two references:
+    the barrier is referenced to the initial fixing level, and the
+    redemption on breach is referenced to the strike.
+    """
+
+    def test_breach_uses_initial_redemption_uses_strike(self):
+        # initial = 100, barrier_pct = 0.60 → barrier = 60.
+        # strike = 80 (off-ATM, different from initial).
+        # final = current_spot × (1 + final_pct/100) = 100 × 0.55 = 55.
+        # 55 ≤ 60 → breach. Redemption = N × 55 / 80 = 68_750.
+        rc = brc(
+            notional=100_000,
+            initial_level=100.0, strike=80.0, barrier_pct=0.60,
+            current_spot=100.0, final_pct=-45.0,
+        )
+        assert rc.barrier_breached() is True
+        assert abs(rc.redemption() - 100_000 * 55 / 80) < 1e-9
+
+    def test_no_breach_with_off_atm_strike_redeems_at_par(self):
+        # Same fixture but final = 70 > barrier 60 → no breach. Par
+        # redemption, independent of the strike.
+        rc = brc(
+            notional=100_000,
+            initial_level=100.0, strike=80.0, barrier_pct=0.60,
+            current_spot=100.0, final_pct=-30.0,
+        )
+        assert rc.barrier_breached() is False
+        assert rc.redemption() == 100_000
 
 
 class TestWorstUnderlying:

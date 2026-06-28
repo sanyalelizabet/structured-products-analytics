@@ -134,6 +134,14 @@ FIELDS: list[Field] = [
           applies_to=BARRIER_TYPES, default=0.0,
           placeholder="e.g. 0.08 for 8 %/yr",
           help="Annualised coupon rate as a decimal. 0.08 means 8 %/yr."),
+    Field("coupon_dates", "Coupon payment dates", "list_iso_date",
+          applies_to=BARRIER_TYPES, required=False,
+          placeholder="e.g. 2025-06-01, 2025-12-01, 2026-06-01, 2026-12-01",
+          help="Comma-separated YYYY-MM-DD dates on which coupons are paid, "
+               "in chronological order. Leave blank to default to a single "
+               "bullet coupon paid at maturity — but supplying the real "
+               "schedule is required for YTM, accrued interest, and break-even "
+               "to reflect the product correctly."),
 
     # ----- AC_BRC only ----------------------------------------------------
     Field("autocall_obs_dates",   "Autocall observation dates", "list_iso_date",

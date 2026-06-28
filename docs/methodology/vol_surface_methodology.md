@@ -379,7 +379,7 @@ surface status badge and the data feed will be evaluated against a
 paid alternative (IVolatility, ORATS, OptionMetrics) when the
 calibration coverage observed in production usage motivates the
 expense.
-
+ 
 ## 8. Surface integration in the Monte Carlo pricer
 
 The Monte Carlo pricer consumes the volatility surface in one of two

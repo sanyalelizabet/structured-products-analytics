@@ -122,9 +122,31 @@ class TestEarliestCall:
         v = vectorised_autocallable_rc_summary(row, paths, grid)
 
         # First obs is 2024-04-01 → 91 days from initial fixing → T ≈ 91/360
+        # (default day-count = ACT/360 when row has no explicit day_count).
         T_call = (pd.Timestamp("2024-04-01") - pd.Timestamp("2024-01-01")).days / 360
         expected_payoff = 100_000 * (1.0 + 0.08 * T_call)
         assert v["total_payoff"][0] == pytest.approx(expected_payoff, rel=1e-9)
+
+    def test_call_accrual_respects_contractual_day_count_act_365(self):
+        # Regression for F-01: the pro-rata call accrual must use the
+        # contractual day-count from the row, not a hard-coded /360.
+        row = _make_ac_row(coupon=0.08, notional=100_000,
+                           initial_fixing_date="2024-01-01")
+        row["day_count"] = "ACT/365"
+        grid  = _grid()
+        paths = _flat_paths(grid, n_assets=1, levels=[110.0])
+
+        v = vectorised_autocallable_rc_summary(row, paths, grid)
+
+        # 91 days from 2024-01-01 to 2024-04-01 → T ≈ 91/365 under ACT/365.
+        T_call_365 = (pd.Timestamp("2024-04-01") - pd.Timestamp("2024-01-01")).days / 365
+        expected_payoff = 100_000 * (1.0 + 0.08 * T_call_365)
+        assert v["total_payoff"][0] == pytest.approx(expected_payoff, rel=1e-9)
+
+        # Sanity: confirms the answer differs from the old (ACT/360 default) value.
+        T_call_360 = (pd.Timestamp("2024-04-01") - pd.Timestamp("2024-01-01")).days / 360
+        wrong_payoff = 100_000 * (1.0 + 0.08 * T_call_360)
+        assert abs(v["total_payoff"][0] - wrong_payoff) > 1.0
 
 
 # ──────────────────────────────────────────────────────────────────────────

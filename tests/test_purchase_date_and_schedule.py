@@ -246,7 +246,10 @@ class TestCouponPaymentFromSchedule:
         # Two periods × notional × coupon × 1.0 each
         assert abs(rc.coupon_payment() - 2 * 100_000 * 0.08) < 1e-9
 
-    def test_break_even_uses_total_coupon(self):
+    def test_break_even_at_issuance_equals_full_life_coupon(self):
+        # When purchase date equals initial fixing, no coupons are excluded:
+        # future coupons from purchase date == full-life coupons, so
+        # break_even = 1 − full_life_coupon / notional = 1 − 0.16 = 0.84.
         row = row_with(
             initial_fixing_date="2024-01-01",
             maturity_date="2026-01-01",
@@ -254,5 +257,41 @@ class TestCouponPaymentFromSchedule:
             day_count="30/360",
         )
         rc = ReverseConvertible(row)
-        # break_even = 1 - total_coupon / notional = 1 - 0.16 = 0.84
         assert abs(rc.break_even() - 0.84) < 1e-9
+
+    def test_coupon_payment_excludes_pre_purchase_coupons(self):
+        # Two-year 8% product bought after the first coupon has been paid:
+        # only the second coupon (year 2) should appear in coupon_payment().
+        # Full-life coupon would be 0.16 × notional; post-purchase only is 0.08.
+        # Regression test for validation finding F-03.
+        row = row_with(
+            initial_fixing_date="2024-01-01",
+            maturity_date="2026-01-01",
+            coupon_dates=["2025-01-01", "2026-01-01"],
+            day_count="30/360",
+            purchase_date="2025-06-01",   # after the first coupon
+        )
+        rc = ReverseConvertible(row)
+        expected_one_coupon = 100_000 * 0.08
+        assert abs(rc.coupon_payment() - expected_one_coupon) < 1e-9
+
+    def test_break_even_higher_after_post_issuance_purchase(self):
+        # The buyer who joins after a coupon was already paid receives less
+        # coupon cushion, so the break-even performance level must rise.
+        # Regression test for validation finding F-03.
+        base = row_with(
+            initial_fixing_date="2024-01-01",
+            maturity_date="2026-01-01",
+            coupon_dates=["2025-01-01", "2026-01-01"],
+            day_count="30/360",
+        )
+        rc_at_issuance = ReverseConvertible(base)
+
+        late = base.copy()
+        late["purchase_date"] = "2025-06-01"
+        rc_late = ReverseConvertible(late)
+
+        assert rc_late.break_even() > rc_at_issuance.break_even()
+        # Late buyer keeps only the second coupon (0.08), so
+        # break_even = 1 − 0.08 = 0.92.
+        assert abs(rc_late.break_even() - 0.92) < 1e-9
